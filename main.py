@@ -7,7 +7,7 @@ from pathlib import Path
 
 from store import SoundboardStore
 from ai_analyzer import AIAnalyzer
-from audio_engine import AudioEngine
+from audio_engine import AudioEngine, compute_waveform_peaks
 from hotkeys import HotkeyManager
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -167,10 +167,15 @@ class SoundboardAPI:
             return {"ok": False, "error": "Clip não encontrado"}
 
         settings = self._store.state["settings"]
+        eff_dur = max(
+            0.2,
+            float(clip.get("trim_end") or clip.get("duration") or 1.5) - float(clip.get("trim_start") or 0.0),
+        )
         play_id = self._audio.play_clip(
             clip=clip,
             settings=settings,
             on_finish=lambda cid, pid: self._notify_ui("clip_finished", {"clip_id": cid, "play_id": pid}),
+            on_tick=lambda st: self._notify_ui("playback_tick", st),
             monitor_only=bool(monitor_only),
         )
         if not monitor_only:
@@ -178,9 +183,68 @@ class SoundboardAPI:
         self._notify_ui("clip_started", {
             "clip_id": clip_id,
             "play_id": play_id,
-            "duration": max(0.2, float(clip.get("trim_end") or clip.get("duration") or 1.5) - float(clip.get("trim_start") or 0.0)),
+            "duration": eff_dur,
+            "monitor_only": bool(monitor_only),
+            "live_volume": float(clip.get("volume", 1.0)),
         })
         return {"ok": True, "play_id": play_id}
+
+    def pause_resume_playback(self, play_id: str = None) -> dict:
+        sess = self._audio.get_session(play_id)
+        if not sess:
+            return {"ok": False}
+        paused = sess.toggle_pause()
+        st = sess.status()
+        self._notify_ui("playback_tick", st)
+        return {"ok": True, "paused": paused, "status": st}
+
+    def seek_playback(self, position_s: float, play_id: str = None) -> dict:
+        sess = self._audio.get_session(play_id)
+        if not sess:
+            return {"ok": False}
+        sess.seek(position_s)
+        st = sess.status()
+        self._notify_ui("playback_tick", st)
+        return {"ok": True, "status": st}
+
+    def set_playback_loop(self, loop: bool, play_id: str = None) -> dict:
+        sess = self._audio.get_session(play_id)
+        if not sess:
+            return {"ok": False}
+        loop_val = sess.set_loop(loop)
+        st = sess.status()
+        self._notify_ui("playback_tick", st)
+        return {"ok": True, "loop": loop_val, "status": st}
+
+    def set_live_clip_volume(self, volume: float, play_id: str = None) -> dict:
+        sess = self._audio.get_session(play_id)
+        if not sess:
+            return {"ok": False}
+        vol = sess.set_live_volume(volume)
+        self._store.add_or_update_clip({"id": sess.clip_id, "volume": vol})
+        st = sess.status()
+        self._notify_ui("playback_tick", st)
+        return {"ok": True, "volume": vol, "status": st}
+
+    def restart_playback(self, play_id: str = None) -> dict:
+        sess = self._audio.get_session(play_id)
+        if not sess:
+            return {"ok": False}
+        sess.restart()
+        st = sess.status()
+        self._notify_ui("playback_tick", st)
+        return {"ok": True, "status": st}
+
+    def get_clip_waveform(self, clip_id: str, num_bins: int = 160) -> dict:
+        clip = self._store.get_clip(clip_id)
+        if not clip or not clip.get("file_path") or not os.path.exists(clip["file_path"]):
+            return {"ok": False, "peaks": []}
+        try:
+            raw_audio, dur = self._audio.load_clip_stereo_48k(clip["file_path"])
+            peaks = compute_waveform_peaks(raw_audio, num_bins=num_bins)
+            return {"ok": True, "peaks": peaks, "duration": round(dur, 2)}
+        except Exception:
+            return {"ok": False, "peaks": []}
 
     def stop_all(self) -> dict:
         self._audio.stop_all()

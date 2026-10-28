@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 from store import SoundboardStore
 from ai_analyzer import analyze_acoustics, generate_smart_metadata, merge_diarized_segments
-from audio_engine import trim_and_normalize, ReplayRingBuffer
+from audio_engine import trim_and_normalize, ReplayRingBuffer, compute_waveform_peaks, PlaybackSession
 from main import SoundboardAPI
 
 
@@ -189,6 +189,43 @@ def test_delete_speaker_and_vinheta_import_without_person(tmp_path):
     assert imported_clip["category"] == "Vinhetas"
     assert imported_clip["speaker_id"] == ""
     assert imported_clip["speaker_ids"] == []
+
+
+def test_waveform_peaks_and_playback_session_controls(tmp_path):
+    import soundfile as sf
+
+    sr = 48000
+    # First half silent, second half loud
+    first_half = np.zeros((sr, 2), dtype=np.float32)
+    second_half = np.ones((sr, 2), dtype=np.float32) * 0.8
+    audio = np.vstack([first_half, second_half])
+
+    peaks = compute_waveform_peaks(audio, num_bins=40)
+    assert len(peaks) == 40
+    assert max(peaks[:18]) == 0.0
+    assert min(peaks[22:]) > 0.9
+
+    session = PlaybackSession(play_id="p1", clip_id="c1", data=audio, sr=sr)
+    assert session.paused is False
+    session.toggle_pause()
+    assert session.paused is True
+    session.seek(1.0)
+    assert session.pos_idx == sr
+    session.set_loop(True)
+    assert session.loop is True
+    session.set_live_volume(1.35)
+    assert np.isclose(session.live_volume, 1.35)
+    session.restart()
+    assert session.pos_idx == 0
+
+    wav_path = tmp_path / "wave_test.wav"
+    sf.write(str(wav_path), audio, sr)
+    api = SoundboardAPI(data_dir=str(tmp_path / "api_wave"), start_background_services=False)
+    clip = api._store.add_or_update_clip({"title": "Wave", "file_path": str(wav_path), "duration": 2.0})
+    wf = api.get_clip_waveform(clip["id"], num_bins=60)
+    assert wf["ok"] is True
+    assert len(wf["peaks"]) == 60
+
 
 
 

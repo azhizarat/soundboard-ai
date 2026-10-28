@@ -65,6 +65,104 @@ def trim_and_normalize(
     return sliced
 
 
+def compute_waveform_peaks(audio: np.ndarray, num_bins: int = 160) -> list[float]:
+    """Computes normalized [0.0..1.0] amplitude peaks across num_bins for visual waveform rendering."""
+    num_bins = max(8, int(num_bins))
+    if audio is None or len(audio) == 0:
+        return [0.0] * num_bins
+
+    arr = np.asarray(audio, dtype=np.float32)
+    if arr.ndim > 1:
+        mono = np.max(np.abs(arr), axis=1)
+    else:
+        mono = np.abs(arr)
+
+    if len(mono) < num_bins:
+        padded = np.zeros(num_bins, dtype=np.float32)
+        padded[: len(mono)] = mono
+        mono = padded
+
+    edges = np.linspace(0, len(mono), num_bins + 1, dtype=int)
+    peaks = []
+    for i in range(num_bins):
+        seg = mono[edges[i] : max(edges[i] + 1, edges[i + 1])]
+        peaks.append(float(np.max(seg)) if len(seg) > 0 else 0.0)
+
+    max_p = max(peaks) if peaks else 0.0
+    if max_p <= 1e-4:
+        return [0.0] * num_bins
+    return [round(float(p / max_p), 3) for p in peaks]
+
+
+class PlaybackSession:
+    """Represents an active clip playback with live pause/resume, seek, loop, and live volume controls."""
+
+    def __init__(
+        self,
+        play_id: str,
+        clip_id: str,
+        data: np.ndarray,
+        sr: int = 48000,
+        monitor_only: bool = False,
+        live_volume: float = 1.0,
+    ):
+        self.play_id = play_id
+        self.clip_id = clip_id
+        self.data = data
+        self.sr = int(sr)
+        self.total_samples = len(data)
+        self.duration_s = round(float(self.total_samples / max(1, self.sr)), 2)
+        self.pos_idx = 0
+        self.paused = False
+        self.loop = False
+        self.monitor_only = bool(monitor_only)
+        self.live_volume = float(live_volume)
+        self.stop_event = threading.Event()
+        self._lock = threading.Lock()
+
+    def toggle_pause(self) -> bool:
+        with self._lock:
+            self.paused = not self.paused
+            return self.paused
+
+    def seek(self, position_s: float):
+        with self._lock:
+            target = int(round(max(0.0, float(position_s)) * self.sr))
+            self.pos_idx = max(0, min(max(0, self.total_samples - 1), target))
+
+    def set_loop(self, loop: bool) -> bool:
+        with self._lock:
+            self.loop = bool(loop)
+            return self.loop
+
+    def set_live_volume(self, volume: float) -> float:
+        with self._lock:
+            self.live_volume = max(0.0, min(3.0, float(volume)))
+            return self.live_volume
+
+    def restart(self):
+        with self._lock:
+            self.pos_idx = 0
+            self.paused = False
+
+    def stop(self):
+        self.stop_event.set()
+
+    def status(self) -> dict:
+        with self._lock:
+            cur_s = round(float(self.pos_idx / max(1, self.sr)), 2)
+            return {
+                "play_id": self.play_id,
+                "clip_id": self.clip_id,
+                "current_s": cur_s,
+                "duration_s": self.duration_s,
+                "paused": self.paused,
+                "loop": self.loop,
+                "live_volume": round(self.live_volume, 2),
+                "monitor_only": self.monitor_only,
+            }
+
+
 class ReplayRingBuffer:
     """Thread-safe circular audio buffer storing the last N seconds of system/call audio."""
 
@@ -128,6 +226,8 @@ class AudioEngine:
         self.replay_buffer = ReplayRingBuffer(max_seconds=replay_seconds, sr=self.TARGET_SR, channels=2)
         self._cache = {}
         self._active_events = {}
+        self._sessions: dict[str, PlaybackSession] = {}
+        self._latest_play_id: str | None = None
         self._lock = threading.Lock()
         self._mic_stop_event = None
         self._mic_thread = None
@@ -252,30 +352,83 @@ class AudioEngine:
         self._cache[norm_key] = {"mtime": mtime, "data": data, "duration": dur}
         return data, dur
 
-    def _stream_to_device(self, data: np.ndarray, device_id: int | None, gain: float, stop_event: threading.Event):
-        if gain <= 0.001 or len(data) == 0:
+    def _stream_session_to_device(
+        self,
+        session: PlaybackSession,
+        device_id: int | None,
+        base_gain: float,
+        is_driver: bool,
+        on_tick=None,
+    ):
+        if base_gain <= 0.001 or session.total_samples == 0:
             return
         try:
             import sounddevice as sd
-            scaled = np.clip(data * float(gain), -1.0, 1.0).astype(np.float32)
-            chunk_size = 2048
+
+            chunk_size = 1024
+            last_tick = 0.0
+            local_idx = 0
+
             with sd.OutputStream(
                 samplerate=self.TARGET_SR,
-                 device=device_id,
+                device=device_id,
                 channels=2,
                 dtype="float32",
                 blocksize=chunk_size,
             ) as stream:
-                idx = 0
-                total = len(scaled)
-                while idx < total and not stop_event.is_set():
-                    end = min(idx + chunk_size, total)
-                    stream.write(scaled[idx:end])
-                    idx = end
+                while not session.stop_event.is_set():
+                    if session.paused:
+                        time.sleep(0.03)
+                        continue
+
+                    if is_driver:
+                        with session._lock:
+                            cur = session.pos_idx
+                            if cur >= session.total_samples:
+                                if session.loop:
+                                    session.pos_idx = 0
+                                    cur = 0
+                                else:
+                                    break
+                            end = min(cur + chunk_size, session.total_samples)
+                            raw_slice = session.data[cur:end]
+                            session.pos_idx = end
+                            live_v = session.live_volume
+                    else:
+                        with session._lock:
+                            cur = session.pos_idx
+                            live_v = session.live_volume
+                            if cur >= session.total_samples and not session.loop:
+                                break
+                        # Secondary stream follows driver position closely
+                        read_st = max(0, min(cur, session.total_samples - chunk_size))
+                        end = min(read_st + chunk_size, session.total_samples)
+                        raw_slice = session.data[read_st:end]
+                        if len(raw_slice) == 0:
+                            break
+
+                    scaled = np.clip(raw_slice * float(base_gain * live_v), -1.0, 1.0).astype(np.float32)
+                    stream.write(scaled)
+
+                    if is_driver and callable(on_tick):
+                        now = time.time()
+                        if now - last_tick >= 0.08:
+                            last_tick = now
+                            try:
+                                on_tick(session.status())
+                            except Exception:
+                                pass
         except Exception:
             pass
 
-    def play_clip(self, clip: dict, settings: dict, on_finish=None, monitor_only: bool = False) -> str:
+    def play_clip(
+        self,
+        clip: dict,
+        settings: dict,
+        on_finish=None,
+        on_tick=None,
+        monitor_only: bool = False,
+    ) -> str:
         file_path = clip.get("file_path", "")
         if not file_path or not os.path.exists(file_path):
             return ""
@@ -289,14 +442,23 @@ class AudioEngine:
             sr=self.TARGET_SR,
             trim_start=float(clip.get("trim_start", 0.0)),
             trim_end=float(clip.get("trim_end", 0.0)),
-            volume=float(clip.get("volume", 1.0)),
+            volume=1.0,
             normalize=bool(settings.get("normalize_on_import", True)),
         )
 
         play_id = uuid.uuid4().hex[:8]
-        stop_event = threading.Event()
+        session = PlaybackSession(
+            play_id=play_id,
+            clip_id=clip.get("id", ""),
+            data=processed,
+            sr=self.TARGET_SR,
+            monitor_only=monitor_only,
+            live_volume=float(clip.get("volume", 1.0)),
+        )
         with self._lock:
-            self._active_events[play_id] = stop_event
+            self._active_events[play_id] = session.stop_event
+            self._sessions[play_id] = session
+            self._latest_play_id = play_id
 
         cable_id = settings.get("cable_device_id")
         monitor_id = settings.get("monitor_device_id")
@@ -305,21 +467,28 @@ class AudioEngine:
 
         def _runner():
             threads = []
-            # Play on VB-Audio Cable Input (unless previewing in monitor_only mode)
-            if not monitor_only and cable_id is not None and cable_vol > 0.001:
+            has_cable = (not monitor_only) and (cable_id is not None) and (cable_vol > 0.001)
+            has_monitor = (monitor_vol > 0.001) and (monitor_only or monitor_id != cable_id)
+
+            if has_cable:
                 t_cable = threading.Thread(
-                    target=self._stream_to_device,
-                    args=(processed, int(cable_id), cable_vol, stop_event),
+                    target=self._stream_session_to_device,
+                    args=(session, int(cable_id), cable_vol, True, on_tick),
                     daemon=True,
                 )
                 threads.append(t_cable)
                 t_cable.start()
 
-            # Play on Monitor Output (avoid double-streaming if cable_id == monitor_id)
-            if monitor_vol > 0.001 and (monitor_only or monitor_id != cable_id):
+            if has_monitor:
                 t_mon = threading.Thread(
-                    target=self._stream_to_device,
-                    args=(processed, int(monitor_id) if monitor_id is not None else None, monitor_vol, stop_event),
+                    target=self._stream_session_to_device,
+                    args=(
+                        session,
+                        int(monitor_id) if monitor_id is not None else None,
+                        monitor_vol,
+                        not has_cable,
+                        on_tick if not has_cable else None,
+                    ),
                     daemon=True,
                 )
                 threads.append(t_mon)
@@ -330,6 +499,9 @@ class AudioEngine:
 
             with self._lock:
                 self._active_events.pop(play_id, None)
+                self._sessions.pop(play_id, None)
+                if self._latest_play_id == play_id:
+                    self._latest_play_id = next(iter(self._sessions.keys()), None)
             if callable(on_finish):
                 try:
                     on_finish(clip.get("id"), play_id)
@@ -339,10 +511,17 @@ class AudioEngine:
         threading.Thread(target=_runner, daemon=True).start()
         return play_id
 
+    def get_session(self, play_id: str = None) -> PlaybackSession | None:
+        with self._lock:
+            pid = play_id or self._latest_play_id
+            return self._sessions.get(pid) if pid else None
+
     def stop_all(self):
         with self._lock:
             events = list(self._active_events.values())
             self._active_events.clear()
+            self._sessions.clear()
+            self._latest_play_id = None
         for ev in events:
             ev.set()
 

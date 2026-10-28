@@ -1,326 +1,150 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Soundboard AI — VB-Audio Cable Studio</title>
-  <link rel="stylesheet" href="styles.css" />
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Soundboard AI — Console de áudio</title>
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div id="app" class="app-shell">
-    <!-- Top Control Deck -->
-    <header class="top-deck">
-      <div class="brand-area">
-        <div class="logo-orb">🎛️</div>
-        <div class="brand-text">
-          <h1>Soundboard <span class="accent-badge">AI</span></h1>
-          <span id="cableStatusBadge" class="status-pill status-ok">VB-Cable Conectado</span>
-        </div>
+<div id="app" class="app-shell">
+  <header class="top-deck">
+    <a class="brand-area" href="#soundGrid" aria-label="Soundboard, ir para os áudios">
+      <span class="logo-orb"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h9m4 0h3M4 17h3m4 0h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></span>
+      <span class="brand-text od-field"><strong>Soundboard<span class="accent-badge">AI</span></strong><span class="brand-caption">SEU CONSOLE DE ÁUDIO</span></span>
+    </a>
+    <div class="deck-actions">
+      <button id="btnRouting" class="btn btn-secondary" aria-expanded="true" aria-controls="routingPanel"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h9m4 0h3M4 17h3m4 0h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg><span>Áudio</span></button>
+      <button id="btnMiniOverlay" class="btn btn-secondary" title="Modo compacto · Ctrl+Shift+O"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M13 12h8v8h-8Z"/></svg><span>Compacto</span></button>
+      <div class="replay-control-group">
+        <button id="btnReplayClip" class="btn btn-replay" title="Capturar áudio recente · Alt+F10"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V4h4m8 0h4v4M4 16v4h4m8 0h4v-4"/><circle cx="12" cy="12" r="4"/></svg><span>Clipar call <span class="replay-inline">· <span id="replaySecsLabel">15</span>s</span></span><kbd>Alt F10</kbd></button>
+        <select id="replaySecondsInput" aria-label="Duração da captura">
+          <option value="2">2s</option><option value="3">3s</option><option value="5">5s</option><option value="8">8s</option><option value="10">10s</option><option value="15" selected>15s</option><option value="20">20s</option><option value="30">30s</option><option value="45">45s</option><option value="60">60s</option>
+        </select>
       </div>
-
-      <div class="routing-controls">
-        <div class="device-group">
-          <label title="Dispositivo VB-Audio CABLE Input que envia o som para o seu CABLE Output no Discord/Jogo">
-            🔌 Saída p/ Cable Output (VB-Audio)
-          </label>
-          <div class="device-row">
-            <select id="cableDeviceSelect"></select>
-            <input type="range" id="cableVolumeSlider" min="0" max="1.5" step="0.02" value="1.0" title="Volume no Cabo Virtual" />
-            <span id="cableVolumeVal" class="vol-label">100%</span>
-          </div>
-        </div>
-
-        <div class="device-group">
-          <label title="Seu fone/caixa de som para você ouvir o que está soltando">
-            🎧 Monitor Local (Seu Fone)
-          </label>
-          <div class="device-row">
-            <select id="monitorDeviceSelect"></select>
-            <input type="range" id="monitorVolumeSlider" min="0" max="1.5" step="0.02" value="0.75" title="Volume no seu Fone" />
-            <span id="monitorVolumeVal" class="vol-label">75%</span>
-          </div>
-        </div>
-
-        <div class="toggles-group">
-          <label class="toggle-chip" title="Encaminha seu microfone físico direto para o CABLE Input em tempo real">
-            <input type="checkbox" id="micPassthroughToggle" />
-            <span>🎙️ Mic no Cabo</span>
-          </label>
-          <label class="toggle-chip" title="Permite tocar vários áudios ao mesmo tempo sem cortar o anterior">
-            <input type="checkbox" id="overlapToggle" />
-            <span>🔀 Sobrepor</span>
-          </label>
-          <label class="toggle-chip" title="Quando ativado, o Clipar Call já divide automaticamente cada fala/amigo em um botão separado">
-            <input type="checkbox" id="autoSplitToggle" />
-            <span>✂️ Auto-Separar Vozes</span>
-          </label>
-        </div>
-      </div>
-
-      <div class="deck-actions">
-        <div class="replay-control-group" title="Escolha quantos segundos da call quer salvar e clique em Clipar Call (ou aperte Alt+F10)">
-          <button id="btnReplayClip" class="btn btn-replay">
-            ⚡ Clipar Call (<span id="replaySecsLabel">15</span>s)
-          </button>
-          <div class="replay-duration-picker">
-            <select id="replaySecondsInput" title="Selecione o intervalo do clip da call">
-              <option value="2">2s</option>
-              <option value="3">3s</option>
-              <option value="5">5s</option>
-              <option value="8">8s</option>
-              <option value="10">10s</option>
-              <option value="15" selected>15s</option>
-              <option value="20">20s</option>
-              <option value="30">30s</option>
-              <option value="45">45s</option>
-              <option value="60">60s</option>
-            </select>
-          </div>
-        </div>
-        <button id="btnImportFiles" class="btn btn-secondary" title="Importar áudios identificando quem falou e classificando com IA">
-          ➕ Áudios (IA)
-        </button>
-        <button id="btnImportVinheta" class="btn btn-vinheta" title="Importar efeitos/músicas direto para a categoria 'Vinhetas' (sem associar a nenhuma pessoa)">
-          🎵 + Vinheta
-        </button>
-        <button id="btnImportFolder" class="btn btn-secondary" title="Importar pasta 'separados' (com mapa_de_falas.json) ou pasta de áudios">
-          📂 Pasta
-        </button>
-        <button id="btnStopAll" class="btn btn-danger" title="Parar todos os sons imediatamente (Ctrl+Shift+S)">
-          🛑 Stop
-        </button>
-        <button id="btnMiniOverlay" class="btn btn-icon" title="Alternar Modo Mini-Overlay Flutuante Always-on-Top (Ctrl+Shift+O)">
-          📌
-        </button>
-      </div>
-    </header>
-
-    <!-- Live Progress Bar for Imports & AI Processing -->
-    <div id="progressBanner" class="progress-banner hidden">
-      <div class="progress-info-row">
-        <div class="progress-left">
-          <span class="spinner-dot"></span>
-          <strong id="progressLabel">Processando áudios...</strong>
-          <span id="progressDetail" class="progress-detail"></span>
-        </div>
-        <span id="progressPercent" class="progress-pct">0%</span>
-      </div>
-      <div class="progress-track">
-        <div id="progressFill" class="progress-fill" style="width: 0%"></div>
-      </div>
+      <button id="btnStopAll" class="btn btn-danger" title="Parar todos os áudios · Ctrl+Shift+S"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg><span>Parar tudo</span></button>
     </div>
+  </header>
 
-    <!-- Discovered 'separados' quick-import banner -->
-    <div id="quickImportBar" class="quick-import-bar hidden">
-      <span>✨ Pastas do separador de vozes detectadas em <b>Videos</b>:</span>
-      <div id="quickImportChips" class="quick-chips"></div>
+  <section id="routingPanel" class="routing-controls" aria-label="Saídas e opções de áudio">
+    <div class="device-group">
+      <div class="device-heading"><label for="cableDeviceSelect"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9h4l5-5v16l-5-5H4ZM17 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></svg>Saída para a call</label><span id="cableStatusBadge" class="status-pill">Conectando…</span></div>
+      <div class="device-row"><select id="cableDeviceSelect" aria-label="Dispositivo de saída para a call"><option>Aguardando aplicativo</option></select><input id="cableVolumeSlider" type="range" min="0" max="1.5" step="0.02" value="1" aria-label="Volume na call"><output id="cableVolumeVal" class="vol-label">100%</output></div>
     </div>
-
-    <!-- Main Workspace -->
-    <div class="workspace">
-      <!-- Sidebar: Categories & Recognized Speakers -->
-      <aside class="sidebar">
-        <div class="sidebar-section">
-          <h3>CATEGORIAS</h3>
-          <div id="categoryList" class="nav-list"></div>
-        </div>
-
-        <div class="sidebar-section">
-          <div class="section-header-row">
-            <h3>VOZES / AMIGOS</h3>
-            <span class="hint-tag" title="Clique no lápis ao lado de cada interlocutor para dar o nome real do seu amigo!">Renomear</span>
-          </div>
-          <div id="speakerList" class="nav-list"></div>
-        </div>
-
-        <div class="sidebar-section ai-status-box">
-          <div class="ai-status-title">🧠 IA Local Ativa</div>
-          <p id="aiStatusText">TitaNet Speaker ID + Faster-Whisper + Análise Acústica de Emoção</p>
-        </div>
-      </aside>
-
-      <!-- Soundpad Area -->
-      <main class="pad-container">
-        <div class="search-toolbar">
-          <div class="search-input-wrap">
-            <span class="search-icon">🔍</span>
-            <input
-              type="text"
-              id="searchInput"
-              placeholder="Buscar por nome do botão, frase falada na transcrição, amigo, humor ou atalho (Ctrl+F)..."
-            />
-            <button id="btnClearSearch" class="btn-clear hidden" title="Limpar busca">✕</button>
-          </div>
-          <div class="toolbar-meta">
-            <label class="sort-wrap" title="Escolha a ordem em que os botões aparecem no grid">
-              <span>Ordenar:</span>
-              <select id="sortSelect">
-                <option value="newest" selected>🕒 Mais Recentes Primeiro</option>
-                <option value="most_played">🔥 Mais Tocados</option>
-                <option value="alpha">🔤 Nome (A → Z)</option>
-                <option value="shortest">⏱️ Duração (Menor → Maior)</option>
-              </select>
-            </label>
-            <span id="clipCountBadge">0 áudios</span>
-          </div>
-        </div>
-
-        <!-- Soundboard Grid -->
-        <div id="soundGrid" class="sound-grid"></div>
-      </main>
+    <div class="device-group">
+      <div class="device-heading"><label for="monitorDeviceSelect"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 14v-3a9 9 0 0 1 18 0v3"/><rect x="3" y="12" width="4" height="8" rx="2"/><rect x="17" y="12" width="4" height="8" rx="2"/></svg>Meu fone</label><span class="device-note">Monitor local</span></div>
+      <div class="device-row"><select id="monitorDeviceSelect" aria-label="Dispositivo de monitoramento"><option>Aguardando aplicativo</option></select><input id="monitorVolumeSlider" type="range" min="0" max="1.5" step="0.02" value="0.75" aria-label="Volume no fone"><output id="monitorVolumeVal" class="vol-label">75%</output></div>
     </div>
-
-    <!-- Edit / Studio Modal -->
-    <div id="editModal" class="modal-backdrop hidden">
-      <div class="modal-card">
-        <div class="modal-header">
-          <h2 id="modalTitle">⚙️ Configurar Botão do Soundboard</h2>
-          <button id="btnCloseModal" class="btn-clear">✕</button>
-        </div>
-
-        <div class="modal-body">
-          <input type="hidden" id="editClipId" />
-
-          <div class="form-row">
-            <div class="form-group emoji-col">
-              <label>Emoji</label>
-              <input type="text" id="editEmoji" maxlength="4" value="🔊" />
-            </div>
-            <div class="form-group flex-1">
-              <label>Título do Botão</label>
-              <input type="text" id="editTitle" maxlength="40" placeholder="Ex: Relaxa que não esfola!" />
-            </div>
-            <div class="form-group color-col">
-              <label>Cor</label>
-              <input type="color" id="editColor" value="#3b82f6" />
-            </div>
-          </div>
-
-          <div class="form-row">
-            <div class="form-group flex-1">
-              <label>Categoria</label>
-              <select id="editCategory">
-                <option value="Rage">🔥 Rage / Surto</option>
-                <option value="Risada">😂 Risada</option>
-                <option value="Meme">🤡 Meme / Pérola</option>
-                <option value="Call">🎙️ Fala / Call</option>
-                <option value="Vinhetas">🎵 Vinhetas / Sons</option>
-                <option value="Efeito">🔊 Efeito Sonoro</option>
-                <option value="Clássico">👑 Clássico</option>
-              </select>
-            </div>
-            <div class="form-group flex-1">
-              <label>Quem falou (Interlocutor)</label>
-              <div class="speaker-select-row">
-                <select id="editSpeaker"></select>
-                <button type="button" id="btnEnrollVoice" class="btn btn-xs btn-secondary" title="Salva a voz deste áudio no referencias_vozes.npz para reconhecer este amigo nos próximos áudios">
-                  🎙️ Treinar Voz
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div class="form-row">
-            <div class="form-group flex-1">
-              <label>Atalho Global (Clique e pressione a tecla)</label>
-              <div class="hotkey-input-row">
-                <input type="text" id="editHotkey" placeholder="Ex: f9, alt+1, ctrl+num 1" readonly />
-                <button type="button" id="btnClearHotkey" class="btn btn-xs btn-secondary">Limpar</button>
-              </div>
-            </div>
-            <div class="form-group flex-1">
-              <label>Tom Acústico Detectado</label>
-              <input type="text" id="editMood" readonly class="readonly-input" />
-            </div>
-          </div>
-
-          <div class="form-group">
-            <label>Transcrição (Usada na busca e nomeação por IA)</label>
-            <textarea id="editTranscript" rows="2" placeholder="Texto falado no áudio..."></textarea>
-          </div>
-
-          <div class="trim-section">
-            <div class="trim-header-row">
-              <span class="trim-title">✂️ Tamanho / Corte do Clip (Duração Final: <b id="trimTotalDurationVal">0.00s</b>)</span>
-              <div class="trim-presets">
-                <button type="button" class="btn-preset" data-preset="first3">Início 3s</button>
-                <button type="button" class="btn-preset" data-preset="first5">Início 5s</button>
-                <button type="button" class="btn-preset" data-preset="last3">Final 3s</button>
-                <button type="button" class="btn-preset" data-preset="last5">Final 5s</button>
-                <button type="button" class="btn-preset" data-preset="full">Inteiro</button>
-              </div>
-            </div>
-            <div class="form-row trim-box">
-              <div class="form-group flex-1">
-                <div class="label-with-num">
-                  <label>Corte Início (s)</label>
-                  <input type="number" id="editTrimStartNum" min="0" max="600" step="0.1" value="0" class="num-mini" />
-                </div>
-                <input type="range" id="editTrimStart" min="0" max="10" step="0.01" value="0" />
-              </div>
-              <div class="form-group flex-1">
-                <div class="label-with-num">
-                  <label>Corte Fim (s)</label>
-                  <input type="number" id="editTrimEndNum" min="0.1" max="600" step="0.1" value="10" class="num-mini" />
-                </div>
-                <input type="range" id="editTrimEnd" min="0.1" max="10" step="0.01" value="10" />
-              </div>
-              <div class="form-group flex-1">
-                <div class="label-with-num">
-                  <label>Ganho Individual</label>
-                  <span id="clipVolVal" class="vol-badge">100%</span>
-                </div>
-                <input type="range" id="editVolume" min="0.2" max="2.5" step="0.05" value="1.0" />
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="modal-footer">
-          <div class="left-footer-btns">
-            <button type="button" id="btnDeleteClip" class="btn btn-danger">🗑️ Excluir</button>
-            <button type="button" id="btnReanalyzeAI" class="btn btn-ai">✨ Re-analisar com IA</button>
-            <button type="button" id="btnSplitSpeakers" class="btn btn-secondary" title="Divide cada fala/interlocutor deste áudio em um botão individual no Soundboard">
-              ✂️ Separar Falas em Botões
-            </button>
-            <button type="button" id="btnPreviewMonitor" class="btn btn-secondary">🎧 Testar só no Fone</button>
-          </div>
-          <div class="right-footer-btns">
-            <button type="button" id="btnSaveClip" class="btn btn-primary">💾 Salvar</button>
-          </div>
-        </div>
-      </div>
+    <div class="toggles-group">
+      <label class="toggle-chip"><input type="checkbox" id="micPassthroughToggle"><span>Microfone na call</span></label>
+      <label class="toggle-chip"><input type="checkbox" id="overlapToggle"><span>Sobrepor áudios</span></label>
+      <label class="toggle-chip" title="Criar um botão para cada voz ao capturar a call"><input type="checkbox" id="autoSplitToggle"><span>Separar vozes ao clipar</span></label>
     </div>
+  </section>
 
-    <!-- Speaker Rename Modal -->
-    <div id="speakerModal" class="modal-backdrop hidden">
-      <div class="modal-card modal-sm">
-        <div class="modal-header">
-          <h2>🎙️ Renomear Amigo / Interlocutor</h2>
-          <button id="btnCloseSpeakerModal" class="btn-clear">✕</button>
-        </div>
-        <div class="modal-body">
-          <input type="hidden" id="renameSpeakerId" />
-          <div class="form-group">
-            <label>Nome do Amigo</label>
-            <input type="text" id="renameSpeakerName" placeholder="Ex: Diogo, João, Usuario..." />
-          </div>
-          <div class="form-group">
-            <label>Cor do Badge</label>
-            <input type="color" id="renameSpeakerColor" value="#3b82f6" />
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" id="btnDeleteSpeakerModal" class="btn btn-danger">🗑️ Excluir Pessoa</button>
-          <button type="button" id="btnSaveSpeaker" class="btn btn-primary">💾 Salvar Nome</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Toast Notification -->
-    <div id="toastContainer" class="toast-container"></div>
+  <div id="progressBanner" class="progress-banner hidden" role="status">
+    <div class="progress-info-row"><div class="progress-left"><span class="spinner-dot"></span><strong id="progressLabel">Processando áudios…</strong><span id="progressDetail"></span></div><span id="progressPercent">0%</span></div>
+    <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
   </div>
+  <div id="connectionNotice" class="connection-notice hidden" role="status"></div>
 
-  <script src="app.js"></script>
+  <div class="workspace">
+    <aside class="sidebar" aria-label="Filtros da biblioteca">
+      <div class="sidebar-section"><h2>BIBLIOTECA</h2><nav id="categoryList" class="nav-list" aria-label="Categorias"></nav></div>
+      <div class="sidebar-section"><div class="section-header-row"><h2>VOZES</h2><span class="hint-tag">Filtrar por pessoa</span></div><nav id="speakerList" class="nav-list" aria-label="Pessoas"></nav></div>
+      <div class="sidebar-bottom"><span class="local-mark"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/></svg> Inteligência local</span><p id="aiStatusText">Identificação de vozes, transcrição e classificação no seu computador.</p><div class="shortcut-note"><kbd>Ctrl F</kbd><span>Buscar na biblioteca</span></div></div>
+    </aside>
+    <main class="pad-container">
+      <div class="library-heading">
+        <div class="od-field"><span class="eyebrow">PRONTO PARA O PRÓXIMO MOMENTO</span><h1 id="libraryTitle">Todos os áudios</h1><p id="libraryDescription">Dispare na call. Ouça no fone. Guarde o que vale repetir.</p></div>
+        <details id="importMenu" class="import-menu"><summary class="btn btn-secondary"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg> Importar <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+          <div class="import-options">
+            <button id="btnImportFiles" class="import-option"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/></svg><span class="od-field"><strong>Áudios com IA</strong><small>Identificar vozes e transcrever</small></span></button>
+            <button id="btnImportVinheta" class="import-option"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13M9 9l12-2"/><ellipse cx="6" cy="18" rx="3" ry="3"/><ellipse cx="18" cy="16" rx="3" ry="3"/></svg><span class="od-field"><strong>Vinhetas e efeitos</strong><small>Importar sem associar uma pessoa</small></span></button>
+            <button id="btnImportFolder" class="import-option"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V4h6l2 3h10v13H3Z"/></svg><span class="od-field"><strong>Pasta de áudios</strong><small>Inclui pastas do separador de vozes</small></span></button>
+          </div>
+        </details>
+      </div>
+      <div id="quickImportBar" class="quick-import-bar hidden"><span><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V4h6l2 3h10v13H3Z"/></svg> Pastas encontradas</span><div id="quickImportChips" class="quick-chips"></div></div>
+      <div class="search-toolbar">
+        <div class="search-input-wrap"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><label class="sr-only" for="searchInput">Buscar áudios</label><input id="searchInput" type="search" placeholder="Buscar áudio, frase, voz ou atalho…" autocomplete="off"><kbd>Ctrl F</kbd><button id="btnClearSearch" class="btn-clear hidden" aria-label="Limpar busca"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button></div>
+        <div id="densityGroup" class="density-group" role="group" aria-label="Densidade dos botões">
+          <button type="button" class="density-btn" data-density="compact" title="Grade compacta">Compacto</button>
+          <button type="button" class="density-btn active" data-density="normal" title="Grade normal">Normal</button>
+          <button type="button" class="density-btn" data-density="large" title="Grade grande">Grande</button>
+        </div>
+        <label class="sort-wrap"><span>Ordenar</span><select id="sortSelect"><option value="newest">Mais recentes</option><option value="most_played">Mais tocados</option><option value="alpha">Nome A–Z</option><option value="shortest">Menor duração</option></select></label>
+      </div>
+      <div class="collection-meta"><span id="clipCountBadge" aria-live="polite">Carregando biblioteca…</span><span class="pad-hint"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 5 11 7-11 7Z"/></svg> Pad: enviar para a call <span class="meta-divider">/</span> <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 14v-3a9 9 0 0 1 18 0v3"/><rect x="3" y="12" width="4" height="8" rx="2"/><rect x="17" y="12" width="4" height="8" rx="2"/></svg> Fone: ouvir só você</span><button id="btnResetFilters" class="text-button hidden">Limpar filtros</button></div>
+      <div id="soundGrid" class="sound-grid" aria-label="Áudios"></div>
+      <div id="loadMoreRow" class="load-more hidden"><button id="btnLoadMore" class="btn btn-secondary">Mostrar mais áudios</button></div>
+    </main>
+  </div>
+  <footer class="transport-bar">
+    <div class="transport-state">
+      <span id="playStatusDot" class="status-dot"></span>
+      <span id="npEqBars" class="eq-bars hidden" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+      <span id="playStatus" role="status">Aguardando aplicativo local</span>
+      <span id="npRouteBadge" class="np-route-badge hidden">CALL + FONE</span>
+    </div>
+    <div id="nowPlayingControls" class="now-playing-controls hidden" aria-label="Controles do áudio em reprodução">
+      <div class="np-buttons">
+        <button type="button" id="btnNpRestart" class="np-btn" title="Reiniciar do 0:00" aria-label="Reiniciar áudio"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg></button>
+        <button type="button" id="btnNpPause" class="np-btn np-btn-primary" title="Pausar / Retomar" aria-label="Pausar ou retomar"><svg id="npPauseIcon" class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg></button>
+        <button type="button" id="btnNpLoop" class="np-btn" title="Repetir em loop" aria-label="Repetir em loop" aria-pressed="false"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg></button>
+        <button type="button" id="btnNpStop" class="np-btn np-btn-danger" title="Parar reprodução" aria-label="Parar reprodução"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/></svg></button>
+      </div>
+      <div class="np-seek-wrap">
+        <span id="npCurTime" class="np-time">0:00.0</span>
+        <input type="range" id="npSeekSlider" class="np-seek-slider" min="0" max="10" step="0.02" value="0" aria-label="Posição do áudio">
+        <span id="npTotalTime" class="np-time">0:00.0</span>
+      </div>
+      <div class="np-vol-wrap" title="Volume ao vivo deste áudio">
+        <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9h4l5-5v16l-5-5H4ZM17 8a6 6 0 0 1 0 8"/></svg>
+        <input type="range" id="npLiveVolume" min="0.1" max="2.5" step="0.05" value="1" aria-label="Volume ao vivo">
+        <output id="npLiveVolVal" class="np-vol-label">100%</output>
+      </div>
+    </div>
+    <span class="transport-tip">Parar tudo <kbd>Ctrl Shift S</kbd><span class="meta-divider">/</span> Compacto <kbd>Ctrl Shift O</kbd></span>
+  </footer>
+</div>
+
+<div id="editModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+  <div class="modal-card">
+    <header class="modal-header"><div class="od-field"><span class="eyebrow">CLIP STUDIO</span><h2 id="modalTitle">Editar áudio</h2></div><button id="btnCloseModal" class="btn-clear" aria-label="Fechar editor"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button></header>
+    <div class="modal-body">
+      <input type="hidden" id="editClipId">
+      <section class="editor-section"><h3><span>01</span> Identificação</h3>
+        <div class="form-row"><div class="form-group emoji-col"><label for="editEmoji">Emoji</label><input type="text" id="editEmoji" maxlength="4"></div><div class="form-group flex-1"><label for="editTitle">Título do botão</label><input type="text" id="editTitle" maxlength="40"></div><div class="form-group color-col"><label for="editColor">Cor</label><input type="color" id="editColor" value="#3b82f6"></div></div>
+        <div class="form-row"><div class="form-group flex-1"><label for="editCategory">Categoria</label><select id="editCategory"><option>Rage</option><option>Risada</option><option>Meme</option><option>Call</option><option>Vinhetas</option><option>Efeito</option><option>Clássico</option></select></div><div class="form-group flex-1"><label for="editSpeaker">Quem falou</label><select id="editSpeaker"></select></div></div>
+        <div class="form-group"><label for="editHotkey">Atalho global</label><div class="hotkey-input-row"><input type="text" id="editHotkey" placeholder="Clique e pressione a combinação" readonly><button type="button" id="btnClearHotkey" class="btn btn-secondary">Limpar</button></div></div>
+      </section>
+      <section class="editor-section trim-section"><div class="trim-header-row"><h3><span>02</span> Corte e volume</h3><span class="trim-total">Duração final <b id="trimTotalDurationVal">0.00s</b></span></div>
+        <div class="waveform-wrap" title="Clique ou arraste nas bordas para ajustar o início e o fim do corte">
+          <canvas id="waveformCanvas" width="640" height="80"></canvas>
+          <div class="waveform-hint">Arraste na onda sonora para ajustar o corte</div>
+        </div>
+        <div class="trim-presets"><button type="button" class="btn-preset" data-preset="first3">Início 3s</button><button type="button" class="btn-preset" data-preset="first5">Início 5s</button><button type="button" class="btn-preset" data-preset="last3">Final 3s</button><button type="button" class="btn-preset" data-preset="last5">Final 5s</button><button type="button" class="btn-preset" data-preset="full">Inteiro</button></div>
+        <div class="form-row trim-box"><div class="form-group flex-1"><div class="label-with-num"><label for="editTrimStartNum">Início (s)</label><input type="number" id="editTrimStartNum" min="0" max="600" step="0.1" value="0" class="num-mini"></div><input type="range" id="editTrimStart" min="0" max="10" step="0.01" value="0" aria-label="Corte inicial"></div><div class="form-group flex-1"><div class="label-with-num"><label for="editTrimEndNum">Fim (s)</label><input type="number" id="editTrimEndNum" min="0.1" max="600" step="0.1" value="10" class="num-mini"></div><input type="range" id="editTrimEnd" min="0.1" max="10" step="0.01" value="10" aria-label="Corte final"></div></div>
+        <div class="form-group"><div class="label-with-num"><label for="editVolume">Ganho do áudio</label><output id="clipVolVal">100%</output></div><input type="range" id="editVolume" min="0.2" max="2.5" step="0.05" value="1"></div>
+        <button id="btnPreviewMonitor" class="btn btn-secondary"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 14v-3a9 9 0 0 1 18 0v3"/><rect x="3" y="12" width="4" height="8" rx="2"/><rect x="17" y="12" width="4" height="8" rx="2"/></svg> Salvar e testar no fone</button>
+      </section>
+      <details class="editor-section ai-tools"><summary><span class="section-number">03</span> Transcrição e ferramentas de IA <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+        <div class="form-group"><label for="editTranscript">Transcrição</label><textarea id="editTranscript" rows="3"></textarea></div>
+        <div class="form-group"><label for="editMood">Tom acústico detectado</label><input type="text" id="editMood" readonly></div>
+        <div class="ai-actions"><button type="button" id="btnReanalyzeAI" class="btn btn-secondary"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/></svg> Reanalisar com IA</button><button type="button" id="btnSplitSpeakers" class="btn btn-secondary"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3M17 5a3 3 0 0 1 0 6m1 4a5 5 0 0 1 3 5"/></svg> Separar falas em botões</button><button type="button" id="btnEnrollVoice" class="btn btn-secondary"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></svg> Treinar voz</button></div>
+        <p class="field-help">Treinar voz usa este áudio como referência para reconhecer a pessoa selecionada.</p>
+      </details>
+    </div>
+    <footer class="modal-footer"><button type="button" id="btnDeleteClip" class="btn btn-danger-quiet"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/></svg> Remover botão</button><button type="button" id="btnSaveClip" class="btn btn-primary">Salvar alterações</button></footer>
+  </div>
+</div>
+
+<div id="speakerModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="speakerModalTitle">
+  <div class="modal-card modal-sm"><header class="modal-header"><h2 id="speakerModalTitle">Editar pessoa</h2><button id="btnCloseSpeakerModal" class="btn-clear" aria-label="Fechar"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button></header><div class="modal-body"><input type="hidden" id="renameSpeakerId"><div class="form-group"><label for="renameSpeakerName">Nome</label><input type="text" id="renameSpeakerName"></div><div class="form-group"><label for="renameSpeakerColor">Cor de identificação</label><input type="color" id="renameSpeakerColor" value="#3b82f6"></div></div><footer class="modal-footer"><button id="btnDeleteSpeakerModal" class="btn btn-danger-quiet">Excluir pessoa</button><button id="btnSaveSpeaker" class="btn btn-primary">Salvar</button></footer></div>
+</div>
+<div id="toastContainer" class="toast-container" role="status" aria-live="polite"></div>
+<script src="app.js"></script>
 </body>
 </html>
