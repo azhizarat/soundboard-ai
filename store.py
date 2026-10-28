@@ -1,4 +1,5 @@
 import os
+import copy
 import json
 import uuid
 import shutil
@@ -49,6 +50,8 @@ class SoundboardStore:
         self.models_dir = self.data_dir / "models"
         self.db_path = self.data_dir / "soundboard.json"
         self._lock = threading.RLock()
+        self._save_timer = None
+        self._dirty = False
 
         self.clips_dir.mkdir(parents=True, exist_ok=True)
         self.models_dir.mkdir(parents=True, exist_ok=True)
@@ -81,12 +84,65 @@ class SoundboardStore:
 
     def save(self):
         with self._lock:
+            timer = self._save_timer
+            self._save_timer = None
+            if timer is not None:
+                timer.cancel()
             tmp_path = self.db_path.with_suffix(".json.tmp")
-            tmp_path.write_text(
-                json.dumps(self.state, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            os.replace(tmp_path, self.db_path)
+            try:
+                tmp_path.write_text(
+                    json.dumps(self.state, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                os.replace(tmp_path, self.db_path)
+            except Exception:
+                # Keep the state dirty so a later flush/retry can persist it, and
+                # never leave a half-written temp file behind.
+                self._dirty = True
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except Exception:
+                    pass
+                raise
+            self._dirty = False
+
+    def _safe_save(self):
+        """Timer target: a failing save must not kill the debounce thread silently."""
+        try:
+            self.save()
+        except Exception:
+            self._dirty = True
+
+    def save_debounced(self, delay: float = 0.75):
+        """Marks the state dirty and schedules a single delayed save."""
+        with self._lock:
+            self._dirty = True
+            if self._save_timer is not None:
+                self._save_timer.cancel()
+            timer = threading.Timer(max(0.0, float(delay)), self._safe_save)
+            timer.daemon = True
+            self._save_timer = timer
+            timer.start()
+
+    def flush(self):
+        """Cancels any pending debounced save and persists immediately when dirty."""
+        with self._lock:
+            timer = self._save_timer
+            self._save_timer = None
+            if timer is not None:
+                timer.cancel()
+            if self._dirty:
+                try:
+                    self.save()
+                except Exception:
+                    # atexit must never print a traceback; retry on next flush.
+                    self._dirty = True
+
+    def snapshot(self) -> dict:
+        """Deep copy of the whole state, safe to serialize or mutate by callers."""
+        with self._lock:
+            return copy.deepcopy(self.state)
 
     def ensure_speaker(self, spk_id: str, default_name: str = None) -> dict:
         if not spk_id:
@@ -237,6 +293,24 @@ class SoundboardStore:
             if c:
                 c["play_count"] = int(c.get("play_count", 0)) + 1
                 self.save()
+            return c
+
+    def set_clip_volume(self, clip_id: str, volume: float) -> dict | None:
+        """Persists a clip's volume under the store lock.
+
+        Works even when legacy clips lack the "volume" key, and clamps to the
+        engine's supported 0..3 gain range.
+        """
+        with self._lock:
+            c = self.get_clip(clip_id)
+            if c is None:
+                return None
+            try:
+                vol = float(volume)
+            except (TypeError, ValueError):
+                vol = float(c.get("volume", 1.0))
+            c["volume"] = round(max(0.0, min(3.0, vol)), 2)
+            self.save_debounced()
             return c
 
     def search_clips(

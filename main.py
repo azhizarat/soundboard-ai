@@ -1,6 +1,8 @@
 import os
 import sys
+import copy
 import time
+import atexit
 import shutil
 import threading
 from pathlib import Path
@@ -20,6 +22,45 @@ if hasattr(sys.stdout, "reconfigure"):
 SUPPORTED_AUDIO_EXTS = (".mp3", ".wav", ".ogg", ".flac", ".m4a", ".webm")
 
 
+def _device_name(entries: list[dict], dev_id) -> str:
+    for entry in entries or []:
+        if entry.get("id") == dev_id:
+            return entry.get("name") or ""
+    return ""
+
+
+def _resolve_device(
+    entries: list[dict],
+    stored_id,
+    stored_name,
+    role_fallback_id=None,
+) -> dict | None:
+    """Resolves a saved device against live entries using the durable name.
+
+    Device indices are unstable across reboots/USB changes, so a saved *name* is
+    the only trusted identity. A legacy/empty name means the stored index is
+    untrusted: ignore it and fall back to the device detected for that role.
+    """
+    wanted_name = (stored_name or "").strip().casefold()
+    if not wanted_name:
+        if role_fallback_id is None:
+            return None
+        for entry in entries or []:
+            if entry.get("id") == role_fallback_id:
+                return entry
+        return None
+
+    name_match = None
+    for entry in entries or []:
+        if str(entry.get("name", "")).strip().casefold() != wanted_name:
+            continue
+        if entry.get("id") == stored_id:
+            return entry
+        if name_match is None:
+            name_match = entry
+    return name_match
+
+
 class SoundboardAPI:
     def __init__(self, data_dir: str = "data", start_background_services: bool = True):
         # All internal state attributes MUST start with '_' so pywebview does not
@@ -27,6 +68,8 @@ class SoundboardAPI:
         self._base_dir = Path(__file__).parent.resolve()
         resolved_data = Path(data_dir) if os.path.isabs(data_dir) else (self._base_dir / data_dir)
         self._store = SoundboardStore(data_dir=str(resolved_data))
+        if start_background_services:
+            atexit.register(self._store.flush)
         self._ai = AIAnalyzer()
         self._audio = AudioEngine(
             replay_seconds=max(60.0, float(self._store.state["settings"].get("replay_seconds", 15))),
@@ -67,23 +110,54 @@ class SoundboardAPI:
     def _auto_bind_devices(self):
         dev_info = self._audio.list_devices()
         settings = self._store.state["settings"]
-        changed = False
+        outputs = dev_info.get("outputs") or []
+        inputs = dev_info.get("inputs") or []
+        updates = {}
 
-        if settings.get("cable_device_id") is None and dev_info.get("detected_cable_id") is not None:
-            settings["cable_device_id"] = dev_info["detected_cable_id"]
-            settings["cable_device_name"] = dev_info.get("detected_cable_name", "")
-            changed = True
+        def _bind(id_key, name_key, entries, fallback_id):
+            stored_id = settings.get(id_key)
+            stored_name = settings.get(name_key) or ""
+            resolved = _resolve_device(entries, stored_id, stored_name, fallback_id)
+            if resolved is not None:
+                new_id = resolved.get("id")
+                new_name = resolved.get("name") or ""
+                if stored_id != new_id:
+                    updates[id_key] = new_id
+                if stored_name != new_name:
+                    updates[name_key] = new_name
+                return
+            if stored_id is not None or stored_name.strip():
+                # Configured device is gone: keep the saved name for a later re-resolve,
+                # but never silently route to whatever index happens to exist now.
+                if stored_id is not None:
+                    updates[id_key] = None
+                return
+            # Unconfigured (legacy install with empty name): adopt the role default.
+            if fallback_id is not None:
+                updates[id_key] = fallback_id
+                updates[name_key] = _device_name(entries, fallback_id)
 
-        if settings.get("monitor_device_id") is None and dev_info.get("default_output_id") is not None:
-            settings["monitor_device_id"] = dev_info["default_output_id"]
-            changed = True
+        _bind(
+            "cable_device_id",
+            "cable_device_name",
+            outputs,
+            dev_info.get("detected_cable_id"),
+        )
+        _bind(
+            "monitor_device_id",
+            "monitor_device_name",
+            outputs,
+            dev_info.get("default_output_id"),
+        )
+        _bind(
+            "mic_device_id",
+            "mic_device_name",
+            inputs,
+            dev_info.get("default_input_id"),
+        )
 
-        if settings.get("mic_device_id") is None and dev_info.get("default_input_id") is not None:
-            settings["mic_device_id"] = dev_info["default_input_id"]
-            changed = True
-
-        if changed:
-            self._store.save()
+        if updates:
+            self._store.update_settings(updates)
 
     def _apply_mic_passthrough(self):
         s = self._store.state["settings"]
@@ -132,11 +206,12 @@ class SoundboardAPI:
             except Exception:
                 pass
 
+        snap = self._store.snapshot()
         return {
-            "settings": self._store.state["settings"],
-            "categories": self._store.state["categories"],
-            "speakers": self._store.state["speakers"],
-            "clips": self._store.state["clips"],
+            "settings": snap["settings"],
+            "categories": snap["categories"],
+            "speakers": snap["speakers"],
+            "clips": snap["clips"],
             "devices": devs,
             "discovered_separados": discovered_separados,
             "models_dir": str(self._ai.models_dir),
@@ -149,22 +224,60 @@ class SoundboardAPI:
         self._auto_bind_devices()
         return self._audio.list_devices()
 
+    def _apply_device_names(self, updates: dict):
+        """Keeps the saved device names in sync when a device is selected by index."""
+        keys = {
+            "cable_device_id": ("cable_device_name", "outputs"),
+            "monitor_device_id": ("monitor_device_name", "outputs"),
+            "mic_device_id": ("mic_device_name", "inputs"),
+        }
+        pending = [k for k in keys if k in updates]
+        if not pending:
+            return
+        dev_info = self._audio.list_devices()
+        for id_key in pending:
+            name_key, list_key = keys[id_key]
+            dev_id = updates.get(id_key)
+            if dev_id is None:
+                # Explicit "no device": keep the saved name for a later re-resolve.
+                continue
+            matched = False
+            for entry in dev_info.get(list_key) or []:
+                if entry.get("id") == dev_id:
+                    updates[name_key] = entry.get("name") or ""
+                    matched = True
+                    break
+            if not matched:
+                # Stale index: clear the old name so the next refresh cannot
+                # silently rebind the saved name to a different device.
+                updates[name_key] = ""
+
     def update_settings(self, updates: dict) -> dict:
+        updates = dict(updates or {})
         if "replay_seconds" in updates:
             updates["replay_seconds"] = round(max(1.0, min(120.0, float(updates["replay_seconds"]))), 1)
+        if any(k in updates for k in ("cable_device_id", "monitor_device_id", "mic_device_id")):
+            self._apply_device_names(updates)
         s = self._store.update_settings(updates)
         if "replay_seconds" in updates:
             self._audio.replay_buffer.set_max_seconds(max(60.0, float(s.get("replay_seconds", 15))))
         if any(k in updates for k in ("mic_passthrough", "mic_device_id", "cable_device_id", "mic_gain")):
             self._apply_mic_passthrough()
         if any(k in updates for k in ("stop_all_hotkey", "replay_hotkey", "overlay_hotkey")):
-            self._hotkeys.refresh(self._store.state["clips"], s)
+            self._hotkeys.refresh(self._store.snapshot()["clips"], s)
         return s
 
     def play_clip(self, clip_id: str, monitor_only: bool = False, from_hotkey: bool = False) -> dict:
         clip = self._store.get_clip(clip_id)
         if not clip:
             return {"ok": False, "error": "Clip não encontrado"}
+
+        file_path = clip.get("file_path") or ""
+        if not file_path or not os.path.exists(file_path):
+            error = "Arquivo de áudio não encontrado."
+            if from_hotkey:
+                self._notify_ui("toast", {"type": "warning", "message": error})
+            return {"ok": False, "error": error}
 
         settings = self._store.state["settings"]
         eff_dur = max(
@@ -178,6 +291,12 @@ class SoundboardAPI:
             on_tick=None,
             monitor_only=bool(monitor_only),
         )
+        if not play_id:
+            # No active/valid output route (muted cable+monitor, stale device, ...).
+            error = "Nenhuma saída de áudio ativa (cabo/fone mudos ou dispositivo indisponível)."
+            if from_hotkey:
+                self._notify_ui("toast", {"type": "warning", "message": error})
+            return {"ok": False, "error": error}
         if not monitor_only:
             self._store.increment_play_count(clip_id)
         sess = self._audio.get_session(play_id)
@@ -227,9 +346,7 @@ class SoundboardAPI:
         if not sess:
             return {"ok": False}
         vol = sess.set_live_volume(volume)
-        clip = self._store.get_clip(sess.clip_id)
-        if clip is not None:
-            clip["volume"] = round(vol, 2)
+        self._store.set_clip_volume(sess.clip_id, vol)
         st = sess.status()
         return {"ok": True, "volume": vol, "status": st}
 
@@ -260,24 +377,31 @@ class SoundboardAPI:
 
     def save_clip_edits(self, clip_data: dict) -> dict:
         updated = self._store.add_or_update_clip(clip_data)
-        self._hotkeys.refresh(self._store.state["clips"], self._store.state["settings"])
-        return {"ok": True, "clip": updated, "speakers": self._store.state["speakers"]}
+        snap = self._store.snapshot()
+        self._hotkeys.refresh(snap["clips"], snap["settings"])
+        return {"ok": True, "clip": copy.deepcopy(updated), "speakers": snap["speakers"]}
 
     def toggle_favorite(self, clip_id: str) -> dict:
         clip = self._store.get_clip(clip_id)
         if not clip:
             return {"ok": False}
         updated = self._store.add_or_update_clip({"id": clip_id, "favorite": not clip.get("favorite", False)})
-        return {"ok": True, "clip": updated}
+        return {"ok": True, "clip": copy.deepcopy(updated)}
 
     def delete_clip(self, clip_id: str, delete_file: bool = False) -> dict:
+        clip = self._store.get_clip(clip_id)
+        file_path = (clip or {}).get("file_path") or ""
         ok = self._store.delete_clip(clip_id, delete_file=delete_file)
-        self._hotkeys.refresh(self._store.state["clips"], self._store.state["settings"])
+        if file_path:
+            self._audio.invalidate_cache(file_path)
+        snap = self._store.snapshot()
+        self._hotkeys.refresh(snap["clips"], snap["settings"])
         return {"ok": ok}
 
     def update_speaker(self, spk_id: str, name: str, color: str = None, avatar: str = None) -> dict:
         spk = self._store.update_speaker(spk_id, name=name, color=color, avatar=avatar)
-        return {"ok": True, "speaker": spk, "speakers": self._store.state["speakers"]}
+        snap = self._store.snapshot()
+        return {"ok": True, "speaker": copy.deepcopy(spk), "speakers": snap["speakers"]}
 
     def delete_speaker(self, spk_id: str) -> dict:
         ok = self._store.delete_speaker(spk_id)
@@ -289,10 +413,11 @@ class SoundboardAPI:
                 np.savez(self._ai.ref_voices_path, **kept)
             except Exception:
                 pass
+        snap = self._store.snapshot()
         return {
             "ok": ok,
-            "speakers": self._store.state["speakers"],
-            "clips": self._store.state["clips"],
+            "speakers": snap["speakers"],
+            "clips": snap["clips"],
         }
 
     def enroll_speaker_from_clip(self, clip_id: str, spk_id: str, speaker_name: str = "") -> dict:
@@ -304,11 +429,12 @@ class SoundboardAPI:
         else:
             self._store.ensure_speaker(spk_id)
         ok = self._ai.enroll_speaker_reference(clip["file_path"], spk_id)
-        self._store.add_or_update_clip({"id": clip_id, "speaker_id": spk_id})
+        updated = self._store.add_or_update_clip({"id": clip_id, "speaker_id": spk_id})
+        snap = self._store.snapshot()
         return {
             "ok": ok,
-            "speakers": self._store.state["speakers"],
-            "clip": self._store.get_clip(clip_id),
+            "speakers": snap["speakers"],
+            "clip": copy.deepcopy(updated),
         }
 
     def reanalyze_clip_ai(self, clip_id: str) -> dict:
@@ -348,7 +474,8 @@ class SoundboardAPI:
                 "acoustic_mood": res["acoustic_mood"],
                 "duration": res["duration"],
             })
-            return {"ok": True, "clip": updated, "speakers": self._store.state["speakers"]}
+            snap = self._store.snapshot()
+            return {"ok": True, "clip": copy.deepcopy(updated), "speakers": snap["speakers"]}
         finally:
             self._emit_progress(False)
 
@@ -412,16 +539,17 @@ class SoundboardAPI:
                 })
                 created_clips.append(new_c)
 
+            snap = self._store.snapshot()
             self._notify_ui("clips_updated", {
-                "clips": self._store.state["clips"],
-                "speakers": self._store.state["speakers"],
+                "clips": snap["clips"],
+                "speakers": snap["speakers"],
             })
             return {
                 "ok": True,
                 "created_count": len(created_clips),
-                "created_clips": created_clips,
-                "clips": self._store.state["clips"],
-                "speakers": self._store.state["speakers"],
+                "created_clips": copy.deepcopy(created_clips),
+                "clips": snap["clips"],
+                "speakers": snap["speakers"],
             }
         finally:
             self._emit_progress(False)
@@ -493,11 +621,17 @@ class SoundboardAPI:
         finally:
             self._emit_progress(False)
 
+        snap = self._store.snapshot()
         self._notify_ui("clips_updated", {
-            "clips": self._store.state["clips"],
-            "speakers": self._store.state["speakers"],
+            "clips": snap["clips"],
+            "speakers": snap["speakers"],
         })
-        return {"ok": True, "imported": imported, "clips": self._store.state["clips"], "speakers": self._store.state["speakers"]}
+        return {
+            "ok": True,
+            "imported": copy.deepcopy(imported),
+            "clips": snap["clips"],
+            "speakers": snap["speakers"],
+        }
 
     def import_folder_or_separados(
         self,
@@ -547,15 +681,16 @@ class SoundboardAPI:
             finally:
                 self._emit_progress(False)
 
+            snap = self._store.snapshot()
             self._notify_ui("clips_updated", {
-                "clips": self._store.state["clips"],
-                "speakers": self._store.state["speakers"],
+                "clips": snap["clips"],
+                "speakers": snap["speakers"],
             })
             return {
                 "ok": True,
                 "imported_count": len(imported),
-                "clips": self._store.state["clips"],
-                "speakers": self._store.state["speakers"],
+                "clips": snap["clips"],
+                "speakers": snap["speakers"],
             }
 
         audio_files = [
@@ -611,20 +746,22 @@ class SoundboardAPI:
             if self._store.state["settings"].get("auto_split_speakers") and len(res.get("segments") or []) > 1:
                 split_res = self.split_clip_by_speakers(clip["id"])
                 if split_res.get("ok"):
+                    snap = self._store.snapshot()
                     return {
                         "ok": True,
-                        "clip": clip,
+                        "clip": copy.deepcopy(clip),
                         "split_count": split_res.get("created_count", 0),
-                        "clips": self._store.state["clips"],
-                        "speakers": self._store.state["speakers"],
+                        "clips": snap["clips"],
+                        "speakers": snap["speakers"],
                     }
 
+            snap = self._store.snapshot()
             self._notify_ui("replay_captured", {
-                "clip": clip,
-                "clips": self._store.state["clips"],
-                "speakers": self._store.state["speakers"],
+                "clip": copy.deepcopy(clip),
+                "clips": snap["clips"],
+                "speakers": snap["speakers"],
             })
-            return {"ok": True, "clip": clip, "clips": self._store.state["clips"], "speakers": self._store.state["speakers"]}
+            return {"ok": True, "clip": copy.deepcopy(clip), "clips": snap["clips"], "speakers": snap["speakers"]}
         finally:
             self._emit_progress(False)
 

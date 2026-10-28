@@ -4,7 +4,7 @@ import uuid
 import subprocess
 import tempfile
 import threading
-from collections import deque
+from collections import OrderedDict, deque
 from pathlib import Path
 import numpy as np
 
@@ -235,10 +235,15 @@ class ReplayRingBuffer:
 
 class AudioEngine:
     TARGET_SR = 48000
+    # Bounded LRU budget for decoded clips (float32 stereo 48k).
+    CACHE_BUDGET_BYTES = 256 * 1024 * 1024
 
     def __init__(self, replay_seconds: float = 15.0, start_loopback: bool = True):
         self.replay_buffer = ReplayRingBuffer(max_seconds=replay_seconds, sr=self.TARGET_SR, channels=2)
-        self._cache = {}
+        self._cache: OrderedDict[str, dict] = OrderedDict()
+        self._cache_bytes = 0
+        self._cache_budget_bytes = self.CACHE_BUDGET_BYTES
+        self._cache_lock = threading.RLock()
         self._active_events = {}
         self._sessions: dict[str, PlaybackSession] = {}
         self._latest_play_id: str | None = None
@@ -324,9 +329,11 @@ class AudioEngine:
         except OSError:
             mtime = 0
 
-        cached = self._cache.get(norm_key)
-        if cached and cached["mtime"] == mtime:
-            return cached["data"], cached["duration"]
+        with self._cache_lock:
+            cached = self._cache.get(norm_key)
+            if cached and cached["mtime"] == mtime:
+                self._cache.move_to_end(norm_key)
+                return cached["data"], cached["duration"]
 
         import soundfile as sf
         tmp_wav = None
@@ -362,9 +369,39 @@ class AudioEngine:
                 except Exception:
                     pass
 
+        # The cache is shared by every caller: freeze the decoded array so a
+        # consumer can never mutate another playback's samples in place.
+        data.setflags(write=False)
+
         dur = float(len(data) / self.TARGET_SR)
-        self._cache[norm_key] = {"mtime": mtime, "data": data, "duration": dur}
+        with self._cache_lock:
+            existing = self._cache.get(norm_key)
+            if existing is not None:
+                # Replaced concurrently: never double-count the same key.
+                self._cache_bytes -= existing["data"].nbytes
+                del self._cache[norm_key]
+            self._cache[norm_key] = {"mtime": mtime, "data": data, "duration": dur}
+            self._cache_bytes += data.nbytes
+            # Entries are LRU-ordered; the just-inserted key is at the end.
+            while (
+                self._cache_bytes > self._cache_budget_bytes
+                and len(self._cache) > 1
+            ):
+                _, evicted = self._cache.popitem(last=False)
+                self._cache_bytes -= evicted["data"].nbytes
         return data, dur
+
+    def invalidate_cache(self, file_path: str | None = None) -> None:
+        """Drops one cached file, or the whole cache when file_path is None."""
+        with self._cache_lock:
+            if file_path is None:
+                self._cache.clear()
+                self._cache_bytes = 0
+                return
+            norm_key = os.path.normcase(os.path.abspath(file_path))
+            entry = self._cache.pop(norm_key, None)
+            if entry is not None:
+                self._cache_bytes -= entry["data"].nbytes
 
     def _stream_session_to_device(
         self,
@@ -379,12 +416,10 @@ class AudioEngine:
             import sounddevice as sd
 
             chunk_size = 4096
-            silence_block = np.zeros((1024, 2), dtype=np.float32)
+            silence_block = np.zeros((chunk_size, 2), dtype=np.float32)
             with session._lock:
                 local_idx = session.pos_idx
                 local_epoch = session.seek_epoch
-                last_gain = float(base_gain * session.live_volume)
-            scaled_full = np.clip(session.data * last_gain, -1.0, 1.0).astype(np.float32)
 
             with sd.OutputStream(
                 samplerate=self.TARGET_SR,
@@ -416,12 +451,11 @@ class AudioEngine:
                             break
 
                     cur_gain = float(base_gain * live_v)
-                    if abs(cur_gain - last_gain) > 1e-3:
-                        last_gain = cur_gain
-                        scaled_full = np.clip(session.data * last_gain, -1.0, 1.0).astype(np.float32)
-
                     end = min(local_idx + chunk_size, session.total_samples)
-                    stream.write(scaled_full[local_idx:end])
+                    chunk = np.clip(
+                        session.data[local_idx:end] * cur_gain, -1.0, 1.0
+                    ).astype(np.float32)
+                    stream.write(chunk)
                     local_idx = end
 
                     if is_driver:
@@ -430,6 +464,30 @@ class AudioEngine:
                                 session.pos_idx = local_idx
         except Exception:
             pass
+
+    def _output_route_usable(self, device_id) -> bool:
+        """Preflights a concrete output device before a session is created.
+
+        Catches stale device indices and unsupported stream modes so the app
+        reports "no active output" instead of silently playing into the void.
+        """
+        if device_id is None:
+            return False
+        try:
+            import sounddevice as sd
+        except Exception:
+            # No binding available: let playback try anyway (another backend
+            # may still handle the stream).
+            return True
+        try:
+            sd.check_output_settings(
+                device=device_id,
+                samplerate=self.TARGET_SR,
+                channels=2,
+            )
+            return True
+        except Exception:
+            return False
 
     def play_clip(
         self,
@@ -443,18 +501,54 @@ class AudioEngine:
         if not file_path or not os.path.exists(file_path):
             return ""
 
+        # Route validation must happen before any session/thread/playback side effects.
+        cable_id = settings.get("cable_device_id")
+        monitor_id = settings.get("monitor_device_id")
+        try:
+            cable_vol = float(settings.get("cable_volume", 1.0))
+            monitor_vol = float(settings.get("monitor_volume", 0.75))
+        except (TypeError, ValueError):
+            return ""
+
+        has_cable = (not monitor_only) and cable_id is not None and cable_vol > 0.001
+        has_monitor = (
+            monitor_vol > 0.001
+            and monitor_id is not None
+            and (monitor_only or monitor_id != cable_id)
+        )
+        if monitor_only and (monitor_id is None or monitor_id == cable_id):
+            # A monitor-only preview without a distinct monitor device has no route.
+            has_monitor = False
+        if not has_cable and not has_monitor:
+            return ""
+
+        # Reject stale/unsupported devices before creating a session. Only routes
+        # that actually pass preflight are started; if every active route is
+        # unusable there is no playback at all.
+        cable_usable = has_cable and self._output_route_usable(cable_id)
+        monitor_usable = has_monitor and self._output_route_usable(monitor_id)
+        if not cable_usable and not monitor_usable:
+            return ""
+        has_cable = cable_usable
+        has_monitor = monitor_usable
+
         if not settings.get("overlap_audio", False):
             self.stop_all()
 
-        raw_audio, _ = self.load_clip_stereo_48k(file_path)
-        processed = trim_and_normalize(
-            raw_audio,
-            sr=self.TARGET_SR,
-            trim_start=float(clip.get("trim_start", 0.0)),
-            trim_end=float(clip.get("trim_end", 0.0)),
-            volume=1.0,
-            normalize=bool(settings.get("normalize_on_import", True)),
-        )
+        try:
+            raw_audio, _ = self.load_clip_stereo_48k(file_path)
+            processed = trim_and_normalize(
+                raw_audio,
+                sr=self.TARGET_SR,
+                trim_start=float(clip.get("trim_start", 0.0)),
+                trim_end=float(clip.get("trim_end", 0.0)),
+                volume=1.0,
+                normalize=bool(settings.get("normalize_on_import", True)),
+            )
+        except Exception:
+            return ""
+        if processed is None or len(processed) == 0:
+            return ""
 
         play_id = uuid.uuid4().hex[:8]
         session = PlaybackSession(
@@ -472,15 +566,8 @@ class AudioEngine:
             self._sessions[play_id] = session
             self._latest_play_id = play_id
 
-        cable_id = settings.get("cable_device_id")
-        monitor_id = settings.get("monitor_device_id")
-        cable_vol = float(settings.get("cable_volume", 1.0))
-        monitor_vol = float(settings.get("monitor_volume", 0.75))
-
         def _runner():
             threads = []
-            has_cable = (not monitor_only) and (cable_id is not None) and (cable_vol > 0.001)
-            has_monitor = (monitor_vol > 0.001) and (monitor_only or monitor_id != cable_id)
 
             if has_cable:
                 t_cable = threading.Thread(
@@ -496,7 +583,7 @@ class AudioEngine:
                     target=self._stream_session_to_device,
                     args=(
                         session,
-                        int(monitor_id) if monitor_id is not None else None,
+                        int(monitor_id),
                         monitor_vol,
                         not has_cable,
                     ),
@@ -536,7 +623,7 @@ class AudioEngine:
 
     def get_session(self, play_id: str = None) -> PlaybackSession | None:
         with self._lock:
-            pid = play_id or self._latest_play_id
+            pid = self._latest_play_id if play_id is None else play_id
             return self._sessions.get(pid) if pid else None
 
     def stop_all(self):
