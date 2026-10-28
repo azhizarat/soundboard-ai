@@ -58,6 +58,25 @@ function showToast(message, color = "#3b82f6") {
   setTimeout(() => el.remove(), 3400);
 }
 
+function showPlayFailure(res) {
+  if (res && res.ok === false) {
+    showToast(res.error || "Não foi possível tocar este áudio.", "#ef4444");
+    return true;
+  }
+  return false;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[ch]));
+}
+
+function safeColor(value, fallback = "#3b82f6") {
+  const v = String(value ?? "");
+  return /^#[0-9a-fA-F]{3,8}$/.test(v) ? v : fallback;
+}
+
 function api() {
   return window.pywebview && window.pywebview.api ? window.pywebview.api : null;
 }
@@ -194,10 +213,10 @@ function renderSidebar() {
     div.className = `nav-item ${isActive ? "active" : ""}`;
     div.innerHTML = `
       <div class="nav-item-left">
-        <span>${item.emoji}</span>
-        <span>${item.name}</span>
+        <span>${escapeHtml(item.emoji)}</span>
+        <span>${escapeHtml(item.name)}</span>
       </div>
-      <span class="count-pill">${item.count}</span>
+      <span class="count-pill">${escapeHtml(item.count)}</span>
     `;
     div.onclick = () => {
       if (item.id === "Favoritos") {
@@ -221,7 +240,7 @@ function renderSidebar() {
   allSpkDiv.className = `nav-item ${state.activeSpeaker === "Todos" ? "active" : ""}`;
   allSpkDiv.innerHTML = `
     <div class="nav-item-left"><span>👥</span><span>Todos</span></div>
-    <span class="count-pill">${state.clips.length}</span>
+    <span class="count-pill">${escapeHtml(state.clips.length)}</span>
   `;
   allSpkDiv.onclick = () => {
     state.activeSpeaker = "Todos";
@@ -238,7 +257,7 @@ function renderSidebar() {
   noSpkDiv.className = `nav-item ${state.activeSpeaker === "__none__" ? "active" : ""}`;
   noSpkDiv.innerHTML = `
     <div class="nav-item-left"><span>🎵</span><span>Sem Pessoa / Vinhetas</span></div>
-    <span class="count-pill">${noSpkCount}</span>
+    <span class="count-pill">${escapeHtml(noSpkCount)}</span>
   `;
   noSpkDiv.onclick = () => {
     state.activeSpeaker = "__none__";
@@ -254,13 +273,14 @@ function renderSidebar() {
     }).length;
     const div = document.createElement("div");
     div.className = `nav-item ${state.activeSpeaker === spk.id ? "active" : ""}`;
+    const spkColor = safeColor(spk.color);
     div.innerHTML = `
       <div class="nav-item-left">
-        <span style="color:${spk.color || "#3b82f6"}">●</span>
-        <span>${spk.name}</span>
+        <span style="color:${escapeHtml(spkColor)}">●</span>
+        <span>${escapeHtml(spk.name)}</span>
       </div>
       <div class="nav-item-right">
-        <span class="count-pill">${count}</span>
+        <span class="count-pill">${escapeHtml(count)}</span>
         <button class="btn-rename-spk" title="Renomear este amigo">✏️</button>
         <button class="btn-delete-spk" title="Excluir esta pessoa (mantém os áudios sem pessoa)">🗑️</button>
       </div>
@@ -365,17 +385,18 @@ function renderGrid() {
     const spkBadgesHtml = clipSpkIds
       .map((sid) => state.speakers[sid])
       .filter(Boolean)
-      .map(
-        (spk) =>
-          `<span class="spk-badge" style="background:${spk.color}33;color:${spk.color};border:1px solid ${spk.color}66">${spk.name}</span>`
-      )
+      .map((spk) => {
+        const spkColor = safeColor(spk.color);
+        const badgeStyle = `background:${spkColor}33;color:${spkColor};border:1px solid ${spkColor}66`;
+        return `<span class="spk-badge" style="${escapeHtml(badgeStyle)}">${escapeHtml(spk.name)}</span>`;
+      })
       .join("");
 
     const card = document.createElement("div");
     const isPlaying = Boolean(state.playingClips[clip.id]);
     const isNew = isClipNew(clip);
     card.className = `sound-card ${isPlaying ? "playing" : ""} ${isNew ? "is-new-card" : ""}`;
-    card.style.setProperty("--card-color", clip.color || "#3b82f6");
+    card.style.setProperty("--card-color", safeColor(clip.color));
 
     const effDur = Math.max(
       0.1,
@@ -385,13 +406,13 @@ function renderGrid() {
 
     const moodBadgeHtml =
       clip.acoustic_mood && clip.acoustic_mood.toLowerCase() !== "normal"
-        ? `<span class="mood-badge">${clip.acoustic_mood}</span>`
+        ? `<span class="mood-badge">${escapeHtml(clip.acoustic_mood)}</span>`
         : "";
 
     card.innerHTML = `
       <div class="card-top">
         <div class="badge-row card-meta-left">
-          <span class="card-emoji">${clip.emoji || "🔊"}</span>
+          <span class="card-emoji">${escapeHtml(clip.emoji || "🔊")}</span>
           ${isPlaying ? `<span class="eq-bars ${state.activePlayback?.clip_id === clip.id && state.activePlayback?.paused ? "paused" : ""}"><span></span><span></span><span></span><span></span></span>` : isNew ? `<span class="new-badge">✨ NOVO!</span>` : ""}
         </div>
         <div class="card-actions">
@@ -400,25 +421,26 @@ function renderGrid() {
           <button class="card-icon-btn btn-edit" title="Editar nome, corte, atalho ou IA">⚙️</button>
         </div>
       </div>
-      <div class="card-title" title="${clip.title}">${clip.title}</div>
-      ${clip.transcript ? `<div class="card-transcript" title="${clip.transcript}">"${clip.transcript}"</div>` : ""}
+      <div class="card-title" title="${escapeHtml(clip.title)}">${escapeHtml(clip.title)}</div>
+      ${clip.transcript ? `<div class="card-transcript" title="${escapeHtml(clip.transcript)}">"${escapeHtml(clip.transcript)}"</div>` : ""}
       <div class="card-footer">
         <div class="badge-row card-meta-left">
           ${spkBadgesHtml}
           ${moodBadgeHtml}
         </div>
         <div class="badge-row card-meta-right">
-          ${clip.hotkey ? `<span class="hotkey-badge">${clip.hotkey}</span>` : ""}
+          ${clip.hotkey ? `<span class="hotkey-badge">${escapeHtml(clip.hotkey)}</span>` : ""}
           <span class="card-duration">${effDur}s</span>
         </div>
       </div>
-      <div class="play-progress" id="prog_${clip.id}"></div>
+      <div class="play-progress" id="prog_${escapeHtml(clip.id)}"></div>
     `;
 
     card.onclick = async (e) => {
       if (e.target.closest(".btn-preview")) {
         e.stopPropagation();
         const res = await api().play_clip(clip.id, true);
+        if (showPlayFailure(res)) return;
         if (res && res.status) syncActivePlayback(res.status);
         return;
       }
@@ -442,6 +464,7 @@ function renderGrid() {
         return;
       }
       const res = await api().play_clip(clip.id, false);
+      if (showPlayFailure(res)) return;
       if (res && res.status) syncActivePlayback(res.status);
     };
 
@@ -984,7 +1007,18 @@ function bindEvents() {
       const lbl = document.getElementById("npLiveVolVal");
       if (lbl) lbl.textContent = `${Math.round(v * 100)}%`;
       if (state.activePlayback) state.activePlayback.volume = v;
-      api().set_live_clip_volume(v);
+      const clipId = state.activePlayback ? state.activePlayback.clip_id : null;
+      const findClipIndex = () => (clipId === null ? -1 : state.clips.findIndex((x) => x.id === clipId));
+      const idx = findClipIndex();
+      if (idx >= 0) state.clips[idx].volume = v;
+      api()
+        .set_live_clip_volume(v)
+        .then((res) => {
+          if (!res || !res.ok || typeof res.volume !== "number") return;
+          const i = findClipIndex();
+          if (i >= 0) state.clips[i].volume = res.volume;
+        })
+        .catch(() => {});
     };
   }
 
@@ -1161,6 +1195,10 @@ function bindEvents() {
 
     // Play clip locally on headphone monitor only
     const res = await api().play_clip(id, true);
+    if (showPlayFailure(res)) {
+      updateModalPreviewButtons(false);
+      return;
+    }
     if (res && res.status) {
       syncActivePlayback(res.status);
       updateModalPreviewButtons(true);
