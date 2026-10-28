@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 from store import SoundboardStore
 from ai_analyzer import analyze_acoustics, generate_smart_metadata
+from audio_engine import trim_and_normalize, ReplayRingBuffer
 
 
 def test_store_crud_and_deduplication(tmp_path):
@@ -75,4 +76,28 @@ def test_generate_smart_metadata_ptbr():
     assert meta["category"] in ("Rage", "Risada", "Meme", "Call", "Efeito", "Clássico")
     assert meta["emoji"]
     assert meta["color"].startswith("#")
+
+
+def test_trim_and_normalize_bounds_and_silence():
+    sr = 48000
+    stereo = np.ones((sr * 2, 2), dtype=np.float32) * 0.25
+    # Valid 0.5s to 1.5s trim + peak normalize to ~0.92
+    out = trim_and_normalize(stereo, sr, trim_start=0.5, trim_end=1.5, volume=1.0, normalize=True)
+    assert out.shape == (sr, 2)
+    assert 0.85 <= float(np.max(np.abs(out))) <= 0.96
+
+    # Invalid trim_end <= trim_start clamps safely without empty crash
+    safe = trim_and_normalize(stereo, sr, trim_start=1.8, trim_end=0.5, volume=1.0, normalize=True)
+    assert len(safe) > 0
+
+
+def test_replay_ring_buffer_snapshot():
+    buf = ReplayRingBuffer(max_seconds=2.0, sr=100, channels=2)
+    for i in range(3):
+        buf.append(np.full((100, 2), float(i + 1), dtype=np.float32))
+    snap = buf.snapshot(last_seconds=2.0)
+    assert snap.shape == (200, 2)
+    assert np.allclose(snap[:100], 2.0)
+    assert np.allclose(snap[100:], 3.0)
+
 
