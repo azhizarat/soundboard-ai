@@ -4,6 +4,7 @@ import numpy as np
 from store import SoundboardStore
 from ai_analyzer import analyze_acoustics, generate_smart_metadata
 from audio_engine import trim_and_normalize, ReplayRingBuffer
+from main import SoundboardAPI
 
 
 def test_store_crud_and_deduplication(tmp_path):
@@ -99,5 +100,14 @@ def test_replay_ring_buffer_snapshot():
     assert snap.shape == (200, 2)
     assert np.allclose(snap[:100], 2.0)
     assert np.allclose(snap[100:], 3.0)
+
+
+def test_soundboard_api_smoke(tmp_path):
+    api = SoundboardAPI(data_dir=str(tmp_path), start_background_services=False)
+    state = api.get_initial_state()
+    assert "clips" in state
+    assert "devices" in state
+    assert "speakers" in state
+
 
 

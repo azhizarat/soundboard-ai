@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Soundboard AI — VB-Audio Cable Studio</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <!-- Top Control Deck -->
+    <header class="top-deck">
+      <div class="brand-area">
+        <div class="logo-orb">🎛️</div>
+        <div class="brand-text">
+          <h1>Soundboard <span class="accent-badge">AI</span></h1>
+          <span id="cableStatusBadge" class="status-pill status-ok">VB-Cable Conectado</span>
+        </div>
+      </div>
+
+      <div class="routing-controls">
+        <div class="device-group">
+          <label title="Dispositivo VB-Audio CABLE Input que envia o som para o seu CABLE Output no Discord/Jogo">
+            🔌 Saída p/ Cable Output (VB-Audio)
+          </label>
+          <div class="device-row">
+            <select id="cableDeviceSelect"></select>
+            <input type="range" id="cableVolumeSlider" min="0" max="1.5" step="0.02" value="1.0" title="Volume no Cabo Virtual" />
+            <span id="cableVolumeVal" class="vol-label">100%</span>
+          </div>
+        </div>
+
+        <div class="device-group">
+          <label title="Seu fone/caixa de som para você ouvir o que está soltando">
+            🎧 Monitor Local (Seu Fone)
+          </label>
+          <div class="device-row">
+            <select id="monitorDeviceSelect"></select>
+            <input type="range" id="monitorVolumeSlider" min="0" max="1.5" step="0.02" value="0.75" title="Volume no seu Fone" />
+            <span id="monitorVolumeVal" class="vol-label">75%</span>
+          </div>
+        </div>
+
+        <div class="toggles-group">
+          <label class="toggle-chip" title="Encaminha seu microfone físico direto para o CABLE Input em tempo real">
+            <input type="checkbox" id="micPassthroughToggle" />
+            <span>🎙️ Mic no Cabo</span>
+          </label>
+          <label class="toggle-chip" title="Permite tocar vários áudios ao mesmo tempo sem cortar o anterior">
+            <input type="checkbox" id="overlapToggle" />
+            <span>🔀 Sobrepor</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="deck-actions">
+        <button id="btnReplayClip" class="btn btn-replay" title="Salva os últimos segundos da call do sistema e analisa com IA (Atalho: Alt+F10)">
+          ⚡ Clipar Call (<span id="replaySecsLabel">15</span>s)
+        </button>
+        <button id="btnImportFiles" class="btn btn-secondary" title="Importar arquivos de áudio (.mp3, .wav, .ogg)">
+          ➕ Áudios
+        </button>
+        <button id="btnImportFolder" class="btn btn-secondary" title="Importar pasta 'separados' (com mapa_de_falas.json) ou pasta de áudios">
+          📂 Pasta
+        </button>
+        <button id="btnStopAll" class="btn btn-danger" title="Parar todos os sons imediatamente (Ctrl+Shift+S)">
+          🛑 Stop
+        </button>
+        <button id="btnMiniOverlay" class="btn btn-icon" title="Alternar Modo Mini-Overlay Flutuante Always-on-Top (Ctrl+Shift+O)">
+          📌
+        </button>
+      </div>
+    </header>
+
+    <!-- Discovered 'separados' quick-import banner -->
+    <div id="quickImportBar" class="quick-import-bar hidden">
+      <span>✨ Pastas do separador de vozes detectadas em <b>Videos</b>:</span>
+      <div id="quickImportChips" class="quick-chips"></div>
+    </div>
+
+    <!-- Main Workspace -->
+    <div class="workspace">
+      <!-- Sidebar: Categories & Recognized Speakers -->
+      <aside class="sidebar">
+        <div class="sidebar-section">
+          <h3>CATEGORIAS</h3>
+          <div id="categoryList" class="nav-list"></div>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="section-header-row">
+            <h3>VOZES / AMIGOS</h3>
+            <span class="hint-tag" title="Clique no lápis ao lado de cada interlocutor para dar o nome real do seu amigo!">Renomear</span>
+          </div>
+          <div id="speakerList" class="nav-list"></div>
+        </div>
+
+        <div class="sidebar-section ai-status-box">
+          <div class="ai-status-title">🧠 IA Local Ativa</div>
+          <p id="aiStatusText">TitaNet Speaker ID + Faster-Whisper + Análise Acústica de Emoção</p>
+        </div>
+      </aside>
+
+      <!-- Soundpad Area -->
+      <main class="pad-container">
+        <div class="search-toolbar">
+          <div class="search-input-wrap">
+            <span class="search-icon">🔍</span>
+            <input
+              type="text"
+              id="searchInput"
+              placeholder="Buscar por nome do botão, frase falada na transcrição, amigo, humor ou atalho (Ctrl+F)..."
+            />
+            <button id="btnClearSearch" class="btn-clear hidden" title="Limpar busca">✕</button>
+          </div>
+          <div class="toolbar-meta">
+            <span id="clipCountBadge">0 áudios</span>
+          </div>
+        </div>
+
+        <!-- Soundboard Grid -->
+        <div id="soundGrid" class="sound-grid"></div>
+      </main>
+    </div>
+
+    <!-- Edit / Studio Modal -->
+    <div id="editModal" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h2 id="modalTitle">⚙️ Configurar Botão do Soundboard</h2>
+          <button id="btnCloseModal" class="btn-clear">✕</button>
+        </div>
+
+        <div class="modal-body">
+          <input type="hidden" id="editClipId" />
+
+          <div class="form-row">
+            <div class="form-group emoji-col">
+              <label>Emoji</label>
+              <input type="text" id="editEmoji" maxlength="4" value="🔊" />
+            </div>
+            <div class="form-group flex-1">
+              <label>Título do Botão</label>
+              <input type="text" id="editTitle" maxlength="40" placeholder="Ex: Relaxa que não esfola!" />
+            </div>
+            <div class="form-group color-col">
+              <label>Cor</label>
+              <input type="color" id="editColor" value="#3b82f6" />
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label>Categoria</label>
+              <select id="editCategory">
+                <option value="Rage">🔥 Rage / Surto</option>
+                <option value="Risada">😂 Risada</option>
+                <option value="Meme">🤡 Meme / Pérola</option>
+                <option value="Call">🎙️ Fala / Call</option>
+                <option value="Efeito">🔊 Efeito Sonoro</option>
+                <option value="Clássico">👑 Clássico</option>
+              </select>
+            </div>
+            <div class="form-group flex-1">
+              <label>Quem falou (Interlocutor)</label>
+              <div class="speaker-select-row">
+                <select id="editSpeaker"></select>
+                <button type="button" id="btnEnrollVoice" class="btn btn-xs btn-secondary" title="Salva a voz deste áudio no referencias_vozes.npz para reconhecer este amigo nos próximos áudios">
+                  🎙️ Treinar Voz
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label>Atalho Global (Clique e pressione a tecla)</label>
+              <div class="hotkey-input-row">
+                <input type="text" id="editHotkey" placeholder="Ex: f9, alt+1, ctrl+num 1" readonly />
+                <button type="button" id="btnClearHotkey" class="btn btn-xs btn-secondary">Limpar</button>
+              </div>
+            </div>
+            <div class="form-group flex-1">
+              <label>Tom Acústico Detectado</label>
+              <input type="text" id="editMood" readonly class="readonly-input" />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Transcrição (Usada na busca e nomeação por IA)</label>
+            <textarea id="editTranscript" rows="2" placeholder="Texto falado no áudio..."></textarea>
+          </div>
+
+          <div class="form-row trim-box">
+            <div class="form-group flex-1">
+              <label>Corte Início (s): <span id="trimStartVal">0.00s</span></label>
+              <input type="range" id="editTrimStart" min="0" max="10" step="0.05" value="0" />
+            </div>
+            <div class="form-group flex-1">
+              <label>Corte Fim (s): <span id="trimEndVal">0.00s</span></label>
+              <input type="range" id="editTrimEnd" min="0" max="10" step="0.05" value="0" />
+            </div>
+            <div class="form-group flex-1">
+              <label>Ganho Individual: <span id="clipVolVal">100%</span></label>
+              <input type="range" id="editVolume" min="0.2" max="2.5" step="0.05" value="1.0" />
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <div class="left-footer-btns">
+            <button type="button" id="btnDeleteClip" class="btn btn-danger">🗑️ Excluir</button>
+            <button type="button" id="btnReanalyzeAI" class="btn btn-ai">✨ Re-analisar com IA</button>
+            <button type="button" id="btnPreviewMonitor" class="btn btn-secondary">🎧 Testar só no Fone</button>
+          </div>
+          <div class="right-footer-btns">
+            <button type="button" id="btnSaveClip" class="btn btn-primary">💾 Salvar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Speaker Rename Modal -->
+    <div id="speakerModal" class="modal-backdrop hidden">
+      <div class="modal-card modal-sm">
+        <div class="modal-header">
+          <h2>🎙️ Renomear Amigo / Interlocutor</h2>
+          <button id="btnCloseSpeakerModal" class="btn-clear">✕</button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="renameSpeakerId" />
+          <div class="form-group">
+            <label>Nome do Amigo</label>
+            <input type="text" id="renameSpeakerName" placeholder="Ex: Diogo, João, Usuario..." />
+          </div>
+          <div class="form-group">
+            <label>Cor do Badge</label>
+            <input type="color" id="renameSpeakerColor" value="#3b82f6" />
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" id="btnSaveSpeaker" class="btn btn-primary">Salvar Nome</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toastContainer" class="toast-container"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
