@@ -46,7 +46,22 @@ DEFAULT_SETTINGS = {
 }
 
 
+CURRENT_SCHEMA_VERSION = 1
+SQLITE_TRIGGER_CLIPS = 2000
+SQLITE_TRIGGER_SAVE_MS = 150.0
+SQLITE_TRIGGER_JSON_MB = 10.0
+
+
 class SoundboardStore:
+    """Storage manager with schema versioning and coalesced write-behind.
+
+    SQLite Migration Trigger:
+    When any of the following conditions is met, persistence should be migrated from JSON to SQLite:
+      1. Number of clips > SQLITE_TRIGGER_CLIPS (2,000 clips)
+      2. Save duration > SQLITE_TRIGGER_SAVE_MS (150 ms)
+      3. soundboard.json size > SQLITE_TRIGGER_JSON_MB (10 MB)
+    """
+
     def __init__(self, data_dir: str = "data"):
         self.data_dir = Path(data_dir).resolve()
         self.clips_dir = self.data_dir / "clips"
@@ -54,14 +69,18 @@ class SoundboardStore:
         self.tmp_dir = self.data_dir / "tmp"
         self.db_path = self.data_dir / "soundboard.json"
         self._lock = threading.RLock()
-        self._save_timer = None
+        self._save_condition = threading.Condition(self._lock)
         self._dirty = False
+        self._save_deadline = 0.0
+        self._stop_worker = False
+        self._last_save_duration_ms = 0.0
 
         self.clips_dir.mkdir(parents=True, exist_ok=True)
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self.tmp_dir.mkdir(parents=True, exist_ok=True)
 
         self.state = {
+            "schema_version": CURRENT_SCHEMA_VERSION,
             "settings": dict(DEFAULT_SETTINGS),
             "categories": list(DEFAULT_CATEGORIES),
             "speakers": {},
@@ -69,80 +88,137 @@ class SoundboardStore:
         }
         self._load()
 
+        self._worker_thread = threading.Thread(
+            target=self._write_behind_loop, daemon=True, name="StoreWriteBehind"
+        )
+        self._worker_thread.start()
+
     def _load(self):
         with self._lock:
-            if self.db_path.exists():
-                try:
-                    loaded = json.loads(self.db_path.read_text(encoding="utf-8"))
-                    if isinstance(loaded, dict):
-                        self.state["settings"] = {**DEFAULT_SETTINGS, **loaded.get("settings", {})}
-                        loaded_cats = loaded.get("categories") or []
-                        existing_cat_ids = {c.get("id") for c in loaded_cats if isinstance(c, dict)}
-                        for def_cat in DEFAULT_CATEGORIES:
-                            if def_cat["id"] not in existing_cat_ids:
-                                loaded_cats.append(dict(def_cat))
-                        self.state["categories"] = loaded_cats or list(DEFAULT_CATEGORIES)
-                        self.state["speakers"] = loaded.get("speakers") or {}
-                        self.state["clips"] = loaded.get("clips") or []
-                except Exception:
-                    pass
-
-    def save(self):
-        with self._lock:
-            timer = self._save_timer
-            self._save_timer = None
-            if timer is not None:
-                timer.cancel()
-            tmp_path = self.db_path.with_suffix(".json.tmp")
+            if not self.db_path.exists():
+                return
             try:
-                tmp_path.write_text(
-                    json.dumps(self.state, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                os.replace(tmp_path, self.db_path)
+                raw_text = self.db_path.read_text(encoding="utf-8")
+                loaded = json.loads(raw_text)
             except Exception:
-                # Keep the state dirty so a later flush/retry can persist it, and
-                # never leave a half-written temp file behind.
-                self._dirty = True
-                try:
-                    if tmp_path.exists():
-                        tmp_path.unlink()
-                except Exception:
-                    pass
-                raise
-            self._dirty = False
+                return
+            if not isinstance(loaded, dict):
+                return
 
-    def _safe_save(self):
-        """Timer target: a failing save must not kill the debounce thread silently."""
+            schema_version = loaded.get("schema_version")
+            if schema_version is None:
+                self._migrate_v0_to_v1(raw_text, loaded)
+            else:
+                self._apply_loaded(loaded)
+
+    def _migrate_v0_to_v1(self, raw_text: str, loaded: dict):
+        bak_path = self.db_path.with_suffix(".json.bak")
         try:
-            self.save()
+            bak_path.write_text(raw_text, encoding="utf-8")
+        except Exception:
+            pass
+
+        self._apply_loaded(loaded)
+        self.state["schema_version"] = CURRENT_SCHEMA_VERSION
+        try:
+            self._perform_save()
         except Exception:
             self._dirty = True
 
-    def save_debounced(self, delay: float = 0.75):
-        """Marks the state dirty and schedules a single delayed save."""
-        with self._lock:
+    def _apply_loaded(self, loaded: dict):
+        self.state["schema_version"] = int(loaded.get("schema_version", CURRENT_SCHEMA_VERSION))
+        self.state["settings"] = {**DEFAULT_SETTINGS, **loaded.get("settings", {})}
+        loaded_cats = loaded.get("categories") or []
+        existing_cat_ids = {c.get("id") for c in loaded_cats if isinstance(c, dict)}
+        for def_cat in DEFAULT_CATEGORIES:
+            if def_cat["id"] not in existing_cat_ids:
+                loaded_cats.append(dict(def_cat))
+        self.state["categories"] = loaded_cats or list(DEFAULT_CATEGORIES)
+        self.state["speakers"] = loaded.get("speakers") or {}
+        self.state["clips"] = loaded.get("clips") or []
+
+    def _perform_save(self):
+        """Must be called with self._lock held."""
+        t0 = time.perf_counter()
+        tmp_path = self.db_path.with_suffix(".json.tmp")
+        try:
+            tmp_path.write_text(
+                json.dumps(self.state, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(tmp_path, self.db_path)
+            self._dirty = False
+            self._save_deadline = 0.0
+            self._last_save_duration_ms = (time.perf_counter() - t0) * 1000.0
+        except Exception:
             self._dirty = True
-            if self._save_timer is not None:
-                self._save_timer.cancel()
-            timer = threading.Timer(max(0.0, float(delay)), self._safe_save)
-            timer.daemon = True
-            self._save_timer = timer
-            timer.start()
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
+            raise
+
+    def save(self):
+        with self._lock:
+            self._perform_save()
+            self._save_condition.notify_all()
+
+    def _write_behind_loop(self):
+        """Dedicated worker thread coalescing debounced disk writes."""
+        while True:
+            with self._save_condition:
+                while not self._stop_worker and not self._dirty:
+                    self._save_condition.wait()
+                if self._stop_worker:
+                    if self._dirty:
+                        try:
+                            self._perform_save()
+                        except Exception:
+                            pass
+                    break
+
+                now = time.time()
+                if now < self._save_deadline:
+                    timeout = max(0.01, self._save_deadline - now)
+                    self._save_condition.wait(timeout=timeout)
+                    continue
+
+                try:
+                    self._perform_save()
+                except Exception:
+                    self._dirty = True
+                    self._save_deadline = time.time() + 1.0
+
+    def mark_dirty(self, delay: float = 0.75):
+        """Marks state dirty and schedules coalesced write-behind persistence."""
+        with self._save_condition:
+            self._dirty = True
+            deadline = time.time() + max(0.0, float(delay))
+            if not self._save_deadline or deadline < self._save_deadline:
+                self._save_deadline = deadline
+            self._save_condition.notify_all()
+
+    def save_debounced(self, delay: float = 0.75):
+        self.mark_dirty(delay)
 
     def flush(self):
         """Cancels any pending debounced save and persists immediately when dirty."""
         with self._lock:
-            timer = self._save_timer
-            self._save_timer = None
-            if timer is not None:
-                timer.cancel()
             if self._dirty:
                 try:
-                    self.save()
+                    self._perform_save()
                 except Exception:
-                    # atexit must never print a traceback; retry on next flush.
                     self._dirty = True
+            self._save_condition.notify_all()
+
+    def close(self):
+        """Drains dirty state and stops the write-behind thread."""
+        with self._save_condition:
+            self._stop_worker = True
+            self._save_condition.notify_all()
+        if hasattr(self, "_worker_thread") and self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=2.0)
 
     def snapshot(self) -> dict:
         """Deep copy of the whole state, safe to serialize or mutate by callers."""
@@ -350,7 +426,7 @@ class SoundboardStore:
             c = self.get_clip(clip_id)
             if c:
                 c["play_count"] = int(c.get("play_count", 0)) + 1
-                self.save()
+                self.mark_dirty(delay=0.5)
             return c
 
     def set_clip_volume(self, clip_id: str, volume: float) -> dict | None:
