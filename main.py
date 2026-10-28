@@ -38,8 +38,8 @@ class SoundboardAPI:
         self._auto_bind_devices()
 
         self._hotkeys = HotkeyManager(
-            on_play_clip=self.play_clip,
-            on_stop_all=self.stop_all,
+            on_play_clip=lambda cid: self.play_clip(cid, monitor_only=False, from_hotkey=True),
+            on_stop_all=lambda: self.stop_all(from_hotkey=True),
             on_save_replay=self.capture_replay_clip,
             on_toggle_overlay=self.toggle_mini_overlay,
         )
@@ -161,7 +161,7 @@ class SoundboardAPI:
             self._hotkeys.refresh(self._store.state["clips"], s)
         return s
 
-    def play_clip(self, clip_id: str, monitor_only: bool = False) -> dict:
+    def play_clip(self, clip_id: str, monitor_only: bool = False, from_hotkey: bool = False) -> dict:
         clip = self._store.get_clip(clip_id)
         if not clip:
             return {"ok": False, "error": "Clip não encontrado"}
@@ -174,20 +174,29 @@ class SoundboardAPI:
         play_id = self._audio.play_clip(
             clip=clip,
             settings=settings,
-            on_finish=lambda cid, pid: self._notify_ui("clip_finished", {"clip_id": cid, "play_id": pid}),
-            on_tick=lambda st: self._notify_ui("playback_tick", st),
+            on_finish=None,
+            on_tick=None,
             monitor_only=bool(monitor_only),
         )
         if not monitor_only:
             self._store.increment_play_count(clip_id)
-        self._notify_ui("clip_started", {
+        sess = self._audio.get_session(play_id)
+        initial_status = sess.status() if sess else {
+            "playing": True,
             "clip_id": clip_id,
             "play_id": play_id,
+            "title": clip.get("title") or "Áudio",
+            "emoji": clip.get("emoji") or "🔊",
+            "position": 0.0,
             "duration": eff_dur,
+            "paused": False,
+            "loop": False,
+            "volume": float(clip.get("volume", 1.0)),
             "monitor_only": bool(monitor_only),
-            "live_volume": float(clip.get("volume", 1.0)),
-        })
-        return {"ok": True, "play_id": play_id}
+        }
+        if from_hotkey:
+            self._notify_ui("clip_started", initial_status)
+        return {"ok": True, "play_id": play_id, "status": initial_status}
 
     def pause_resume_playback(self, play_id: str = None) -> dict:
         sess = self._audio.get_session(play_id)
@@ -195,7 +204,6 @@ class SoundboardAPI:
             return {"ok": False}
         paused = sess.toggle_pause()
         st = sess.status()
-        self._notify_ui("playback_tick", st)
         return {"ok": True, "paused": paused, "status": st}
 
     def seek_playback(self, position_s: float, play_id: str = None) -> dict:
@@ -204,7 +212,6 @@ class SoundboardAPI:
             return {"ok": False}
         sess.seek(position_s)
         st = sess.status()
-        self._notify_ui("playback_tick", st)
         return {"ok": True, "status": st}
 
     def set_playback_loop(self, loop: bool, play_id: str = None) -> dict:
@@ -213,7 +220,6 @@ class SoundboardAPI:
             return {"ok": False}
         loop_val = sess.set_loop(loop)
         st = sess.status()
-        self._notify_ui("playback_tick", st)
         return {"ok": True, "loop": loop_val, "status": st}
 
     def set_live_clip_volume(self, volume: float, play_id: str = None) -> dict:
@@ -221,9 +227,10 @@ class SoundboardAPI:
         if not sess:
             return {"ok": False}
         vol = sess.set_live_volume(volume)
-        self._store.add_or_update_clip({"id": sess.clip_id, "volume": vol})
+        clip = self._store.get_clip(sess.clip_id)
+        if clip is not None:
+            clip["volume"] = round(vol, 2)
         st = sess.status()
-        self._notify_ui("playback_tick", st)
         return {"ok": True, "volume": vol, "status": st}
 
     def restart_playback(self, play_id: str = None) -> dict:
@@ -232,7 +239,6 @@ class SoundboardAPI:
             return {"ok": False}
         sess.restart()
         st = sess.status()
-        self._notify_ui("playback_tick", st)
         return {"ok": True, "status": st}
 
     def get_clip_waveform(self, clip_id: str, num_bins: int = 160) -> dict:
@@ -246,9 +252,10 @@ class SoundboardAPI:
         except Exception:
             return {"ok": False, "peaks": []}
 
-    def stop_all(self) -> dict:
+    def stop_all(self, from_hotkey: bool = False) -> dict:
         self._audio.stop_all()
-        self._notify_ui("stopped_all", {})
+        if from_hotkey:
+            self._notify_ui("stopped_all", {})
         return {"ok": True}
 
     def save_clip_edits(self, clip_data: dict) -> dict:

@@ -405,10 +405,11 @@ function renderGrid() {
       <div class="play-progress" id="prog_${clip.id}"></div>
     `;
 
-    card.onclick = (e) => {
+    card.onclick = async (e) => {
       if (e.target.closest(".btn-preview")) {
         e.stopPropagation();
-        api().play_clip(clip.id, true);
+        const res = await api().play_clip(clip.id, true);
+        if (res && res.status) syncActivePlayback(res.status);
         return;
       }
       if (e.target.closest(".btn-fav")) {
@@ -430,7 +431,8 @@ function renderGrid() {
         openEditModal(clip);
         return;
       }
-      api().play_clip(clip.id, false);
+      const res = await api().play_clip(clip.id, false);
+      if (res && res.status) syncActivePlayback(res.status);
     };
 
     card.oncontextmenu = (e) => {
@@ -557,6 +559,72 @@ function drawWaveformCanvas() {
   ctx.fillRect(startX, 0, 2.5, h);
   ctx.fillStyle = "#f59e0b";
   ctx.fillRect(Math.max(0, endX - 2.5), 0, 2.5, h);
+}
+
+let playbackRafId = null;
+
+function syncActivePlayback(status) {
+  if (!status || !status.clip_id) return;
+  const pos = Number(status.position ?? status.current_s ?? 0);
+  const dur = Math.max(0.1, Number(status.duration ?? status.duration_s ?? 1));
+  if (!state.settings.overlap_audio) {
+    state.playingClips = {};
+  }
+  state.playingClips[status.clip_id] = true;
+  state.activePlayback = {
+    ...status,
+    playing: status.playing !== false,
+    position: pos,
+    duration: dur,
+    volume: Number(status.volume ?? status.live_volume ?? 1),
+    anchorPosSec: pos,
+    anchorTimeMs: performance.now(),
+  };
+  renderGrid();
+  startPlaybackRaf();
+}
+
+function startPlaybackRaf() {
+  if (playbackRafId) cancelAnimationFrame(playbackRafId);
+  const step = () => {
+    const ap = state.activePlayback;
+    if (!ap || !ap.playing) {
+      playbackRafId = null;
+      return;
+    }
+    if (!ap.paused) {
+      const elapsedSec = Math.max(0, (performance.now() - ap.anchorTimeMs) / 1000);
+      let curPos = ap.anchorPosSec + elapsedSec;
+      if (curPos >= ap.duration) {
+        if (ap.loop) {
+          curPos = curPos % ap.duration;
+          ap.anchorPosSec = curPos;
+          ap.anchorTimeMs = performance.now();
+        } else {
+          delete state.playingClips[ap.clip_id];
+          state.activePlayback = null;
+          playbackRafId = null;
+          renderGrid();
+          return;
+        }
+      }
+      ap.position = curPos;
+      const seekSlider = document.getElementById("npSeekSlider");
+      if (seekSlider && document.activeElement !== seekSlider) {
+        seekSlider.max = ap.duration.toFixed(2);
+        seekSlider.value = curPos.toFixed(2);
+      }
+      const curEl = document.getElementById("npCurTime");
+      if (curEl) curEl.textContent = formatPlayTime(curPos);
+      const prog = document.getElementById(`prog_${ap.clip_id}`);
+      if (prog && ap.duration > 0) {
+        prog.style.transition = "none";
+        prog.style.width = `${Math.min(100, (curPos / ap.duration) * 100)}%`;
+      }
+    }
+    playbackRafId = requestAnimationFrame(step);
+  };
+  playbackRafId = requestAnimationFrame(step);
 }
 
 function updateNowPlayingBar(playback) {
@@ -692,7 +760,12 @@ function bindEvents() {
     };
   }
 
-  document.getElementById("btnStopAll").onclick = () => api().stop_all();
+  document.getElementById("btnStopAll").onclick = () => {
+    state.playingClips = {};
+    state.activePlayback = null;
+    renderGrid();
+    api().stop_all();
+  };
 
   const replaySecsInput = document.getElementById("replaySecondsInput");
   replaySecsInput.onchange = (e) => {
@@ -787,10 +860,7 @@ function bindEvents() {
   if (btnNpRestart) {
     btnNpRestart.onclick = async () => {
       const res = await api().restart_playback();
-      if (res && res.status) {
-        state.activePlayback = res.status;
-        updateNowPlayingBar(state.activePlayback);
-      }
+      if (res && res.status) syncActivePlayback(res.status);
     };
   }
   const btnNpPause = document.getElementById("btnNpPause");
@@ -798,8 +868,7 @@ function bindEvents() {
     btnNpPause.onclick = async () => {
       const res = await api().pause_resume_playback();
       if (res && res.status) {
-        state.activePlayback = res.status;
-        updateNowPlayingBar(state.activePlayback);
+        syncActivePlayback(res.status);
         renderGrid();
       }
     };
@@ -809,15 +878,17 @@ function bindEvents() {
     btnNpLoop.onclick = async () => {
       const nextLoop = !Boolean(state.activePlayback?.loop);
       const res = await api().set_playback_loop(nextLoop);
-      if (res && res.status) {
-        state.activePlayback = res.status;
-        updateNowPlayingBar(state.activePlayback);
-      }
+      if (res && res.status) syncActivePlayback(res.status);
     };
   }
   const btnNpStop = document.getElementById("btnNpStop");
   if (btnNpStop) {
-    btnNpStop.onclick = () => api().stop_all();
+    btnNpStop.onclick = () => {
+      state.playingClips = {};
+      state.activePlayback = null;
+      renderGrid();
+      api().stop_all();
+    };
   }
   const npSeekSlider = document.getElementById("npSeekSlider");
   if (npSeekSlider) {
@@ -829,10 +900,7 @@ function bindEvents() {
     npSeekSlider.onchange = async (e) => {
       const pos = Number(e.target.value) || 0;
       const res = await api().seek_playback(pos);
-      if (res && res.status) {
-        state.activePlayback = res.status;
-        updateNowPlayingBar(state.activePlayback);
-      }
+      if (res && res.status) syncActivePlayback(res.status);
     };
   }
   const npLiveVolume = document.getElementById("npLiveVolume");
@@ -841,6 +909,7 @@ function bindEvents() {
       const v = Number(e.target.value) || 1;
       const lbl = document.getElementById("npLiveVolVal");
       if (lbl) lbl.textContent = `${Math.round(v * 100)}%`;
+      if (state.activePlayback) state.activePlayback.volume = v;
       api().set_live_clip_volume(v);
     };
   }
@@ -999,7 +1068,8 @@ function bindEvents() {
     const id = document.getElementById("editClipId").value;
     // Save temporary trim/vol adjustments before previewing
     await document.getElementById("btnSaveClip").onclick();
-    api().play_clip(id, true);
+    const res = await api().play_clip(id, true);
+    if (res && res.status) syncActivePlayback(res.status);
   };
 
   document.getElementById("btnReanalyzeAI").onclick = async () => {
@@ -1094,25 +1164,11 @@ function bindEvents() {
 // Callback receiver from Python backend
 window.onBackendEvent = (event, payload) => {
   if (event === "clip_started") {
-    state.playingClips[payload.clip_id] = true;
-    state.activePlayback = { ...payload, playing: true };
+    syncActivePlayback(payload);
     renderGrid();
-    const prog = document.getElementById(`prog_${payload.clip_id}`);
-    if (prog) {
-      prog.style.transition = `width ${payload.duration || 1.5}s linear`;
-      requestAnimationFrame(() => {
-        prog.style.width = "100%";
-      });
-    }
   } else if (event === "playback_tick") {
     if (payload && payload.clip_id) {
-      state.activePlayback = payload;
-      updateNowPlayingBar(payload);
-      const prog = document.getElementById(`prog_${payload.clip_id}`);
-      if (prog && payload.duration > 0) {
-        prog.style.transition = "width 90ms linear";
-        prog.style.width = `${Math.min(100, (payload.position / payload.duration) * 100)}%`;
-      }
+      syncActivePlayback(payload);
     }
   } else if (event === "clip_finished") {
     delete state.playingClips[payload.clip_id];

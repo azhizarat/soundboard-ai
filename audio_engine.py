@@ -105,6 +105,8 @@ class PlaybackSession:
         sr: int = 48000,
         monitor_only: bool = False,
         live_volume: float = 1.0,
+        title: str = "",
+        emoji: str = "🔊",
     ):
         self.play_id = play_id
         self.clip_id = clip_id
@@ -113,10 +115,13 @@ class PlaybackSession:
         self.total_samples = len(data)
         self.duration_s = round(float(self.total_samples / max(1, self.sr)), 2)
         self.pos_idx = 0
+        self.seek_epoch = 0
         self.paused = False
         self.loop = False
         self.monitor_only = bool(monitor_only)
         self.live_volume = float(live_volume)
+        self.title = title
+        self.emoji = emoji
         self.stop_event = threading.Event()
         self._lock = threading.Lock()
 
@@ -129,6 +134,7 @@ class PlaybackSession:
         with self._lock:
             target = int(round(max(0.0, float(position_s)) * self.sr))
             self.pos_idx = max(0, min(max(0, self.total_samples - 1), target))
+            self.seek_epoch += 1
 
     def set_loop(self, loop: bool) -> bool:
         with self._lock:
@@ -143,6 +149,7 @@ class PlaybackSession:
     def restart(self):
         with self._lock:
             self.pos_idx = 0
+            self.seek_epoch += 1
             self.paused = False
 
     def stop(self):
@@ -151,14 +158,21 @@ class PlaybackSession:
     def status(self) -> dict:
         with self._lock:
             cur_s = round(float(self.pos_idx / max(1, self.sr)), 2)
+            vol = round(self.live_volume, 2)
             return {
+                "playing": not self.stop_event.is_set(),
                 "play_id": self.play_id,
                 "clip_id": self.clip_id,
+                "title": self.title,
+                "emoji": self.emoji,
+                "position": cur_s,
+                "duration": self.duration_s,
                 "current_s": cur_s,
                 "duration_s": self.duration_s,
                 "paused": self.paused,
                 "loop": self.loop,
-                "live_volume": round(self.live_volume, 2),
+                "volume": vol,
+                "live_volume": vol,
                 "monitor_only": self.monitor_only,
             }
 
@@ -358,16 +372,19 @@ class AudioEngine:
         device_id: int | None,
         base_gain: float,
         is_driver: bool,
-        on_tick=None,
     ):
         if base_gain <= 0.001 or session.total_samples == 0:
             return
         try:
             import sounddevice as sd
 
-            chunk_size = 1024
-            last_tick = 0.0
-            local_idx = 0
+            chunk_size = 4096
+            silence_block = np.zeros((1024, 2), dtype=np.float32)
+            with session._lock:
+                local_idx = session.pos_idx
+                local_epoch = session.seek_epoch
+                last_gain = float(base_gain * session.live_volume)
+            scaled_full = np.clip(session.data * last_gain, -1.0, 1.0).astype(np.float32)
 
             with sd.OutputStream(
                 samplerate=self.TARGET_SR,
@@ -377,47 +394,40 @@ class AudioEngine:
                 blocksize=chunk_size,
             ) as stream:
                 while not session.stop_event.is_set():
-                    if session.paused:
-                        time.sleep(0.03)
+                    with session._lock:
+                        if session.seek_epoch != local_epoch:
+                            local_idx = session.pos_idx
+                            local_epoch = session.seek_epoch
+                        paused = session.paused
+                        loop = session.loop
+                        live_v = session.live_volume
+
+                    if paused:
+                        stream.write(silence_block)
                         continue
+
+                    if local_idx >= session.total_samples:
+                        if loop:
+                            local_idx = 0
+                            if is_driver:
+                                with session._lock:
+                                    session.pos_idx = 0
+                        else:
+                            break
+
+                    cur_gain = float(base_gain * live_v)
+                    if abs(cur_gain - last_gain) > 1e-3:
+                        last_gain = cur_gain
+                        scaled_full = np.clip(session.data * last_gain, -1.0, 1.0).astype(np.float32)
+
+                    end = min(local_idx + chunk_size, session.total_samples)
+                    stream.write(scaled_full[local_idx:end])
+                    local_idx = end
 
                     if is_driver:
                         with session._lock:
-                            cur = session.pos_idx
-                            if cur >= session.total_samples:
-                                if session.loop:
-                                    session.pos_idx = 0
-                                    cur = 0
-                                else:
-                                    break
-                            end = min(cur + chunk_size, session.total_samples)
-                            raw_slice = session.data[cur:end]
-                            session.pos_idx = end
-                            live_v = session.live_volume
-                    else:
-                        with session._lock:
-                            cur = session.pos_idx
-                            live_v = session.live_volume
-                            if cur >= session.total_samples and not session.loop:
-                                break
-                        # Secondary stream follows driver position closely
-                        read_st = max(0, min(cur, session.total_samples - chunk_size))
-                        end = min(read_st + chunk_size, session.total_samples)
-                        raw_slice = session.data[read_st:end]
-                        if len(raw_slice) == 0:
-                            break
-
-                    scaled = np.clip(raw_slice * float(base_gain * live_v), -1.0, 1.0).astype(np.float32)
-                    stream.write(scaled)
-
-                    if is_driver and callable(on_tick):
-                        now = time.time()
-                        if now - last_tick >= 0.08:
-                            last_tick = now
-                            try:
-                                on_tick(session.status())
-                            except Exception:
-                                pass
+                            if session.seek_epoch == local_epoch:
+                                session.pos_idx = local_idx
         except Exception:
             pass
 
@@ -454,6 +464,8 @@ class AudioEngine:
             sr=self.TARGET_SR,
             monitor_only=monitor_only,
             live_volume=float(clip.get("volume", 1.0)),
+            title=str(clip.get("title") or "Áudio"),
+            emoji=str(clip.get("emoji") or "🔊"),
         )
         with self._lock:
             self._active_events[play_id] = session.stop_event
@@ -473,7 +485,7 @@ class AudioEngine:
             if has_cable:
                 t_cable = threading.Thread(
                     target=self._stream_session_to_device,
-                    args=(session, int(cable_id), cable_vol, True, on_tick),
+                    args=(session, int(cable_id), cable_vol, True),
                     daemon=True,
                 )
                 threads.append(t_cable)
@@ -487,16 +499,27 @@ class AudioEngine:
                         int(monitor_id) if monitor_id is not None else None,
                         monitor_vol,
                         not has_cable,
-                        on_tick if not has_cable else None,
                     ),
                     daemon=True,
                 )
                 threads.append(t_mon)
                 t_mon.start()
 
+            if callable(on_tick) and threads:
+                def _ui_ticker():
+                    while not session.stop_event.is_set() and any(t.is_alive() for t in threads):
+                        try:
+                            on_tick(session.status())
+                        except Exception:
+                            pass
+                        time.sleep(0.12)
+
+                threading.Thread(target=_ui_ticker, daemon=True).start()
+
             for t in threads:
                 t.join()
 
+            session.stop_event.set()
             with self._lock:
                 self._active_events.pop(play_id, None)
                 self._sessions.pop(play_id, None)
