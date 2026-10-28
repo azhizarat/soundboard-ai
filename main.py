@@ -4,6 +4,8 @@ import copy
 import math
 import time
 import atexit
+import argparse
+import logging
 import shutil
 import threading
 import uuid
@@ -1518,11 +1520,39 @@ class SoundboardAPI:
         return {"ok": True, "is_mini_overlay": self._is_mini_overlay}
 
 
-def main():
-    import webview
+def parse_args(args=None):
+    parser = argparse.ArgumentParser(description="Soundboard AI — VB-Audio Cable Studio")
+    parser.add_argument("--minimized", action="store_true", help="Inicia minimizado na bandeja do sistema")
+    parser.add_argument("--debug", action="store_true", help="Ativa modo debug e logs no console")
+    parser.add_argument("--no-tray", action="store_true", help="Desativa o ícone na bandeja do sistema")
+    parser.add_argument("--data-dir", type=str, default=None, help="Caminho personalizado da pasta de dados")
+    return parser.parse_args(args)
 
-    api = SoundboardAPI(start_background_services=True)
+
+def main(args=None):
+    import webview
+    from single_instance import SingleInstance
+    from app_logging import setup_logging
+    from tray import SoundboardTray, ensure_icon_image
+
+    opts = parse_args(args)
+
+    app_cfg = config.load_config(opts.data_dir)
+    log_file = setup_logging(app_cfg.data_dir, debug=opts.debug)
+    logging.info(f"Soundboard AI iniciando. Log em: {log_file}")
+
+    single_inst = SingleInstance(data_dir=app_cfg.data_dir)
+    if not single_inst.acquire():
+        logging.warning("Outra instância do Soundboard AI já está em execução. Encerrando.")
+        single_inst.notify_already_running()
+        sys.exit(0)
+
+    atexit.register(single_inst.release)
+
+    api = SoundboardAPI(data_dir=opts.data_dir, start_background_services=True)
     ui_path = Path(__file__).parent.resolve() / "ui" / "index.html"
+    icon_path = Path(__file__).parent.resolve() / "ui" / "icon.png"
+    ensure_icon_image(icon_path)
 
     window = webview.create_window(
         title="Soundboard AI — VB-Audio Cable Studio",
@@ -1532,9 +1562,56 @@ def main():
         height=820,
         min_size=(360, 460),
         background_color="#0b0f19",
+        hidden=opts.minimized,
     )
     api._set_window(window)
-    webview.start(debug=False)
+
+    tray = None
+    is_exiting = False
+
+    if not opts.no_tray:
+        def on_open():
+            window.show()
+            window.restore()
+
+        def on_exit():
+            nonlocal is_exiting
+            is_exiting = True
+            if tray:
+                tray.stop()
+            window.destroy()
+
+        def on_open_data_dir():
+            try:
+                os.startfile(str(api._config.data_dir))
+            except Exception:
+                import webbrowser
+                webbrowser.open(api._config.data_dir.as_uri())
+
+        tray = SoundboardTray(
+            on_open=on_open,
+            on_exit=on_exit,
+            on_open_data_dir=on_open_data_dir,
+            app_root=Path(__file__).parent.resolve(),
+            icon_path=icon_path,
+        )
+        tray.run_detached()
+
+        def on_closing():
+            if not is_exiting:
+                window.hide()
+                return False
+            if tray:
+                tray.stop()
+            return True
+
+        window.events.closing += on_closing
+
+    try:
+        webview.start(debug=opts.debug, icon=str(icon_path) if icon_path.exists() else None)
+    finally:
+        if tray:
+            tray.stop()
 
 
 if __name__ == "__main__":

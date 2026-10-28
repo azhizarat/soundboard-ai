@@ -1,11 +1,16 @@
 @echo off
 chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
-title Soundboard AI - VB-Audio Cable Studio
+title Soundboard AI [Modo Diagnóstico]
 cd /d "%~dp0"
 
-echo Iniciando Soundboard AI...
-uv run --python 3.13 "%~dp0main.py"
+echo ========================================================
+echo Iniciando Soundboard AI em modo de diagnóstico (--debug)
+echo Logs detalhados serão exibidos neste console.
+echo ========================================================
+echo.
+
+uv run --python 3.13 "%~dp0main.py" --debug
 if errorlevel 1 (
     echo.
     echo [Erro] Ocorreu uma falha ao iniciar o Soundboard AI.
