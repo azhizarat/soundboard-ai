@@ -17,6 +17,8 @@ const state = {
   waveformDuration: 10,
   recordingHotkey: false,
   sessionStartSec: Date.now() / 1000,
+  draftClipId: null,
+  draftCommitting: false,
 };
 
 function formatPlayTime(sec) {
@@ -530,7 +532,125 @@ function updateModalPreviewButtons(isPlaying) {
   }
 }
 
+async function saveCurrentClipEdits(closeModalAfter = true) {
+  const id = document.getElementById("editClipId").value;
+  if (!id) return null;
+  const selSpk = document.getElementById("editSpeaker").value;
+  const payload = {
+    id,
+    emoji: document.getElementById("editEmoji").value || "🔊",
+    title: document.getElementById("editTitle").value || "Áudio",
+    color: document.getElementById("editColor").value,
+    category: document.getElementById("editCategory").value,
+    speaker_id: selSpk,
+    speaker_ids: selSpk ? [selSpk] : [],
+    hotkey: document.getElementById("editHotkey").value,
+    transcript: document.getElementById("editTranscript").value,
+    trim_start: Number(document.getElementById("editTrimStart").value),
+    trim_end: Number(document.getElementById("editTrimEnd").value),
+    volume: Number(document.getElementById("editVolume").value),
+  };
+  const res = await api().save_clip_edits(payload);
+  if (res && res.ok) {
+    const idx = state.clips.findIndex((c) => c.id === payload.id);
+    if (idx >= 0) state.clips[idx] = res.clip;
+    state.speakers = res.speakers || state.speakers;
+    renderSidebar();
+    renderGrid();
+    if (closeModalAfter) {
+      closeEditModal();
+      showToast("💾 Alterações salvas!");
+    }
+    return res.clip;
+  }
+  return null;
+}
+
+function applyDraftChrome(isDraft) {
+  document.getElementById("modalTitle").textContent = isDraft
+    ? "⚡ Replay — revise antes de salvar"
+    : "⚙️ Configurar Botão do Soundboard";
+  const saveBtn = document.getElementById("btnSaveClip");
+  saveBtn.textContent = isDraft ? "✅ Salvar no Soundboard" : "💾 Salvar";
+  saveBtn.title = isDraft ? "Salvar no Soundboard" : "Salvar alterações e fechar";
+  document.getElementById("btnDiscardDraft").classList.toggle("hidden", !isDraft);
+  document.getElementById("btnDeleteClip").classList.toggle("hidden", isDraft);
+  document.getElementById("btnSplitSpeakers").classList.toggle("hidden", isDraft);
+  document.getElementById("btnReanalyzeAI").classList.toggle("hidden", isDraft);
+  document.getElementById("btnEnrollVoice").classList.toggle("hidden", isDraft);
+}
+
+function setDraftBusy(busy) {
+  ["btnSaveClip", "btnDiscardDraft", "btnCloseModal"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = busy;
+  });
+}
+
+function closeEditModal() {
+  document.getElementById("editModal").classList.add("hidden");
+  updateModalPreviewButtons(false);
+  state.draftClipId = null;
+  applyDraftChrome(false);
+}
+
+async function discardDraftAndClose({ silent = false } = {}) {
+  if (state.draftCommitting) return;
+  const id = state.draftClipId;
+  state.draftClipId = null;
+  if (id) {
+    const res = await api().discard_replay_draft(id);
+    if (res && res.ok) {
+      state.clips = res.clips || state.clips;
+      state.speakers = res.speakers || state.speakers;
+    }
+  }
+  closeEditModal();
+  renderSidebar();
+  renderGrid();
+  if (!silent && id) showToast("Replay descartado.");
+}
+
+async function commitReplayDraft() {
+  if (state.draftCommitting) return null;
+  const id = state.draftClipId;
+  if (!id) return null;
+  state.draftCommitting = true;
+  setDraftBusy(true);
+  try {
+    const savedEdits = await saveCurrentClipEdits(false);
+    if (!savedEdits) {
+      showToast("Não foi possível salvar as alterações do replay.", "#ef4444");
+      return null;
+    }
+    // A discard/close during the awaited save invalidates this commit.
+    if (state.draftClipId !== id) return null;
+    const res = await api().commit_replay_draft(id);
+    if (!res || !res.ok) {
+      showToast((res && res.error) || "Não foi possível salvar o replay.", "#ef4444");
+      return null;
+    }
+    state.draftClipId = null;
+    state.clips = res.clips || state.clips;
+    state.speakers = res.speakers || state.speakers;
+    closeEditModal();
+    renderSidebar();
+    renderGrid();
+    if (res.split_count) {
+      showToast(`⚡ Replay separado em ${res.split_count} botões!`, "#10b981");
+    } else {
+      showToast(`⚡ Replay salvo: "${res.clip.title}"`, "#10b981");
+    }
+    return res.clip;
+  } finally {
+    state.draftCommitting = false;
+    setDraftBusy(false);
+  }
+}
+
 function openEditModal(clip) {
+  state.draftClipId = clip.pending ? clip.id : null;
+  applyDraftChrome(Boolean(clip.pending));
   document.getElementById("editClipId").value = clip.id;
   document.getElementById("editEmoji").value = clip.emoji || "🔊";
   document.getElementById("editTitle").value = clip.title || "";
@@ -604,6 +724,7 @@ function openEditModal(clip) {
   updateModalPreviewButtons(curClipPlaying);
 
   document.getElementById("routingPopoverMenu")?.classList.add("hidden");
+  document.getElementById("packPopover")?.classList.add("hidden");
   document.getElementById("editModal").classList.remove("hidden");
 }
 
@@ -1041,21 +1162,18 @@ function bindEvents() {
 
   document.getElementById("btnReplayClip").onclick = async () => {
     const secs = Math.max(1, Math.min(60, Number(replaySecsInput.value) || 15));
-    showToast(`⚡ Salvando últimos ${secs}s da call e identificando vozes...`, "#f59e0b");
-    const res = await api().capture_replay_clip(secs);
-    if (res && res.ok) {
-      state.clips = res.clips;
-      state.speakers = res.speakers;
-      renderSidebar();
-      renderGrid();
-      if (res.split_count) {
-        showToast(`✅ Replay (${secs}s) separado automaticamente em ${res.split_count} botões por voz!`, "#10b981");
-      } else {
-        showToast(`✅ Replay (${secs}s) salvo como "${res.clip.title}"!`, "#10b981");
-      }
-    } else {
-      showToast(res?.error || "Sem áudio recente no buffer da call.", "#ef4444");
+    showToast(`⚡ Capturando os últimos ${secs}s da call...`, "#f59e0b");
+    const res = await api().capture_replay_draft(secs);
+    if (!res || !res.ok) {
+      showToast((res && res.error) || "Sem áudio recente no buffer da call.", "#ef4444");
+      return;
     }
+    state.clips = res.clips || state.clips;
+    state.speakers = res.speakers || state.speakers;
+    renderSidebar();
+    renderGrid();
+    openEditModal(res.clip);
+    showToast("✂️ Revise o corte e clique em Salvar no Soundboard.", "#3b82f6");
   };
 
   document.getElementById("btnImportFiles").onclick = async () => {
@@ -1095,6 +1213,109 @@ function bindEvents() {
       showToast(`✅ ${res.imported_count || 0} áudio(s) importado(s) da pasta!`, "#10b981");
     }
   };
+
+  // Pack menu (export/import .zip)
+  const packMenu = document.getElementById("packPopover");
+  const packButton = document.getElementById("btnPackMenu");
+  function hidePackMenu() {
+    if (packMenu) packMenu.classList.add("hidden");
+  }
+  if (packButton && packMenu) {
+    packButton.onclick = (e) => {
+      e.stopPropagation();
+      packMenu.classList.toggle("hidden");
+    };
+    const btnClosePackMenu = document.getElementById("btnClosePackMenu");
+    if (btnClosePackMenu) {
+      btnClosePackMenu.onclick = (e) => {
+        e.stopPropagation();
+        hidePackMenu();
+      };
+    }
+    document.addEventListener("click", (e) => {
+      if (packMenu.classList.contains("hidden")) return;
+      if (!packMenu.contains(e.target) && !packButton.contains(e.target)) hidePackMenu();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !packMenu.classList.contains("hidden")) hidePackMenu();
+    });
+  }
+
+  function showPackWarnings(warnings) {
+    const list = document.getElementById("packWarningsList");
+    const modal = document.getElementById("packWarningsModal");
+    if (!list || !modal) return;
+    list.innerHTML = "";
+    warnings.forEach((w) => {
+      const li = document.createElement("li");
+      li.textContent = w;
+      list.appendChild(li);
+    });
+    modal.classList.remove("hidden");
+  }
+
+  const closePackWarnings = document.getElementById("btnClosePackWarnings");
+  if (closePackWarnings) {
+    closePackWarnings.onclick = () =>
+      document.getElementById("packWarningsModal").classList.add("hidden");
+  }
+
+  const btnExportPackAll = document.getElementById("btnExportPackAll");
+  if (btnExportPackAll) {
+    btnExportPackAll.onclick = async () => {
+      hidePackMenu();
+      const res = await api().export_pack(null, null);
+      if (!res || !res.ok) {
+        if ((res && res.error) !== "Exportação cancelada.") {
+          showToast((res && res.error) || "Falha ao exportar.", "#ef4444");
+        }
+        return;
+      }
+      const extra = res.skipped ? ` (${res.skipped} sem arquivo)` : "";
+      showToast(`📦 ${res.count} áudio(s) exportados${extra}.`, "#10b981");
+    };
+  }
+
+  const btnExportPackFiltered = document.getElementById("btnExportPackFiltered");
+  if (btnExportPackFiltered) {
+    btnExportPackFiltered.onclick = async () => {
+      hidePackMenu();
+      const ids = getFilteredClips().map((c) => c.id);
+      if (!ids.length) {
+        showToast("Nenhum áudio no filtro atual.", "#f59e0b");
+        return;
+      }
+      const res = await api().export_pack(ids, null);
+      if (!res || !res.ok) {
+        if ((res && res.error) !== "Exportação cancelada.") {
+          showToast((res && res.error) || "Falha ao exportar.", "#ef4444");
+        }
+        return;
+      }
+      showToast(`📦 ${res.count} áudio(s) do filtro exportados.`, "#10b981");
+    };
+  }
+
+  const btnImportPack = document.getElementById("btnImportPack");
+  if (btnImportPack) {
+    btnImportPack.onclick = async () => {
+      hidePackMenu();
+      const res = await api().import_pack(null);
+      if (!res || !res.ok) {
+        if ((res && res.error) !== "Importação cancelada.") {
+          showToast((res && res.error) || "Falha ao importar.", "#ef4444");
+        }
+        return;
+      }
+      state.clips = res.clips || state.clips;
+      state.speakers = res.speakers || state.speakers;
+      renderSidebar();
+      renderGrid();
+      const importedCount = Array.isArray(res.imported) ? res.imported.length : Number(res.imported) || 0;
+      showToast(`📦 ${importedCount} importado(s), ${res.skipped || 0} ignorado(s).`, "#10b981");
+      if (res.warnings && res.warnings.length) showPackWarnings(res.warnings);
+    };
+  }
 
   document.getElementById("btnMiniOverlay").onclick = async () => {
     const res = await api().toggle_mini_overlay();
@@ -1254,9 +1475,45 @@ function bindEvents() {
 
   // Modal bindings
   document.getElementById("btnCloseModal").onclick = () => {
-    document.getElementById("editModal").classList.add("hidden");
-    updateModalPreviewButtons(false);
+    if (state.draftClipId) {
+      discardDraftAndClose();
+      return;
+    }
+    closeEditModal();
   };
+
+  // Esc / backdrop: a draft discards, the warnings modal closes.
+  // A non-draft edit modal keeps the current behavior (no close path).
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const warningsModal = document.getElementById("packWarningsModal");
+    if (warningsModal && !warningsModal.classList.contains("hidden")) {
+      e.preventDefault();
+      warningsModal.classList.add("hidden");
+      return;
+    }
+    if (!state.draftClipId || state.draftCommitting) return;
+    const editModalEl = document.getElementById("editModal");
+    if (!editModalEl || editModalEl.classList.contains("hidden")) return;
+    e.preventDefault();
+    discardDraftAndClose();
+  });
+
+  const editModalBackdrop = document.getElementById("editModal");
+  if (editModalBackdrop) {
+    editModalBackdrop.addEventListener("click", (e) => {
+      if (e.target.id !== "editModal") return;
+      if (!state.draftClipId || state.draftCommitting) return;
+      discardDraftAndClose();
+    });
+  }
+
+  const packWarningsBackdrop = document.getElementById("packWarningsModal");
+  if (packWarningsBackdrop) {
+    packWarningsBackdrop.addEventListener("click", (e) => {
+      if (e.target.id === "packWarningsModal") packWarningsBackdrop.classList.add("hidden");
+    });
+  }
 
   const trimStartSlider = document.getElementById("editTrimStart");
   const trimEndSlider = document.getElementById("editTrimEnd");
@@ -1348,41 +1605,6 @@ function bindEvents() {
     hkInput.value = "";
   };
 
-  async function saveCurrentClipEdits(closeModalAfter = true) {
-    const id = document.getElementById("editClipId").value;
-    if (!id) return null;
-    const selSpk = document.getElementById("editSpeaker").value;
-    const payload = {
-      id,
-      emoji: document.getElementById("editEmoji").value || "🔊",
-      title: document.getElementById("editTitle").value || "Áudio",
-      color: document.getElementById("editColor").value,
-      category: document.getElementById("editCategory").value,
-      speaker_id: selSpk,
-      speaker_ids: selSpk ? [selSpk] : [],
-      hotkey: document.getElementById("editHotkey").value,
-      transcript: document.getElementById("editTranscript").value,
-      trim_start: Number(document.getElementById("editTrimStart").value),
-      trim_end: Number(document.getElementById("editTrimEnd").value),
-      volume: Number(document.getElementById("editVolume").value),
-    };
-    const res = await api().save_clip_edits(payload);
-    if (res && res.ok) {
-      const idx = state.clips.findIndex((c) => c.id === payload.id);
-      if (idx >= 0) state.clips[idx] = res.clip;
-      state.speakers = res.speakers || state.speakers;
-      renderSidebar();
-      renderGrid();
-      if (closeModalAfter) {
-        document.getElementById("editModal").classList.add("hidden");
-        updateModalPreviewButtons(false);
-        showToast("💾 Alterações salvas!");
-      }
-      return res.clip;
-    }
-    return null;
-  }
-
   async function toggleModalAudioPreview() {
     const id = document.getElementById("editClipId").value;
     if (!id) return;
@@ -1408,8 +1630,14 @@ function bindEvents() {
   }
 
   document.getElementById("btnSaveClip").onclick = async () => {
+    if (state.draftClipId) {
+      await commitReplayDraft();
+      return;
+    }
     await saveCurrentClipEdits(true);
   };
+
+  document.getElementById("btnDiscardDraft").onclick = () => discardDraftAndClose();
 
   document.getElementById("btnPreviewMonitor").onclick = toggleModalAudioPreview;
   const btnTrimHeader = document.getElementById("btnPreviewTrimHeader");
@@ -1440,7 +1668,7 @@ function bindEvents() {
     if (res && res.ok) {
       state.clips = res.clips || state.clips;
       state.speakers = res.speakers || state.speakers;
-      document.getElementById("editModal").classList.add("hidden");
+      closeEditModal();
       renderSidebar();
       renderGrid();
       showToast(`✅ Áudio dividido em ${res.created_count} botões separados por fala!`, "#10b981");
@@ -1469,7 +1697,7 @@ function bindEvents() {
       return;
     }
     state.clips = state.clips.filter((c) => c.id !== id);
-    document.getElementById("editModal").classList.add("hidden");
+    closeEditModal();
     renderSidebar();
     renderGrid();
 

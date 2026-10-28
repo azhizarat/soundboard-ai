@@ -202,6 +202,36 @@ body {
   gap: 10px;
 }
 
+/* Pack menu (export/import) */
+.pack-wrapper {
+  position: relative;
+}
+
+.pack-popover {
+  right: 0;
+  left: auto;
+  min-width: 240px;
+}
+
+.pack-popover .popover-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+
+.pack-popover .btn {
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.pack-warnings {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .device-group {
   display: flex;
   flex-direction: column;
@@ -1461,6 +1491,18 @@ body.mini-overlay .np-vol-wrap {
   gap: 8px;
   flex-shrink: 0;
   margin-left: auto;
+}
+
+/* Replay draft footer */
+#editModal .modal-footer .btn.hidden {
+  display: none;
+}
+
+#editModal .modal-footer .btn:disabled,
+#editModal .modal-header .btn-clear:disabled {
+  opacity: 0.55;
+  cursor: default;
+  pointer-events: none;
 }
 
 .hidden {

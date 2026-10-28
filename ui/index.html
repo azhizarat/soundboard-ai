@@ -114,6 +114,22 @@
         <button id="btnImportFolder" class="btn btn-secondary" title="Importar pasta 'separados' (com mapa_de_falas.json) ou pasta de áudios">
           📂 Pasta
         </button>
+        <div class="routing-pill-wrapper pack-wrapper">
+          <button type="button" id="btnPackMenu" class="btn btn-secondary" title="Exportar ou importar a biblioteca como pacote .zip">
+            📦 Pack
+          </button>
+          <div id="packPopover" class="routing-popover hidden pack-popover">
+            <div class="popover-header">
+              <h4>📦 Pacotes</h4>
+              <button type="button" id="btnClosePackMenu" class="btn-clear" title="Fechar">✕</button>
+            </div>
+            <div class="popover-body">
+              <button type="button" id="btnExportPackAll" class="btn btn-secondary">📤 Exportar biblioteca</button>
+              <button type="button" id="btnExportPackFiltered" class="btn btn-secondary">🔎 Exportar filtro atual</button>
+              <button type="button" id="btnImportPack" class="btn btn-secondary">📥 Importar pacote…</button>
+            </div>
+          </div>
+        </div>
         <button id="btnStopAll" class="btn btn-danger" title="Parar todos os sons imediatamente (Ctrl+Shift+S)">
           🛑 Stop
         </button>
@@ -358,6 +374,9 @@
             <button type="button" id="btnPreviewMonitor" class="btn btn-secondary" title="Ouvir no seu fone para testar o corte sem fechar o modal">
               🎧 Testar no Fone
             </button>
+            <button type="button" id="btnDiscardDraft" class="btn btn-secondary hidden" title="Jogar este replay fora sem salvar">
+              🗑️ Descartar
+            </button>
             <button type="button" id="btnSaveClip" class="btn btn-primary" title="Salvar alterações e fechar">💾 Salvar</button>
           </div>
         </div>
@@ -399,6 +418,19 @@
       <input id="commandInput" type="text" placeholder="Tocar um áudio… (Enter toca, Shift+Enter ouve no fone)" autocomplete="off" />
       <div id="commandResults" class="command-results"></div>
       <div class="command-hint">↑↓ navegar · Enter tocar · Shift+Enter fone · Esc fechar</div>
+    </div>
+  </div>
+
+  <!-- Import warnings modal -->
+  <div id="packWarningsModal" class="modal-backdrop hidden">
+    <div class="modal-card modal-sm">
+      <div class="modal-header">
+        <h2>⚠️ Importação concluída com avisos</h2>
+        <button type="button" id="btnClosePackWarnings" class="btn-clear">✕</button>
+      </div>
+      <div class="modal-body">
+        <ul id="packWarningsList" class="pack-warnings"></ul>
+      </div>
     </div>
   </div>
 
