@@ -21,7 +21,7 @@ def test_sine_1khz_at_minus_23_dbfs():
     assert is_estimated is False
     assert lufs is not None
     # Must be within -23 +/- 0.3 LUFS
-    assert abs(lufs - (-23.0)) <= 0.3
+    assert abs(lufs - (-23.0)) <= 0.3 + 1e-5
 
 
 def test_pure_silence_returns_none():

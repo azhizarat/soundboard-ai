@@ -183,6 +183,7 @@ def test_delete_speaker_and_vinheta_import_without_person(tmp_path):
     sf.write(str(wav_file), np.sin(np.linspace(0, 50, 16000)).astype("float32"), 16000)
 
     api = SoundboardAPI(data_dir=str(tmp_path / "api_data"), start_background_services=False)
+    api._ai._get_whisper = lambda: None
     res = api.import_audio_files([str(wav_file)], skip_speaker_id=True, forced_category="Vinhetas")
     assert res["ok"] is True
     imported_clip = res["imported"][0]

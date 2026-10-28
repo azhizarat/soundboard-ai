@@ -26,6 +26,7 @@ ENV_KEYS = {
 }
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_MODEL = "qwen2.5:1.5b"
+DEFAULT_MIXER_MODE = "mixer"
 MIXER_MODES = ("legacy", "mixer")
 
 
@@ -37,7 +38,7 @@ class AppConfig:
     ffmpeg_path: str = "ffmpeg"
     ollama_url: str = DEFAULT_OLLAMA_URL
     ollama_model: str = DEFAULT_OLLAMA_MODEL
-    mixer_mode: str = "legacy"
+    mixer_mode: str = DEFAULT_MIXER_MODE
 
 
 def app_dir() -> Path:
@@ -81,7 +82,9 @@ def _finalize(values: dict, base: Path) -> AppConfig:
     clean["ollama_url"] = str(clean["ollama_url"]).rstrip("/")
     clean["ollama_model"] = str(clean["ollama_model"])
     mixer = str(clean["mixer_mode"]).lower()
-    clean["mixer_mode"] = mixer if mixer in MIXER_MODES else "legacy"
+    if mixer == "v2":
+        mixer = "mixer"
+    clean["mixer_mode"] = mixer if mixer in MIXER_MODES else DEFAULT_MIXER_MODE
     return AppConfig(data_dir=base, **clean)
 
 
@@ -98,7 +101,7 @@ def load_config(data_dir=None) -> AppConfig:
         "ffmpeg_path": "ffmpeg",
         "ollama_url": DEFAULT_OLLAMA_URL,
         "ollama_model": DEFAULT_OLLAMA_MODEL,
-        "mixer_mode": "legacy",
+        "mixer_mode": DEFAULT_MIXER_MODE,
     }
     values.update(file_cfg)
     for key, env_name in ENV_KEYS.items():

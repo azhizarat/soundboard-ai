@@ -133,6 +133,7 @@ class SoundboardAPI:
             replay_seconds=max(60.0, float(self._store.state["settings"].get("replay_seconds", 15))),
             start_loopback=start_background_services,
             ffmpeg_path=self._config.ffmpeg_path,
+            mixer_mode=self._config.mixer_mode,
         )
         self._window = None
         self._is_mini_overlay = False
@@ -599,10 +600,10 @@ class SoundboardAPI:
         self, file_path: str, trim_start: float = 0.0, trim_end: float = 0.0
     ) -> dict:
         try:
-            samples, sr = self._audio.load_clip_stereo_48k(file_path)
+            samples, dur = self._audio.load_clip_stereo_48k(file_path)
             if samples is None or len(samples) == 0:
                 return {"lufs": None, "loudness_gain_db": 0.0, "lufs_estimated": False}
-            dur = len(samples) / float(sr)
+            sr = int(self._audio.TARGET_SR)
             t_start = max(0.0, float(trim_start or 0.0))
             t_end = float(trim_end or 0.0)
             if t_end <= 0.0 or t_end > dur:

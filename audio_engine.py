@@ -244,8 +244,15 @@ class AudioEngine:
     DUCK_AMOUNT_RANGE = (-24.0, 0.0)
     DUCK_THRESHOLD_RANGE = (-60.0, -10.0)
 
-    def __init__(self, replay_seconds: float = 15.0, start_loopback: bool = True, ffmpeg_path: str = "ffmpeg"):
+    def __init__(
+        self,
+        replay_seconds: float = 15.0,
+        start_loopback: bool = True,
+        ffmpeg_path: str = "ffmpeg",
+        mixer_mode: str = "mixer",
+    ):
         self.ffmpeg_path = ffmpeg_path or "ffmpeg"
+        self.mixer_mode = "mixer" if str(mixer_mode).lower() in ("mixer", "v2") else "legacy"
         self.replay_buffer = ReplayRingBuffer(max_seconds=replay_seconds, sr=self.TARGET_SR, channels=2)
         self._cache: OrderedDict[str, dict] = OrderedDict()
         self._cache_bytes = 0
@@ -271,6 +278,13 @@ class AudioEngine:
         self._loopback_stop_event = threading.Event()
         self._loopback_thread = None
         self.loopback_active = False
+
+        if self.mixer_mode == "mixer":
+            from mixer import AudioMixer
+            self._mixer = AudioMixer(sr=self.TARGET_SR)
+            self._mixer.set_duck_provider(lambda: float(self._duck_gain))
+        else:
+            self._mixer = None
 
         if start_loopback:
             self.start_loopback_capture()
@@ -619,6 +633,47 @@ class AudioEngine:
             scale = float(10.0 ** (loudness_gain_db / 20.0))
             processed = (processed * scale).astype(np.float32)
 
+        if self._mixer is not None:
+            def _mixer_finish(cid=None, pid=None):
+                target_pid = pid or play_id
+                target_cid = cid or clip.get("id")
+                with self._lock:
+                    self._active_events.pop(target_pid, None)
+                    self._sessions.pop(target_pid, None)
+                    if self._latest_play_id == target_pid:
+                        self._latest_play_id = next(iter(self._sessions.keys()), None)
+                if callable(on_finish):
+                    try:
+                        on_finish(target_cid, target_pid)
+                    except Exception:
+                        pass
+
+            voice = self._mixer.play_voice(
+                clip=clip,
+                data=processed,
+                settings=settings,
+                monitor_only=monitor_only,
+                on_finish=_mixer_finish,
+            )
+            play_id = voice.play_id
+            with self._lock:
+                self._active_events[play_id] = voice.stop_event
+                self._sessions[play_id] = voice
+                self._latest_play_id = play_id
+
+            if callable(on_tick):
+                def _ui_ticker():
+                    while not voice.stop_event.is_set():
+                        try:
+                            on_tick(voice.status())
+                        except Exception:
+                            pass
+                        time.sleep(0.12)
+
+                threading.Thread(target=_ui_ticker, daemon=True).start()
+
+            return play_id
+
         play_id = uuid.uuid4().hex[:8]
         session = PlaybackSession(
             play_id=play_id,
@@ -697,12 +752,15 @@ class AudioEngine:
 
     def stop_all(self):
         with self._lock:
+            if self._mixer is not None:
+                self._mixer.stop_all(fade_ms=10.0)
             events = list(self._active_events.values())
             self._active_events.clear()
             self._sessions.clear()
             self._latest_play_id = None
-        for ev in events:
-            ev.set()
+        if self._mixer is None:
+            for ev in events:
+                ev.set()
 
     def set_mic_passthrough(self, enabled: bool, mic_id: int = None, cable_id: int = None, gain: float = 1.0):
         try:

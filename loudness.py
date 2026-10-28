@@ -58,7 +58,7 @@ def integrated_lufs(samples: np.ndarray, sr: int = 48000) -> tuple[float | None,
     If audio is silence or below -70 LUFS, returns (None, False).
     For clips under 400 ms, returns (rms_lufs, True).
     """
-    if samples is None or len(samples) == 0:
+    if samples is None or len(samples) == 0 or sr <= 1000:
         return None, False
 
     mono = _to_mono(samples)
@@ -127,7 +127,9 @@ def calculate_loudness_gain(
         peak_db = 20.0 * math.log10(peak_abs)
         headroom = TRUE_PEAK_CEILING_DB - peak_db
         if gain_db > headroom:
-            gain_db = max(MIN_GAIN_DB, headroom)
+            # Floor to two decimal places so rounding never exceeds the ceiling
+            safe_headroom = math.floor(headroom * 100.0) / 100.0
+            return max(MIN_GAIN_DB, safe_headroom)
 
     return round(gain_db, 2)
 

@@ -39,7 +39,7 @@ def test_defaults_are_portable(tmp_path):
     assert cfg.ffmpeg_path == "ffmpeg"
     assert cfg.ollama_url == "http://127.0.0.1:11434"
     assert cfg.ollama_model == "qwen2.5:1.5b"
-    assert cfg.mixer_mode == "legacy"
+    assert cfg.mixer_mode == "mixer"
 
 
 def test_legacy_models_dir_wins_when_present(tmp_path):
@@ -88,12 +88,12 @@ def test_file_config_is_used_without_env(tmp_path):
     assert cfg.ollama_url == "http://arquivo:1234"
 
 
-def test_invalid_mixer_mode_falls_back_to_legacy(tmp_path):
+def test_invalid_mixer_mode_falls_back_to_default(tmp_path):
     data_dir = _data_dir(tmp_path)
     data_dir.mkdir(parents=True)
     (data_dir / "config.json").write_text(json.dumps({"mixer_mode": "turbo"}), encoding="utf-8")
 
-    assert config.load_config(data_dir=str(data_dir)).mixer_mode == "legacy"
+    assert config.load_config(data_dir=str(data_dir)).mixer_mode == "mixer"
 
 
 def test_data_dir_comes_only_from_arg_or_env(tmp_path, monkeypatch):
@@ -132,7 +132,7 @@ def test_corrupt_or_non_dict_json_does_not_raise(tmp_path):
     (data_dir / "config.json").write_text("{not json", encoding="utf-8")
     cfg = config.load_config(data_dir=str(data_dir))
     assert cfg.models_dir == data_dir / "models"
-    assert cfg.mixer_mode == "legacy"
+    assert cfg.mixer_mode == "mixer"
 
     (data_dir / "config.json").write_text("[1, 2, 3]", encoding="utf-8")
     cfg = config.load_config(data_dir=str(data_dir))

@@ -198,7 +198,7 @@ def test_stale_devices_fail_preflight_before_creating_a_session(tmp_path, monkey
 
 
 def test_play_clip_passes_concrete_device_ids_to_threads(tmp_path, monkeypatch):
-    engine = AudioEngine(start_loopback=False)
+    engine = AudioEngine(start_loopback=False, mixer_mode="legacy")
     wav = _write_wav(tmp_path / "clip.wav")
     monkeypatch.setattr(engine, "_output_route_usable", lambda device_id: True)
 
