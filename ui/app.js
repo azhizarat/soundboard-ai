@@ -87,7 +87,9 @@ function renderDevices() {
 
   document.getElementById("micPassthroughToggle").checked = Boolean(state.settings.mic_passthrough);
   document.getElementById("overlapToggle").checked = Boolean(state.settings.overlap_audio);
-  document.getElementById("replaySecsLabel").textContent = state.settings.replay_seconds || 15;
+  const repSecs = Number(state.settings.replay_seconds || 15);
+  document.getElementById("replaySecsLabel").textContent = repSecs;
+  document.getElementById("replaySecondsInput").value = repSecs;
 }
 
 function renderQuickImportBar() {
@@ -350,22 +352,37 @@ function openEditModal(clip) {
   newOpt.textContent = `➕ Novo Amigo (interlocutor_${nextNum})`;
   spkSel.appendChild(newOpt);
 
-  const maxDur = Math.max(0.5, Number(clip.duration || 10));
+  const maxDur = Math.max(0.2, Number(clip.duration || 10));
   const trimStartEl = document.getElementById("editTrimStart");
   const trimEndEl = document.getElementById("editTrimEnd");
+  const trimStartNum = document.getElementById("editTrimStartNum");
+  const trimEndNum = document.getElementById("editTrimEndNum");
+
   trimStartEl.max = maxDur;
   trimEndEl.max = maxDur;
-  trimStartEl.value = Number(clip.trim_start || 0);
-  trimEndEl.value = Number(clip.trim_end || maxDur);
+  trimStartNum.max = maxDur;
+  trimEndNum.max = maxDur;
 
-  document.getElementById("trimStartVal").textContent = `${Number(trimStartEl.value).toFixed(2)}s`;
-  document.getElementById("trimEndVal").textContent = `${Number(trimEndEl.value).toFixed(2)}s`;
+  const stVal = Number(clip.trim_start || 0);
+  const enVal = Number(clip.trim_end && clip.trim_end > stVal ? clip.trim_end : maxDur);
+
+  trimStartEl.value = stVal;
+  trimEndEl.value = enVal;
+  trimStartNum.value = stVal.toFixed(2);
+  trimEndNum.value = enVal.toFixed(2);
+  updateTrimTotalBadge(stVal, enVal);
 
   const volEl = document.getElementById("editVolume");
   volEl.value = Number(clip.volume ?? 1.0);
   document.getElementById("clipVolVal").textContent = `${Math.round(volEl.value * 100)}%`;
 
   document.getElementById("editModal").classList.remove("hidden");
+}
+
+function updateTrimTotalBadge(st, en) {
+  const dur = Math.max(0.05, Number(en) - Number(st));
+  const badge = document.getElementById("trimTotalDurationVal");
+  if (badge) badge.textContent = `${dur.toFixed(2)}s`;
 }
 
 function openSpeakerModal(spk) {
@@ -420,15 +437,29 @@ function bindEvents() {
 
   document.getElementById("btnStopAll").onclick = () => api().stop_all();
 
+  const replaySecsInput = document.getElementById("replaySecondsInput");
+  replaySecsInput.onchange = (e) => {
+    const secs = Math.max(1, Math.min(60, Number(e.target.value) || 15));
+    replaySecsInput.value = secs;
+    document.getElementById("replaySecsLabel").textContent = secs;
+    state.settings.replay_seconds = secs;
+    api().update_settings({ replay_seconds: secs });
+  };
+  replaySecsInput.oninput = (e) => {
+    const secs = Math.max(1, Math.min(60, Number(e.target.value) || 15));
+    document.getElementById("replaySecsLabel").textContent = secs;
+  };
+
   document.getElementById("btnReplayClip").onclick = async () => {
-    showToast("⚡ Salvando últimos segundos da call e analisando com IA...", "#f59e0b");
-    const res = await api().capture_replay_clip();
+    const secs = Math.max(1, Math.min(60, Number(replaySecsInput.value) || 15));
+    showToast(`⚡ Salvando últimos ${secs}s da call e analisando com IA...`, "#f59e0b");
+    const res = await api().capture_replay_clip(secs);
     if (res && res.ok) {
       state.clips = res.clips;
       state.speakers = res.speakers;
       renderSidebar();
       renderGrid();
-      showToast(`✅ Replay salvo como "${res.clip.title}"!`, "#10b981");
+      showToast(`✅ Replay (${secs}s) salvo como "${res.clip.title}"!`, "#10b981");
     } else {
       showToast(res?.error || "Sem áudio recente no buffer da call.", "#ef4444");
     }
@@ -489,12 +520,39 @@ function bindEvents() {
   document.getElementById("btnCloseModal").onclick = () =>
     document.getElementById("editModal").classList.add("hidden");
 
-  document.getElementById("editTrimStart").oninput = (e) => {
-    document.getElementById("trimStartVal").textContent = `${Number(e.target.value).toFixed(2)}s`;
-  };
-  document.getElementById("editTrimEnd").oninput = (e) => {
-    document.getElementById("trimEndVal").textContent = `${Number(e.target.value).toFixed(2)}s`;
-  };
+  const trimStartSlider = document.getElementById("editTrimStart");
+  const trimEndSlider = document.getElementById("editTrimEnd");
+  const trimStartNum = document.getElementById("editTrimStartNum");
+  const trimEndNum = document.getElementById("editTrimEndNum");
+
+  function syncTrimValues(st, en) {
+    const maxDur = Number(trimEndSlider.max) || 10;
+    let s = Math.max(0, Math.min(maxDur - 0.05, Number(st) || 0));
+    let e = Math.max(s + 0.05, Math.min(maxDur, Number(en) || maxDur));
+    trimStartSlider.value = s;
+    trimEndSlider.value = e;
+    trimStartNum.value = s.toFixed(2);
+    trimEndNum.value = e.toFixed(2);
+    updateTrimTotalBadge(s, e);
+  }
+
+  trimStartSlider.oninput = (e) => syncTrimValues(e.target.value, trimEndSlider.value);
+  trimEndSlider.oninput = (e) => syncTrimValues(trimStartSlider.value, e.target.value);
+  trimStartNum.onchange = (e) => syncTrimValues(e.target.value, trimEndNum.value);
+  trimEndNum.onchange = (e) => syncTrimValues(trimStartNum.value, e.target.value);
+
+  document.querySelectorAll(".btn-preset").forEach((btn) => {
+    btn.onclick = () => {
+      const maxDur = Number(trimEndSlider.max) || 10;
+      const preset = btn.getAttribute("data-preset");
+      if (preset === "first3") syncTrimValues(0, Math.min(3, maxDur));
+      else if (preset === "first5") syncTrimValues(0, Math.min(5, maxDur));
+      else if (preset === "last3") syncTrimValues(Math.max(0, maxDur - 3), maxDur);
+      else if (preset === "last5") syncTrimValues(Math.max(0, maxDur - 5), maxDur);
+      else syncTrimValues(0, maxDur);
+    };
+  });
+
   document.getElementById("editVolume").oninput = (e) => {
     document.getElementById("clipVolVal").textContent = `${Math.round(Number(e.target.value) * 100)}%`;
   };

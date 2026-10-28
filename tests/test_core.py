@@ -121,5 +121,17 @@ def test_soundboard_api_exposes_no_public_non_callable_objects(tmp_path):
     assert public_non_callables == []
 
 
+def test_configurable_replay_seconds_and_60s_buffer(tmp_path):
+    api = SoundboardAPI(data_dir=str(tmp_path), start_background_services=False)
+    # Ring buffer must hold at least 60s capacity so increasing clip duration doesn't drop history
+    assert api._audio.replay_buffer.max_samples >= 60 * api._audio.TARGET_SR
+    updated = api.update_settings({"replay_seconds": 4})
+    assert updated["replay_seconds"] == 4.0
+    updated_long = api.update_settings({"replay_seconds": 45})
+    assert updated_long["replay_seconds"] == 45.0
+    assert api._audio.replay_buffer.max_samples >= 60 * api._audio.TARGET_SR
+
+
+
 
 

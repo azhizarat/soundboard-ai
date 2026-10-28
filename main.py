@@ -29,7 +29,7 @@ class SoundboardAPI:
         self._store = SoundboardStore(data_dir=str(resolved_data))
         self._ai = AIAnalyzer()
         self._audio = AudioEngine(
-            replay_seconds=float(self._store.state["settings"].get("replay_seconds", 15)),
+            replay_seconds=max(60.0, float(self._store.state["settings"].get("replay_seconds", 15))),
             start_loopback=start_background_services,
         )
         self._window = None
@@ -135,9 +135,11 @@ class SoundboardAPI:
         return self._audio.list_devices()
 
     def update_settings(self, updates: dict) -> dict:
+        if "replay_seconds" in updates:
+            updates["replay_seconds"] = round(max(1.0, min(120.0, float(updates["replay_seconds"]))), 1)
         s = self._store.update_settings(updates)
         if "replay_seconds" in updates:
-            self._audio.replay_buffer.set_max_seconds(float(s.get("replay_seconds", 15)))
+            self._audio.replay_buffer.set_max_seconds(max(60.0, float(s.get("replay_seconds", 15))))
         if any(k in updates for k in ("mic_passthrough", "mic_device_id", "cable_device_id", "mic_gain")):
             self._apply_mic_passthrough()
         if any(k in updates for k in ("stop_all_hotkey", "replay_hotkey", "overlay_hotkey")):

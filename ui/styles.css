@@ -218,6 +218,46 @@ body {
   background: linear-gradient(135deg, #f59e0b, #ea580c);
   color: #fff;
   box-shadow: 0 3px 12px rgba(245, 158, 11, 0.28);
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.replay-control-group {
+  display: inline-flex;
+  align-items: stretch;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+}
+
+.replay-control-group .btn-replay {
+  border: none;
+}
+
+.replay-duration-picker {
+  display: flex;
+  align-items: center;
+  background: #171f32;
+  padding: 0 7px;
+  gap: 2px;
+  border-left: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.replay-duration-picker input[type="number"] {
+  width: 42px;
+  background: transparent;
+  border: none;
+  color: #fbbf24;
+  font-weight: 700;
+  font-size: 12px;
+  text-align: right;
+  outline: none;
+}
+
+.replay-duration-picker .unit-s {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 600;
 }
 
 .btn-ai {
@@ -747,11 +787,79 @@ body.mini-overlay .top-deck {
   flex: 1;
 }
 
-.trim-box {
-  background: rgba(11, 15, 25, 0.5);
-  padding: 10px;
-  border-radius: 8px;
+.trim-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(11, 15, 25, 0.55);
+  padding: 10px 12px;
+  border-radius: 9px;
   border: 1px solid var(--border-subtle);
+}
+
+.trim-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.trim-title {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.trim-title b {
+  color: #34d399;
+}
+
+.trim-presets {
+  display: flex;
+  gap: 4px;
+}
+
+.btn-preset {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  border-radius: 5px;
+  padding: 2px 7px;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.btn-preset:hover {
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.trim-box {
+  padding-top: 4px;
+}
+
+.label-with-num {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.num-mini {
+  width: 62px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  color: #fff;
+  border-radius: 5px;
+  padding: 2px 5px;
+  font-size: 11px;
+  text-align: right;
+}
+
+.vol-badge {
+  font-size: 11px;
+  color: var(--text-main);
+  font-weight: 700;
 }
 
 .modal-footer {

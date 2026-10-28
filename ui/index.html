@@ -54,9 +54,23 @@
       </div>
 
       <div class="deck-actions">
-        <button id="btnReplayClip" class="btn btn-replay" title="Salva os últimos segundos da call do sistema e analisa com IA (Atalho: Alt+F10)">
-          ⚡ Clipar Call (<span id="replaySecsLabel">15</span>s)
-        </button>
+        <div class="replay-control-group" title="Escolha quantos segundos da call quer salvar (1s a 60s) e clique em Clipar Call (ou aperte Alt+F10)">
+          <button id="btnReplayClip" class="btn btn-replay">
+            ⚡ Clipar Call (<span id="replaySecsLabel">15</span>s)
+          </button>
+          <div class="replay-duration-picker">
+            <input
+              type="number"
+              id="replaySecondsInput"
+              min="1"
+              max="60"
+              step="1"
+              value="15"
+              title="Duração do clip da call em segundos (1s a 60s)"
+            />
+            <span class="unit-s">s</span>
+          </div>
+        </div>
         <button id="btnImportFiles" class="btn btn-secondary" title="Importar arquivos de áudio (.mp3, .wav, .ogg)">
           ➕ Áudios
         </button>
@@ -191,18 +205,39 @@
             <textarea id="editTranscript" rows="2" placeholder="Texto falado no áudio..."></textarea>
           </div>
 
-          <div class="form-row trim-box">
-            <div class="form-group flex-1">
-              <label>Corte Início (s): <span id="trimStartVal">0.00s</span></label>
-              <input type="range" id="editTrimStart" min="0" max="10" step="0.05" value="0" />
+          <div class="trim-section">
+            <div class="trim-header-row">
+              <span class="trim-title">✂️ Tamanho / Corte do Clip (Duração Final: <b id="trimTotalDurationVal">0.00s</b>)</span>
+              <div class="trim-presets">
+                <button type="button" class="btn-preset" data-preset="first3">Início 3s</button>
+                <button type="button" class="btn-preset" data-preset="first5">Início 5s</button>
+                <button type="button" class="btn-preset" data-preset="last3">Final 3s</button>
+                <button type="button" class="btn-preset" data-preset="last5">Final 5s</button>
+                <button type="button" class="btn-preset" data-preset="full">Inteiro</button>
+              </div>
             </div>
-            <div class="form-group flex-1">
-              <label>Corte Fim (s): <span id="trimEndVal">0.00s</span></label>
-              <input type="range" id="editTrimEnd" min="0" max="10" step="0.05" value="0" />
-            </div>
-            <div class="form-group flex-1">
-              <label>Ganho Individual: <span id="clipVolVal">100%</span></label>
-              <input type="range" id="editVolume" min="0.2" max="2.5" step="0.05" value="1.0" />
+            <div class="form-row trim-box">
+              <div class="form-group flex-1">
+                <div class="label-with-num">
+                  <label>Corte Início (s)</label>
+                  <input type="number" id="editTrimStartNum" min="0" max="600" step="0.1" value="0" class="num-mini" />
+                </div>
+                <input type="range" id="editTrimStart" min="0" max="10" step="0.01" value="0" />
+              </div>
+              <div class="form-group flex-1">
+                <div class="label-with-num">
+                  <label>Corte Fim (s)</label>
+                  <input type="number" id="editTrimEndNum" min="0.1" max="600" step="0.1" value="10" class="num-mini" />
+                </div>
+                <input type="range" id="editTrimEnd" min="0.1" max="10" step="0.01" value="10" />
+              </div>
+              <div class="form-group flex-1">
+                <div class="label-with-num">
+                  <label>Ganho Individual</label>
+                  <span id="clipVolVal" class="vol-badge">100%</span>
+                </div>
+                <input type="range" id="editVolume" min="0.2" max="2.5" step="0.05" value="1.0" />
+              </div>
             </div>
           </div>
         </div>
