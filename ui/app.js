@@ -19,6 +19,9 @@ const state = {
   sessionStartSec: Date.now() / 1000,
   draftClipId: null,
   draftCommitting: false,
+  environment: null,
+  envAutoOpened: false,
+  config: {},
 };
 
 function formatPlayTime(sec) {
@@ -99,6 +102,176 @@ function api() {
   return window.pywebview && window.pywebview.api ? window.pywebview.api : null;
 }
 
+/* Environment (doctor) */
+const ENV_STATUS_ICONS = { ok: "✓", warn: "⚠", error: "✗" };
+const ENV_HINTS = {
+  ai: "Modelos de IA ausentes: ajuste a pasta de modelos em ⚙️ Ambiente.",
+  convert: "Formatos .m4a/.webm/.aac/.wma/.opus precisam do FFmpeg instalado (veja ⚙️ Ambiente).",
+  cable: "VB-Cable não detectado: instale o VB-Audio Cable para rotear o som (veja ⚙️ Ambiente).",
+};
+const envOriginalTitles = new Map();
+
+function captureEnvOriginalTitles() {
+  [
+    "btnReanalyzeAI",
+    "btnSplitSpeakers",
+    "btnEnrollVoice",
+    "btnImportFiles",
+    "micPassthroughToggle",
+  ].forEach((id) => {
+    if (envOriginalTitles.has(id)) return;
+    const el = document.getElementById(id);
+    if (el) envOriginalTitles.set(id, el.title || "");
+  });
+}
+
+// Only ever touches disabled/title so existing handlers keep working.
+function setEnvGated(id, disabled, hint) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  captureEnvOriginalTitles();
+  el.disabled = Boolean(disabled);
+  el.title = hint || envOriginalTitles.get(id) || "";
+}
+
+function applyCapabilityGating(caps = {}) {
+  const aiOff = caps.ai_analysis === false;
+  ["btnReanalyzeAI", "btnSplitSpeakers", "btnEnrollVoice"].forEach((id) => {
+    setEnvGated(id, aiOff, aiOff ? ENV_HINTS.ai : "");
+  });
+  // Import stays enabled: native formats keep working without FFmpeg.
+  setEnvGated("btnImportFiles", false, caps.audio_convert === false ? ENV_HINTS.convert : "");
+  const cableOff = caps.cable_routing === false;
+  setEnvGated("micPassthroughToggle", cableOff, cableOff ? ENV_HINTS.cable : "");
+}
+
+function renderEnvironment(env) {
+  if (!env) return;
+  state.environment = env;
+  const pending = Number(env.incomplete || 0);
+  const badge = document.getElementById("envBadge");
+  if (badge) {
+    badge.textContent = `${pending} pendência(s)`;
+    badge.classList.toggle("hidden", pending === 0);
+    badge.classList.toggle("status-warn", pending > 0);
+    badge.classList.toggle("status-ok", pending === 0);
+  }
+  const banner = document.getElementById("envBanner");
+  if (banner) banner.classList.toggle("hidden", pending === 0);
+  const bannerText = document.getElementById("envBannerText");
+  if (bannerText) bannerText.textContent = `Ambiente incompleto — ${pending} pendência(s)`;
+  renderEnvChecks(env.checks || []);
+  applyCapabilityGating(env.capabilities || {});
+}
+
+function buildEnvCheckAction(check) {
+  const action = String(check.action || "");
+  const fixUrl = String(check.fix_url || "");
+  if (!fixUrl && !action) return null;
+  const isPick = action === "pick_models_dir" || action === "pick_separados_root";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "btn btn-xs btn-secondary env-action";
+  btn.textContent = check.fix_label || (isPick ? "Alterar" : "Abrir ajuda");
+  btn.addEventListener("click", async () => {
+    if (!api()) return;
+    if (fixUrl) {
+      const res = await api().open_help_url(fixUrl);
+      if (res && res.ok === false) showToast(res.error || "Não foi possível abrir o link.", "#ef4444");
+      return;
+    }
+    if (!isPick) return;
+    await pickEnvDirectory(action === "pick_models_dir" ? "models_dir" : "separados_root");
+  });
+  return btn;
+}
+
+function renderEnvChecks(checks) {
+  const list = document.getElementById("envChecks");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!checks.length) {
+    const empty = document.createElement("li");
+    empty.className = "env-check warn";
+    empty.textContent = "Não foi possível verificar o ambiente agora.";
+    list.appendChild(empty);
+    return;
+  }
+  checks.forEach((check) => {
+    const status = Object.prototype.hasOwnProperty.call(ENV_STATUS_ICONS, check.status)
+      ? check.status
+      : "warn";
+    const li = document.createElement("li");
+    li.className = `env-check ${status}`;
+
+    const icon = document.createElement("span");
+    icon.className = "env-icon";
+    icon.textContent = ENV_STATUS_ICONS[status];
+    icon.setAttribute("aria-hidden", "true");
+    li.appendChild(icon);
+
+    const body = document.createElement("div");
+    body.className = "env-check-body";
+    const label = document.createElement("strong");
+    label.className = "env-label";
+    label.textContent = check.label || check.id || "Verificação";
+    body.appendChild(label);
+    if (check.detail) {
+      const detail = document.createElement("span");
+      detail.className = "env-detail";
+      detail.textContent = check.detail;
+      body.appendChild(detail);
+    }
+    li.appendChild(body);
+
+    const actionBtn = buildEnvCheckAction(check);
+    if (actionBtn) li.appendChild(actionBtn);
+    list.appendChild(li);
+  });
+}
+
+function applyEnvPaths(config) {
+  const cfg = config || {};
+  const models = document.getElementById("envModelsDir");
+  if (models) models.value = cfg.models_dir || "";
+  const separados = document.getElementById("envSeparadosRoot");
+  if (separados) separados.value = cfg.separados_root || "";
+}
+
+async function pickEnvDirectory(kind) {
+  if (!api()) return;
+  const res = await api().pick_directory(kind);
+  if (!res || !res.ok) {
+    if (res && res.error && res.error !== "Seleção cancelada.") {
+      showToast(res.error, "#ef4444");
+    }
+    return;
+  }
+  if (res.config) state.config = res.config;
+  applyEnvPaths(res.config || state.config);
+  if (res.environment) renderEnvironment(res.environment);
+  showToast("Pasta atualizada.", "#10b981");
+}
+
+function closeEnvModal() {
+  const modal = document.getElementById("envModal");
+  if (modal) modal.classList.add("hidden");
+}
+
+async function openEnvModal() {
+  const modal = document.getElementById("envModal");
+  if (!modal) return;
+  modal.classList.remove("hidden");
+  applyEnvPaths(state.config);
+  if (!api()) return;
+  try {
+    const env = await api().get_environment_status(false);
+    if (env && Array.isArray(env.checks)) renderEnvironment(env);
+  } catch (err) {
+    // Keep the modal usable with the last known snapshot.
+  }
+}
+
 async function initApp() {
   if (!api()) {
     setTimeout(initApp, 80);
@@ -117,6 +290,18 @@ async function initApp() {
   renderSidebar();
   renderGrid();
   bindEvents();
+
+  state.config = initial.config || {};
+  captureEnvOriginalTitles();
+  renderEnvironment(initial.environment);
+  if (
+    initial.environment &&
+    Number(initial.environment.incomplete || 0) > 0 &&
+    !state.envAutoOpened
+  ) {
+    state.envAutoOpened = true;
+    openEnvModal();
+  }
 }
 
 function renderDevices() {
@@ -1482,7 +1667,7 @@ function bindEvents() {
     closeEditModal();
   };
 
-  // Esc / backdrop: a draft discards, the warnings modal closes.
+  // Esc / backdrop: a draft discards, the warnings and environment modals close.
   // A non-draft edit modal keeps the current behavior (no close path).
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
@@ -1490,6 +1675,12 @@ function bindEvents() {
     if (warningsModal && !warningsModal.classList.contains("hidden")) {
       e.preventDefault();
       warningsModal.classList.add("hidden");
+      return;
+    }
+    const envModalEl = document.getElementById("envModal");
+    if (envModalEl && !envModalEl.classList.contains("hidden")) {
+      e.preventDefault();
+      closeEnvModal();
       return;
     }
     if (!state.draftClipId || state.draftCommitting) return;
@@ -1512,6 +1703,56 @@ function bindEvents() {
   if (packWarningsBackdrop) {
     packWarningsBackdrop.addEventListener("click", (e) => {
       if (e.target.id === "packWarningsModal") packWarningsBackdrop.classList.add("hidden");
+    });
+  }
+
+  // Environment (doctor) modal bindings
+  const btnEnvironment = document.getElementById("btnEnvironment");
+  if (btnEnvironment) {
+    btnEnvironment.onclick = (e) => {
+      e.stopPropagation();
+      openEnvModal();
+    };
+  }
+  const btnEnvBanner = document.getElementById("btnEnvBanner");
+  if (btnEnvBanner) btnEnvBanner.onclick = () => openEnvModal();
+  const btnCloseEnvModal = document.getElementById("btnCloseEnvModal");
+  if (btnCloseEnvModal) btnCloseEnvModal.onclick = closeEnvModal;
+  const btnCloseEnvFooter = document.getElementById("btnCloseEnvFooter");
+  if (btnCloseEnvFooter) btnCloseEnvFooter.onclick = closeEnvModal;
+
+  const btnPickModelsDir = document.getElementById("btnPickModelsDir");
+  if (btnPickModelsDir) btnPickModelsDir.onclick = () => pickEnvDirectory("models_dir");
+  const btnPickSeparadosRoot = document.getElementById("btnPickSeparadosRoot");
+  if (btnPickSeparadosRoot) btnPickSeparadosRoot.onclick = () => pickEnvDirectory("separados_root");
+
+  const btnRefreshEnv = document.getElementById("btnRefreshEnv");
+  if (btnRefreshEnv) {
+    btnRefreshEnv.onclick = async () => {
+      if (!api()) return;
+      btnRefreshEnv.disabled = true;
+      showToast("Verificando ambiente...");
+      try {
+        const env = await api().refresh_environment();
+        if (env && Array.isArray(env.checks)) {
+          renderEnvironment(env);
+          applyEnvPaths(state.config);
+          const pending = Number(env.incomplete || 0);
+          showToast(
+            pending > 0 ? `Ambiente com ${pending} pendência(s).` : "✅ Ambiente pronto.",
+            pending > 0 ? "#f59e0b" : "#10b981"
+          );
+        }
+      } finally {
+        btnRefreshEnv.disabled = false;
+      }
+    };
+  }
+
+  const envModalBackdrop = document.getElementById("envModal");
+  if (envModalBackdrop) {
+    envModalBackdrop.addEventListener("click", (e) => {
+      if (e.target.id === "envModal") envModalBackdrop.classList.add("hidden");
     });
   }
 
@@ -1833,6 +2074,8 @@ window.onBackendEvent = (event, payload) => {
       document.getElementById("progressFill").style.width = "100%";
       setTimeout(() => banner.classList.add("hidden"), 450);
     }
+  } else if (event === "environment_updated") {
+    if (payload && Array.isArray(payload.checks)) renderEnvironment(payload);
   } else if (event === "toast") {
     showToast(payload.message || "", "#f59e0b");
   }

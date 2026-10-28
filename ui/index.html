@@ -14,7 +14,11 @@
         <div class="logo-orb">🎛️</div>
         <div class="brand-text">
           <h1>Soundboard <span class="accent-badge">AI</span></h1>
-          <span id="cableStatusBadge" class="status-pill status-ok">VB-Cable Conectado</span>
+          <div class="brand-status-row">
+            <span id="cableStatusBadge" class="status-pill status-ok">VB-Cable Conectado</span>
+            <span id="envBadge" class="status-pill status-warn hidden"></span>
+            <button type="button" id="btnEnvironment" class="btn btn-icon" title="Diagnóstico do ambiente" aria-label="Diagnóstico do ambiente">⚙️</button>
+          </div>
         </div>
       </div>
 
@@ -138,6 +142,13 @@
         </button>
       </div>
     </header>
+
+    <!-- Environment (doctor) banner -->
+    <div id="envBanner" class="env-banner hidden">
+      <span class="env-banner-icon" aria-hidden="true">⚠️</span>
+      <span id="envBannerText"></span>
+      <button type="button" id="btnEnvBanner" class="btn btn-secondary">Configurar</button>
+    </div>
 
     <!-- Live Progress Bar for Imports & AI Processing -->
     <div id="progressBanner" class="progress-banner hidden">
@@ -430,6 +441,39 @@
       </div>
       <div class="modal-body">
         <ul id="packWarningsList" class="pack-warnings"></ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- Environment (doctor) modal -->
+  <div id="envModal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>⚙️ Ambiente</h2>
+        <button type="button" id="btnCloseEnvModal" class="btn-clear" title="Fechar">✕</button>
+      </div>
+      <div class="modal-body">
+        <ul id="envChecks" class="env-checks"></ul>
+        <div class="env-paths">
+          <div class="env-path-row">
+            <label for="envModelsDir">Modelos de IA</label>
+            <input type="text" id="envModelsDir" readonly placeholder="Pasta não configurada" />
+            <button type="button" id="btnPickModelsDir" class="btn btn-xs btn-secondary" title="Escolher a pasta com os modelos de voz">Alterar</button>
+          </div>
+          <div class="env-path-row">
+            <label for="envSeparadosRoot">Pasta de separados</label>
+            <input type="text" id="envSeparadosRoot" readonly placeholder="Pasta não configurada" />
+            <button type="button" id="btnPickSeparadosRoot" class="btn btn-xs btn-secondary" title="Escolher a pasta onde o separador de vozes salva os áudios">Alterar</button>
+          </div>
+          <p class="env-hint">
+            A pasta de modelos precisa conter <code>pyannote-segmentation-3-0/model.onnx</code> e
+            <code>nemo_en_titanet_large.onnx</code>.
+          </p>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="btnRefreshEnv" class="btn btn-secondary">🔄 Verificar novamente</button>
+        <button type="button" id="btnCloseEnvFooter" class="btn btn-primary">Fechar</button>
       </div>
     </div>
   </div>
