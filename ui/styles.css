@@ -238,26 +238,24 @@ body {
   display: flex;
   align-items: center;
   background: #171f32;
-  padding: 0 7px;
-  gap: 2px;
+  padding: 0 4px;
   border-left: 1px solid rgba(245, 158, 11, 0.35);
 }
 
-.replay-duration-picker input[type="number"] {
-  width: 42px;
-  background: transparent;
+.replay-duration-picker select {
+  background: #171f32;
   border: none;
   color: #fbbf24;
   font-weight: 700;
   font-size: 12px;
-  text-align: right;
+  padding: 6px 4px;
+  cursor: pointer;
   outline: none;
 }
 
-.replay-duration-picker .unit-s {
-  font-size: 11px;
-  color: var(--text-muted);
-  font-weight: 600;
+.replay-duration-picker select option {
+  background: var(--bg-panel);
+  color: var(--text-main);
 }
 
 .btn-ai {

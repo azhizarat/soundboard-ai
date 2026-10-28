@@ -89,7 +89,14 @@ function renderDevices() {
   document.getElementById("overlapToggle").checked = Boolean(state.settings.overlap_audio);
   const repSecs = Number(state.settings.replay_seconds || 15);
   document.getElementById("replaySecsLabel").textContent = repSecs;
-  document.getElementById("replaySecondsInput").value = repSecs;
+  const repSelect = document.getElementById("replaySecondsInput");
+  if (![...repSelect.options].some((o) => Number(o.value) === repSecs)) {
+    const customOpt = document.createElement("option");
+    customOpt.value = repSecs;
+    customOpt.textContent = `${repSecs}s`;
+    repSelect.appendChild(customOpt);
+  }
+  repSelect.value = String(repSecs);
 }
 
 function renderQuickImportBar() {

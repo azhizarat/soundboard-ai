@@ -54,21 +54,23 @@
       </div>
 
       <div class="deck-actions">
-        <div class="replay-control-group" title="Escolha quantos segundos da call quer salvar (1s a 60s) e clique em Clipar Call (ou aperte Alt+F10)">
+        <div class="replay-control-group" title="Escolha quantos segundos da call quer salvar e clique em Clipar Call (ou aperte Alt+F10)">
           <button id="btnReplayClip" class="btn btn-replay">
             ⚡ Clipar Call (<span id="replaySecsLabel">15</span>s)
           </button>
           <div class="replay-duration-picker">
-            <input
-              type="number"
-              id="replaySecondsInput"
-              min="1"
-              max="60"
-              step="1"
-              value="15"
-              title="Duração do clip da call em segundos (1s a 60s)"
-            />
-            <span class="unit-s">s</span>
+            <select id="replaySecondsInput" title="Selecione o intervalo do clip da call">
+              <option value="2">2s</option>
+              <option value="3">3s</option>
+              <option value="5">5s</option>
+              <option value="8">8s</option>
+              <option value="10">10s</option>
+              <option value="15" selected>15s</option>
+              <option value="20">20s</option>
+              <option value="30">30s</option>
+              <option value="45">45s</option>
+              <option value="60">60s</option>
+            </select>
           </div>
         </div>
         <button id="btnImportFiles" class="btn btn-secondary" title="Importar arquivos de áudio (.mp3, .wav, .ogg)">
