@@ -50,6 +50,10 @@
             <input type="checkbox" id="overlapToggle" />
             <span>🔀 Sobrepor</span>
           </label>
+          <label class="toggle-chip" title="Quando ativado, o Clipar Call já divide automaticamente cada fala/amigo em um botão separado">
+            <input type="checkbox" id="autoSplitToggle" />
+            <span>✂️ Auto-Separar Vozes</span>
+          </label>
         </div>
       </div>
 
@@ -248,6 +252,9 @@
           <div class="left-footer-btns">
             <button type="button" id="btnDeleteClip" class="btn btn-danger">🗑️ Excluir</button>
             <button type="button" id="btnReanalyzeAI" class="btn btn-ai">✨ Re-analisar com IA</button>
+            <button type="button" id="btnSplitSpeakers" class="btn btn-secondary" title="Divide cada fala/interlocutor deste áudio em um botão individual no Soundboard">
+              ✂️ Separar Falas em Botões
+            </button>
             <button type="button" id="btnPreviewMonitor" class="btn btn-secondary">🎧 Testar só no Fone</button>
           </div>
           <div class="right-footer-btns">

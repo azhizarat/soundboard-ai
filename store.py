@@ -31,6 +31,7 @@ DEFAULT_SETTINGS = {
     "mic_passthrough": False,
     "mic_gain": 1.0,
     "overlap_audio": False,
+    "auto_split_speakers": False,
     "normalize_on_import": True,
     "replay_seconds": 15,
     "stop_all_hotkey": "ctrl+shift+s",
@@ -139,13 +140,22 @@ class SoundboardStore:
                         break
 
             spk_id = clip_data.get("speaker_id") or (existing.get("speaker_id") if existing else "")
-            if spk_id:
-                self.ensure_speaker(spk_id)
+            spk_ids = list(clip_data.get("speaker_ids") or (existing.get("speaker_ids") if existing else []) or [])
+            if spk_id and spk_id not in spk_ids:
+                spk_ids.insert(0, spk_id)
+            if not spk_id and spk_ids:
+                spk_id = spk_ids[0]
+
+            for sid in spk_ids:
+                if sid:
+                    self.ensure_speaker(sid)
 
             if existing is not None:
                 for k, v in clip_data.items():
                     if v is not None:
                         existing[k] = v
+                existing["speaker_id"] = spk_id or ""
+                existing["speaker_ids"] = spk_ids
                 self.save()
                 return existing
 
@@ -155,6 +165,8 @@ class SoundboardStore:
                 "file_path": file_path,
                 "category": clip_data.get("category") or "Call",
                 "speaker_id": spk_id or "",
+                "speaker_ids": spk_ids,
+                "segments": clip_data.get("segments") or [],
                 "transcript": clip_data.get("transcript") or "",
                 "acoustic_mood": clip_data.get("acoustic_mood") or "Normal",
                 "emoji": clip_data.get("emoji") or "🔊",
@@ -212,16 +224,19 @@ class SoundboardStore:
                     continue
                 if category and category != "Todos" and c.get("category") != category:
                     continue
-                if speaker_id and speaker_id != "Todos" and c.get("speaker_id") != speaker_id:
-                    continue
+                if speaker_id and speaker_id != "Todos":
+                    c_spks = c.get("speaker_ids") or ([c["speaker_id"]] if c.get("speaker_id") else [])
+                    if speaker_id != c.get("speaker_id") and speaker_id not in c_spks:
+                        continue
                 if q:
-                    spk_name = self.state["speakers"].get(c.get("speaker_id", ""), {}).get("name", "")
+                    c_spks = c.get("speaker_ids") or ([c["speaker_id"]] if c.get("speaker_id") else [])
+                    spk_names = " ".join(self.state["speakers"].get(sid, {}).get("name", "") for sid in c_spks)
                     haystack = " ".join([
                         c.get("title", ""),
                         c.get("transcript", ""),
                         c.get("category", ""),
                         c.get("acoustic_mood", ""),
-                        spk_name,
+                        spk_names,
                         " ".join(c.get("tags", [])),
                         c.get("hotkey", ""),
                     ]).lower()

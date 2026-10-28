@@ -326,6 +326,55 @@ def load_audio_mono_16k(file_path: str) -> tuple[np.ndarray, float]:
                 pass
 
 
+def merge_diarized_segments(
+    segments: list[dict],
+    total_duration: float,
+    max_merge_gap: float = 0.65,
+    pad_start: float = 0.08,
+    pad_end: float = 0.14,
+) -> list[dict]:
+    """Merges adjacent speech segments of the same speaker and pads boundaries without overlapping."""
+    if not segments:
+        return []
+
+    ordered = sorted((dict(s) for s in segments), key=lambda x: float(x.get("start", 0.0)))
+    cleaned = []
+    for s in ordered:
+        if cleaned and s["start"] >= cleaned[-1]["start"] and s["end"] <= cleaned[-1]["end"]:
+            continue
+        cleaned.append(s)
+
+    merged = []
+    for s in cleaned:
+        if (
+            merged
+            and merged[-1].get("speaker_id") == s.get("speaker_id")
+            and (float(s["start"]) - float(merged[-1]["end"])) <= max_merge_gap
+        ):
+            merged[-1]["end"] = max(float(merged[-1]["end"]), float(s["end"]))
+            merged[-1]["dur"] = round(merged[-1]["end"] - merged[-1]["start"], 2)
+        else:
+            s_copy = dict(s)
+            s_copy["start"] = float(s_copy["start"])
+            s_copy["end"] = float(s_copy["end"])
+            s_copy["dur"] = round(s_copy["end"] - s_copy["start"], 2)
+            merged.append(s_copy)
+
+    max_dur = max(float(total_duration or 0.0), max(s["end"] for s in merged))
+    final_list = []
+    for idx, s in enumerate(merged):
+        prev_end = final_list[-1]["end"] if final_list else 0.0
+        next_start = merged[idx + 1]["start"] if idx + 1 < len(merged) else max_dur
+        new_start = max(0.0, max(prev_end, s["start"] - pad_start))
+        new_end = min(max_dur, min(next_start, s["end"] + pad_end))
+        s["start"] = round(new_start, 2)
+        s["end"] = round(new_end, 2)
+        s["dur"] = round(s["end"] - s["start"], 2)
+        if s["dur"] >= 0.25:
+            final_list.append(s)
+    return final_list
+
+
 class AIAnalyzer:
     def __init__(self, models_dir: str = None):
         if models_dir and Path(models_dir).exists():
@@ -336,9 +385,11 @@ class AIAnalyzer:
             self.models_dir = Path("data/models").resolve()
             self.models_dir.mkdir(parents=True, exist_ok=True)
 
+        self.seg_model_path = self.models_dir / "pyannote-segmentation-3-0" / "model.onnx"
         self.emb_model_path = self.models_dir / "nemo_en_titanet_large.onnx"
         self.ref_voices_path = self.models_dir / "referencias_vozes.npz"
         self._extractor = None
+        self._diarizer = None
         self._whisper = None
 
     def _get_extractor(self):
@@ -354,6 +405,28 @@ class AIAnalyzer:
             )
             self._extractor = sherpa_onnx.SpeakerEmbeddingExtractor(cfg)
             return self._extractor
+        except Exception:
+            return None
+
+    def _get_diarizer(self):
+        if self._diarizer is not None:
+            return self._diarizer
+        if not self.seg_model_path.exists() or not self.emb_model_path.exists():
+            return None
+        try:
+            import sherpa_onnx
+            diar_config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
+                segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
+                    pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(model=str(self.seg_model_path)),
+                    num_threads=2,
+                ),
+                embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(self.emb_model_path), num_threads=2),
+                clustering=sherpa_onnx.FastClusteringConfig(num_clusters=-1, threshold=0.32),
+                min_duration_on=0.20,
+                min_duration_off=0.10,
+            )
+            self._diarizer = sherpa_onnx.OfflineSpeakerDiarization(diar_config)
+            return self._diarizer
         except Exception:
             return None
 
@@ -440,28 +513,190 @@ class AIAnalyzer:
         except Exception:
             return ""
 
+    def diarize_and_identify(self, audio_16k: np.ndarray, speaker_names: dict = None) -> list[dict]:
+        """Segments audio by speaker turns using pyannote + TitaNet and matches each turn against reference voices."""
+        if audio_16k is None or len(audio_16k) < 4000:
+            return []
+        diarizer = self._get_diarizer()
+        if diarizer is None:
+            return []
+
+        sr = 16000
+        total_dur = float(len(audio_16k) / sr)
+        try:
+            raw_segs = diarizer.process(audio_16k).sort_by_start_time()
+        except Exception:
+            return []
+
+        if not raw_segs:
+            return []
+
+        # Group segments by local pyannote cluster to compute a robust centroid per local speaker
+        local_clusters = {}
+        valid_raw = []
+        for s in raw_segs:
+            dur = float(s.end - s.start)
+            if dur < 0.25:
+                continue
+            chunk = audio_16k[int(s.start * sr) : int(s.end * sr)]
+            emb = self.compute_embedding(chunk)
+            valid_raw.append({"start": float(s.start), "end": float(s.end), "dur": dur, "local_spk": s.speaker, "emb": emb})
+            if emb is not None:
+                local_clusters.setdefault(s.speaker, []).append((dur, emb))
+
+        if not valid_raw:
+            return []
+
+        # Match each local cluster centroid against referencias_vozes.npz greedily
+        local_to_global = {}
+        ref_dict = {}
+        if self.ref_voices_path.exists():
+            try:
+                loaded = np.load(self.ref_voices_path)
+                for k in loaded.files:
+                    v = loaded[k].astype(np.float32)
+                    ref_dict[k] = v / (np.linalg.norm(v) + 1e-8)
+            except Exception:
+                pass
+
+        cluster_centroids = {}
+        for l_spk, items in local_clusters.items():
+            weights = np.array([w for w, _ in items], dtype=np.float32)[:, None]
+            mat = np.vstack([e for _, e in items])
+            cent = np.sum(mat * weights, axis=0)
+            cent = cent / (np.linalg.norm(cent) + 1e-8)
+            cluster_centroids[l_spk] = cent
+
+        used_refs = set()
+        used_locals = set()
+        if ref_dict and cluster_centroids:
+            pairs = []
+            for l_spk, cent in cluster_centroids.items():
+                for r_key, r_vec in ref_dict.items():
+                    sim = float(np.dot(cent, r_vec))
+                    pairs.append((sim, l_spk, r_key))
+            pairs.sort(reverse=True, key=lambda x: x[0])
+
+            for sim, l_spk, r_key in pairs:
+                if sim >= 0.52 and l_spk not in used_locals and r_key not in used_refs:
+                    local_to_global[l_spk] = r_key
+                    used_locals.add(l_spk)
+                    used_refs.add(r_key)
+
+        # Assign remaining unmatched local clusters to new or fallback speaker IDs
+        existing_nums = [
+            int(k.split("_")[-1]) for k in ref_dict.keys() if "_" in k and k.split("_")[-1].isdigit()
+        ]
+        next_id = (max(existing_nums) + 1) if existing_nums else 1
+        for l_spk in sorted(local_clusters.keys()):
+            if l_spk not in local_to_global:
+                new_key = f"interlocutor_{next_id}"
+                while new_key in used_refs:
+                    next_id += 1
+                    new_key = f"interlocutor_{next_id}"
+                local_to_global[l_spk] = new_key
+                used_refs.add(new_key)
+                next_id += 1
+
+        mapped_Input = []
+        for r in valid_raw:
+            gid = local_to_global.get(r["local_spk"], "")
+            if not gid and r["emb"] is not None:
+                gid, _ = self.identify_speaker(audio_16k[int(r["start"] * sr) : int(r["end"] * sr)], threshold=0.50)
+            mapped_Input.append({
+                "start": r["start"],
+                "end": r["end"],
+                "dur": r["dur"],
+                "speaker_id": gid or "interlocutor_1",
+            })
+
+        merged = merge_diarized_segments(mapped_Input, total_duration=total_dur)
+        speaker_names = speaker_names or {}
+
+        enriched = []
+        for seg in merged:
+            st_idx = max(0, int(seg["start"] * sr))
+            en_idx = min(len(audio_16k), int(seg["end"] * sr))
+            seg_audio = audio_16k[st_idx:en_idx]
+            seg_ac = analyze_acoustics(seg_audio, sr=sr)
+            seg_tx = self.transcribe(seg_audio)
+            spk_id = seg["speaker_id"]
+            spk_label = speaker_names.get(spk_id) or spk_id.replace("interlocutor_", "Amigo ")
+            seg_meta = generate_smart_metadata(
+                transcript=seg_tx,
+                mood=seg_ac["mood"],
+                speaker_name=spk_label,
+                duration_s=seg["dur"],
+                use_llm=False,
+            )
+            enriched.append({
+                "start": seg["start"],
+                "end": seg["end"],
+                "dur": seg["dur"],
+                "speaker_id": spk_id,
+                "speaker_name": spk_label,
+                "transcript": seg_tx,
+                "mood": seg_ac["mood"],
+                "title": seg_meta["title"],
+                "category": seg_meta["category"],
+                "emoji": seg_meta["emoji"],
+                "color": seg_meta["color"],
+            })
+        return enriched
+
     def analyze_file(
         self,
         file_path: str,
         existing_transcript: str = None,
         existing_speaker_id: str = None,
         speaker_name: str = "",
+        speaker_names: dict = None,
         use_llm: bool = True,
     ) -> dict:
         audio_16k, duration_s = load_audio_mono_16k(file_path)
         acoustics = analyze_acoustics(audio_16k, sr=16000)
+        speaker_names = dict(speaker_names or {})
 
-        speaker_id = existing_speaker_id or ""
+        # When speaker is not pre-fixed (e.g. Call Replay or loose file), run multi-speaker diarization
+        segments = []
+        speaker_ids = []
+        if not existing_speaker_id and duration_s >= 1.2:
+            segments = self.diarize_and_identify(audio_16k, speaker_names=speaker_names)
+            for seg in segments:
+                sid = seg.get("speaker_id", "")
+                if sid and sid not in speaker_ids:
+                    speaker_ids.append(sid)
+
+        speaker_id = existing_speaker_id or (speaker_ids[0] if speaker_ids else "")
         speaker_sim = 1.0 if speaker_id else 0.0
         if not speaker_id:
             speaker_id, speaker_sim = self.identify_speaker(audio_16k)
+            if speaker_id:
+                speaker_ids = [speaker_id]
 
         transcript = (existing_transcript or "").strip()
         if not transcript:
-            transcript = self.transcribe(audio_16k)
+            if len(segments) > 1 and len(speaker_ids) > 1:
+                parts = []
+                for seg in segments:
+                    tx = (seg.get("transcript") or "").strip()
+                    if tx:
+                        lbl = speaker_names.get(seg["speaker_id"]) or seg["speaker_id"].replace("interlocutor_", "Amigo ")
+                        parts.append(f"[{lbl}]: {tx}")
+                transcript = " | ".join(parts)
+            elif len(segments) == 1 and segments[0].get("transcript"):
+                transcript = segments[0]["transcript"]
 
+            if not transcript:
+                transcript = self.transcribe(audio_16k)
+
+        if not speaker_name and speaker_id:
+            speaker_name = speaker_names.get(speaker_id, "")
+
+        # Strip '[Amigo X]: ' prefix when extracting punchy button title
+        clean_for_title = re.sub(r"\[[^\]]+\]:\s*", "", transcript)
         meta = generate_smart_metadata(
-            transcript=transcript,
+            transcript=clean_for_title,
             mood=acoustics["mood"],
             speaker_name=speaker_name,
             duration_s=duration_s,
@@ -475,6 +710,8 @@ class AIAnalyzer:
             "tags": meta["tags"],
             "transcript": transcript,
             "speaker_id": speaker_id,
+            "speaker_ids": speaker_ids or ([speaker_id] if speaker_id else []),
+            "segments": segments,
             "speaker_similarity": speaker_sim,
             "acoustic_mood": acoustics["mood"],
             "duration": round(duration_s, 2),

@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 import numpy as np
 from store import SoundboardStore
-from ai_analyzer import analyze_acoustics, generate_smart_metadata
+from ai_analyzer import analyze_acoustics, generate_smart_metadata, merge_diarized_segments
 from audio_engine import trim_and_normalize, ReplayRingBuffer
 from main import SoundboardAPI
 
@@ -130,6 +130,33 @@ def test_configurable_replay_seconds_and_60s_buffer(tmp_path):
     updated_long = api.update_settings({"replay_seconds": 45})
     assert updated_long["replay_seconds"] == 45.0
     assert api._audio.replay_buffer.max_samples >= 60 * api._audio.TARGET_SR
+
+
+def test_multi_speaker_merge_and_store_filtering(tmp_path):
+    raw_segs = [
+        {"start": 0.1, "end": 1.2, "speaker_id": "interlocutor_1"},
+        {"start": 1.4, "end": 2.3, "speaker_id": "interlocutor_1"},  # gap 0.2s -> merges with first
+        {"start": 2.5, "end": 4.0, "speaker_id": "interlocutor_2"},  # different speaker -> stays separate
+    ]
+    merged = merge_diarized_segments(raw_segs, total_duration=4.5, max_merge_gap=0.65)
+    assert len(merged) == 2
+    assert merged[0]["speaker_id"] == "interlocutor_1"
+    assert merged[1]["speaker_id"] == "interlocutor_2"
+
+    store = SoundboardStore(data_dir=str(tmp_path))
+    clip = store.add_or_update_clip({
+        "title": "Diálogo Call",
+        "file_path": "clips/dialog.wav",
+        "speaker_id": "interlocutor_1",
+        "speaker_ids": ["interlocutor_1", "interlocutor_2"],
+        "segments": merged,
+    })
+    assert "interlocutor_1" in clip["speaker_ids"]
+    assert "interlocutor_2" in clip["speaker_ids"]
+    # Filtering by either speaker returns the multi-speaker clip
+    assert len(store.search_clips(speaker_id="interlocutor_1")) == 1
+    assert len(store.search_clips(speaker_id="interlocutor_2")) == 1
+
 
 
 

@@ -87,6 +87,8 @@ function renderDevices() {
 
   document.getElementById("micPassthroughToggle").checked = Boolean(state.settings.mic_passthrough);
   document.getElementById("overlapToggle").checked = Boolean(state.settings.overlap_audio);
+  const autoSplitEl = document.getElementById("autoSplitToggle");
+  if (autoSplitEl) autoSplitEl.checked = Boolean(state.settings.auto_split_speakers);
   const repSecs = Number(state.settings.replay_seconds || 15);
   document.getElementById("replaySecsLabel").textContent = repSecs;
   const repSelect = document.getElementById("replaySecondsInput");
@@ -185,7 +187,10 @@ function renderSidebar() {
   spkList.appendChild(allSpkDiv);
 
   Object.values(state.speakers).forEach((spk) => {
-    const count = state.clips.filter((c) => c.speaker_id === spk.id).length;
+    const count = state.clips.filter((c) => {
+      const spks = c.speaker_ids && c.speaker_ids.length ? c.speaker_ids : c.speaker_id ? [c.speaker_id] : [];
+      return spks.includes(spk.id);
+    }).length;
     const div = document.createElement("div");
     div.className = `nav-item ${state.activeSpeaker === spk.id ? "active" : ""}`;
     div.innerHTML = `
@@ -217,15 +222,16 @@ function getFilteredClips() {
   return state.clips.filter((c) => {
     if (state.favoritesOnly && !c.favorite) return false;
     if (state.activeCategory !== "Todos" && c.category !== state.activeCategory) return false;
-    if (state.activeSpeaker !== "Todos" && c.speaker_id !== state.activeSpeaker) return false;
+    const clipSpks = c.speaker_ids && c.speaker_ids.length ? c.speaker_ids : c.speaker_id ? [c.speaker_id] : [];
+    if (state.activeSpeaker !== "Todos" && !clipSpks.includes(state.activeSpeaker)) return false;
     if (q) {
-      const spkName = state.speakers[c.speaker_id]?.name || "";
+      const spkNames = clipSpks.map((sid) => state.speakers[sid]?.name || "").join(" ");
       const hay = [
         c.title,
         c.transcript,
         c.category,
         c.acoustic_mood,
-        spkName,
+        spkNames,
         c.hotkey,
         ...(c.tags || []),
       ]
@@ -254,7 +260,21 @@ function renderGrid() {
   }
 
   filtered.forEach((clip) => {
-    const spk = state.speakers[clip.speaker_id];
+    const clipSpkIds =
+      clip.speaker_ids && clip.speaker_ids.length
+        ? clip.speaker_ids
+        : clip.speaker_id
+        ? [clip.speaker_id]
+        : [];
+    const spkBadgesHtml = clipSpkIds
+      .map((sid) => state.speakers[sid])
+      .filter(Boolean)
+      .map(
+        (spk) =>
+          `<span class="spk-badge" style="background:${spk.color}33;color:${spk.color};border:1px solid ${spk.color}66">${spk.name}</span>`
+      )
+      .join("");
+
     const card = document.createElement("div");
     const isPlaying = Boolean(state.playingClips[clip.id]);
     card.className = `sound-card ${isPlaying ? "playing" : ""}`;
@@ -281,11 +301,7 @@ function renderGrid() {
       }</div>
       <div class="card-footer">
         <div class="badge-row">
-          ${
-            spk
-              ? `<span class="spk-badge" style="background:${spk.color}33;color:${spk.color};border:1px solid ${spk.color}66">${spk.name}</span>`
-              : ""
-          }
+          ${spkBadgesHtml}
           <span class="mood-badge">${clip.acoustic_mood || "Normal"}</span>
         </div>
         <div class="badge-row">
@@ -442,6 +458,19 @@ function bindEvents() {
     api().update_settings({ overlap_audio: e.target.checked });
   };
 
+  const autoSplitToggle = document.getElementById("autoSplitToggle");
+  if (autoSplitToggle) {
+    autoSplitToggle.onchange = (e) => {
+      state.settings.auto_split_speakers = e.target.checked;
+      api().update_settings({ auto_split_speakers: e.target.checked });
+      showToast(
+        e.target.checked
+          ? "✂️ Auto-Separar Vozes ativado: o Clipar Call criará botões individuais por fala/amigo"
+          : "✂️ Auto-Separar Vozes desativado: o Clipar Call manterá 1 botão com todos identificados"
+      );
+    };
+  }
+
   document.getElementById("btnStopAll").onclick = () => api().stop_all();
 
   const replaySecsInput = document.getElementById("replaySecondsInput");
@@ -459,14 +488,18 @@ function bindEvents() {
 
   document.getElementById("btnReplayClip").onclick = async () => {
     const secs = Math.max(1, Math.min(60, Number(replaySecsInput.value) || 15));
-    showToast(`⚡ Salvando últimos ${secs}s da call e analisando com IA...`, "#f59e0b");
+    showToast(`⚡ Salvando últimos ${secs}s da call e identificando vozes...`, "#f59e0b");
     const res = await api().capture_replay_clip(secs);
     if (res && res.ok) {
       state.clips = res.clips;
       state.speakers = res.speakers;
       renderSidebar();
       renderGrid();
-      showToast(`✅ Replay (${secs}s) salvo como "${res.clip.title}"!`, "#10b981");
+      if (res.split_count) {
+        showToast(`✅ Replay (${secs}s) separado automaticamente em ${res.split_count} botões por voz!`, "#10b981");
+      } else {
+        showToast(`✅ Replay (${secs}s) salvo como "${res.clip.title}"!`, "#10b981");
+      }
     } else {
       showToast(res?.error || "Sem áudio recente no buffer da call.", "#ef4444");
     }
@@ -618,7 +651,7 @@ function bindEvents() {
 
   document.getElementById("btnReanalyzeAI").onclick = async () => {
     const id = document.getElementById("editClipId").value;
-    showToast("🧠 Analisando voz, transcrição e emoção com IA...", "#8b5cf6");
+    showToast("🧠 Analisando vozes (pyannote + TitaNet), transcrição e emoção...", "#8b5cf6");
     const res = await api().reanalyze_clip_ai(id);
     if (res && res.ok) {
       const idx = state.clips.findIndex((c) => c.id === id);
@@ -627,7 +660,24 @@ function bindEvents() {
       openEditModal(res.clip);
       renderSidebar();
       renderGrid();
-      showToast(`✨ IA sugeriu: "${res.clip.title}" (${res.clip.category})`, "#10b981");
+      const spkCount = (res.clip.speaker_ids || []).length || 1;
+      showToast(`✨ IA detectou ${spkCount} voz(es): "${res.clip.title}"`, "#10b981");
+    }
+  };
+
+  document.getElementById("btnSplitSpeakers").onclick = async () => {
+    const id = document.getElementById("editClipId").value;
+    showToast("✂️ Separando falas por interlocutor em botões individuais...", "#8b5cf6");
+    const res = await api().split_clip_by_speakers(id);
+    if (res && res.ok) {
+      state.clips = res.clips || state.clips;
+      state.speakers = res.speakers || state.speakers;
+      document.getElementById("editModal").classList.add("hidden");
+      renderSidebar();
+      renderGrid();
+      showToast(`✅ Áudio dividido em ${res.created_count} botões separados por fala!`, "#10b981");
+    } else {
+      showToast(res?.error || "Não há múltiplas falas para separar neste áudio.", "#f59e0b");
     }
   };
 
