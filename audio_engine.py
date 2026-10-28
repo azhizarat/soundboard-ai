@@ -1,3 +1,4 @@
+import math
 import os
 import time
 import uuid
@@ -237,6 +238,11 @@ class AudioEngine:
     TARGET_SR = 48000
     # Bounded LRU budget for decoded clips (float32 stereo 48k).
     CACHE_BUDGET_BYTES = 256 * 1024 * 1024
+    # Mic-driven ducking envelope: fast attack, slow release (seconds).
+    DUCK_ATTACK_TAU = 0.05
+    DUCK_RELEASE_TAU = 0.40
+    DUCK_AMOUNT_RANGE = (-24.0, 0.0)
+    DUCK_THRESHOLD_RANGE = (-60.0, -10.0)
 
     def __init__(self, replay_seconds: float = 15.0, start_loopback: bool = True):
         self.replay_buffer = ReplayRingBuffer(max_seconds=replay_seconds, sr=self.TARGET_SR, channels=2)
@@ -244,12 +250,23 @@ class AudioEngine:
         self._cache_bytes = 0
         self._cache_budget_bytes = self.CACHE_BUDGET_BYTES
         self._cache_lock = threading.RLock()
+        self._duck_enabled = False
+        self._duck_amount_db = -12.0
+        self._duck_threshold_dbfs = -40.0
+        self._duck_gain = 1.0
+        self._duck_target_gain = 1.0
+        self._duck_threshold_rms = 10 ** (-40.0 / 20.0)
         self._active_events = {}
         self._sessions: dict[str, PlaybackSession] = {}
         self._latest_play_id: str | None = None
         self._lock = threading.Lock()
         self._mic_stop_event = None
         self._mic_thread = None
+        # Bumped on every stream start: a stale callback from a closed stream
+        # must never touch the ducking envelope of the current one.
+        self._mic_generation = 0
+        self._mic_config = None
+        self._duck_route_active = False
         self._loopback_stop_event = threading.Event()
         self._loopback_thread = None
         self.loopback_active = False
@@ -403,6 +420,43 @@ class AudioEngine:
             if entry is not None:
                 self._cache_bytes -= entry["data"].nbytes
 
+    def set_ducking(self, enabled: bool, amount_db: float = -12.0, threshold_dbfs: float = -40.0):
+        """Ducks soundboard output while the mic is above the threshold.
+
+        Mic passthrough itself is never ducked. Values are clamped so a bad
+        setting can never silence playback permanently.
+        """
+        try:
+            amount = float(amount_db)
+            threshold = float(threshold_dbfs)
+        except (TypeError, ValueError):
+            return
+        lo, hi = self.DUCK_AMOUNT_RANGE
+        amount = max(lo, min(hi, amount))
+        lo, hi = self.DUCK_THRESHOLD_RANGE
+        threshold = max(lo, min(hi, threshold))
+
+        self._duck_enabled = bool(enabled)
+        self._duck_amount_db = amount
+        self._duck_threshold_dbfs = threshold
+        self._duck_threshold_rms = 10 ** (threshold / 20.0)
+        if enabled:
+            self._duck_target_gain = 10 ** (amount / 20.0)
+        else:
+            self._duck_target_gain = 1.0
+            self._duck_gain = 1.0
+
+    def _duck_step(self, mic_rms: float, block_seconds: float) -> float:
+        """One-pole envelope step; called from the mic callback (audio thread)."""
+        if not self._duck_enabled:
+            self._duck_gain = 1.0
+            return 1.0
+        target = self._duck_target_gain if mic_rms > self._duck_threshold_rms else 1.0
+        tau = self.DUCK_ATTACK_TAU if target < self._duck_gain else self.DUCK_RELEASE_TAU
+        alpha = 1.0 - math.exp(-max(1e-4, block_seconds) / tau)
+        self._duck_gain += (target - self._duck_gain) * alpha
+        return self._duck_gain
+
     def _stream_session_to_device(
         self,
         session: PlaybackSession,
@@ -428,6 +482,7 @@ class AudioEngine:
                 dtype="float32",
                 blocksize=chunk_size,
             ) as stream:
+                duck_prev = float(self._duck_gain)
                 while not session.stop_event.is_set():
                     with session._lock:
                         if session.seek_epoch != local_epoch:
@@ -452,10 +507,18 @@ class AudioEngine:
 
                     cur_gain = float(base_gain * live_v)
                     end = min(local_idx + chunk_size, session.total_samples)
+                    # Linear ramp across the chunk avoids zipper noise when the
+                    # mic envelope moves between two consecutive blocks.
+                    duck_now = float(self._duck_gain)
+                    span = max(1, end - local_idx)
+                    ramp = np.linspace(duck_prev, duck_now, span, dtype=np.float32)
                     chunk = np.clip(
-                        session.data[local_idx:end] * cur_gain, -1.0, 1.0
+                        session.data[local_idx:end] * (cur_gain * ramp)[:, None],
+                        -1.0,
+                        1.0,
                     ).astype(np.float32)
                     stream.write(chunk)
+                    duck_prev = duck_now
                     local_idx = end
 
                     if is_driver:
@@ -636,12 +699,38 @@ class AudioEngine:
             ev.set()
 
     def set_mic_passthrough(self, enabled: bool, mic_id: int = None, cable_id: int = None, gain: float = 1.0):
+        try:
+            gain_value = float(gain)
+        except (TypeError, ValueError):
+            gain_value = 1.0
+        config = (bool(enabled), mic_id, cable_id, gain_value)
+
+        # Idempotent: a slider/persist round-trip must not tear down a healthy
+        # stream (and its ducking envelope) just to restart it identically.
+        if (
+            self._mic_config == config
+            and self._mic_thread is not None
+            and self._mic_thread.is_alive()
+        ):
+            return
+
         if self._mic_stop_event is not None:
             self._mic_stop_event.set()
             self._mic_stop_event = None
 
         if not enabled or cable_id is None:
+            # No mic route means no ducking source: never keep clips attenuated.
+            self._mic_config = None
+            self._duck_route_active = False
+            self._duck_gain = 1.0
             return
+
+        # A new stream owns the envelope from now on; the previous generation's
+        # callbacks and teardown become no-ops.
+        self._mic_generation += 1
+        gen = self._mic_generation
+        self._mic_config = config
+        self._duck_route_active = True
 
         stop_ev = threading.Event()
         self._mic_stop_event = stop_ev
@@ -651,13 +740,16 @@ class AudioEngine:
                 import sounddevice as sd
 
                 def _callback(indata, outdata, frames, time_info, status):
-                    if stop_ev.is_set():
+                    if self._mic_generation != gen or stop_ev.is_set():
                         raise sd.CallbackStop()
                     if indata.shape[1] == 1:
                         stereo = np.repeat(indata, 2, axis=1)
                     else:
                         stereo = indata[:, :2]
-                    outdata[:] = np.clip(stereo * float(gain), -1.0, 1.0)
+                    outdata[:] = np.clip(stereo * gain_value, -1.0, 1.0)
+                    mono = indata[:, 0]
+                    rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size else 0.0
+                    self._duck_step(rms, frames / float(self.TARGET_SR))
 
                 with sd.Stream(
                     device=(mic_id, int(cable_id)),
@@ -671,6 +763,12 @@ class AudioEngine:
                         time.sleep(0.1)
             except Exception:
                 pass
+            finally:
+                # Device error/unplug/close always releases ducking, unless a
+                # newer generation already owns the envelope.
+                if self._mic_generation == gen:
+                    self._duck_gain = 1.0
+                    self._duck_route_active = False
 
         self._mic_thread = threading.Thread(target=_mic_loop, daemon=True)
         self._mic_thread.start()

@@ -22,6 +22,14 @@ if hasattr(sys.stdout, "reconfigure"):
 SUPPORTED_AUDIO_EXTS = (".mp3", ".wav", ".ogg", ".flac", ".m4a", ".webm")
 
 
+def _as_float(value, default: float, lo: float, hi: float) -> float:
+    """Coerces a persisted setting to a clamped float, falling back on corrupt data."""
+    try:
+        return max(lo, min(hi, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _device_name(entries: list[dict], dev_id) -> str:
     for entry in entries or []:
         if entry.get("id") == dev_id:
@@ -159,13 +167,23 @@ class SoundboardAPI:
         if updates:
             self._store.update_settings(updates)
 
+    def _apply_ducking(self):
+        """Pushes ducking settings only — never touches the mic stream."""
+        s = self._store.state["settings"]
+        self._audio.set_ducking(
+            bool(s.get("duck_enabled", False)),
+            _as_float(s.get("duck_amount_db"), -12.0, -24.0, 0.0),
+            _as_float(s.get("duck_threshold_dbfs"), -40.0, -60.0, -10.0),
+        )
+
     def _apply_mic_passthrough(self):
+        self._apply_ducking()
         s = self._store.state["settings"]
         self._audio.set_mic_passthrough(
             enabled=bool(s.get("mic_passthrough", False)),
             mic_id=s.get("mic_device_id"),
             cable_id=s.get("cable_device_id"),
-            gain=float(s.get("mic_gain", 1.0)),
+            gain=_as_float(s.get("mic_gain", 1.0), 1.0, 0.0, 3.0),
         )
 
     def _notify_ui(self, event_name: str, payload: dict = None):
@@ -266,6 +284,50 @@ class SoundboardAPI:
         if any(k in updates for k in ("stop_all_hotkey", "replay_hotkey", "overlay_hotkey")):
             self._hotkeys.refresh(self._store.snapshot()["clips"], s)
         return s
+
+    def set_ducking(self, payload=None, amount_db=None, threshold_dbfs=None) -> dict:
+        """Updates ducking settings.
+
+        Accepts the JS call style ``set_ducking({...})``, the positional style
+        ``set_ducking(True, -6.0, -35.0)`` and keyword overrides.
+        """
+        if isinstance(payload, dict):
+            data = dict(payload)
+        else:
+            data = {}
+            if payload is not None:
+                data["enabled"] = payload
+        if amount_db is not None:
+            data["amount_db"] = amount_db
+        if threshold_dbfs is not None:
+            data["threshold_dbfs"] = threshold_dbfs
+
+        updates = {}
+        if "enabled" in data:
+            enabled = data.get("enabled")
+            if isinstance(enabled, str):
+                # JS/property payloads arrive as strings: "false" must disable.
+                updates["duck_enabled"] = enabled.strip().lower() in ("1", "true", "yes", "on")
+            else:
+                updates["duck_enabled"] = bool(enabled)
+        if data.get("amount_db") is not None:
+            try:
+                updates["duck_amount_db"] = max(-24.0, min(0.0, float(data["amount_db"])))
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "Intensidade de ducking inválida."}
+        if data.get("threshold_dbfs") is not None:
+            try:
+                updates["duck_threshold_dbfs"] = max(-60.0, min(-10.0, float(data["threshold_dbfs"])))
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "Limiar de ducking inválido."}
+
+        settings = self._store.snapshot()["settings"]
+        if not updates:
+            return {"ok": True, "settings": settings}
+        self._store.update_settings(updates)
+        # Ducking-only change: the mic stream must keep running.
+        self._apply_ducking()
+        return {"ok": True, "settings": self._store.snapshot()["settings"]}
 
     def play_clip(self, clip_id: str, monitor_only: bool = False, from_hotkey: bool = False) -> dict:
         clip = self._store.get_clip(clip_id)
@@ -396,7 +458,70 @@ class SoundboardAPI:
             self._audio.invalidate_cache(file_path)
         snap = self._store.snapshot()
         self._hotkeys.refresh(snap["clips"], snap["settings"])
-        return {"ok": ok}
+        return {
+            "ok": bool(ok),
+            "clip": copy.deepcopy(clip) if ok and clip else None,
+            "can_undo": bool(ok and clip and not delete_file),
+        }
+
+    def restore_clip(self, clip: dict) -> dict:
+        """Restores a soft-deleted clip (undo). The audio file must still exist."""
+        payload = copy.deepcopy(clip or {})
+        clip_id = str(payload.get("id") or "").strip()
+        empty = self._store.snapshot()
+        if not clip_id:
+            return {"ok": False, "error": "Clipe inválido.", "clips": empty["clips"], "speakers": empty["speakers"]}
+        if self._store.get_clip(clip_id):
+            return {
+                "ok": False,
+                "error": "Este botão já existe.",
+                "clips": empty["clips"],
+                "speakers": empty["speakers"],
+            }
+
+        raw_path = str(payload.get("file_path") or "")
+        clips_root = self._store.clips_dir.resolve()
+        try:
+            resolved = Path(raw_path).resolve() if raw_path else None
+        except Exception:
+            resolved = None
+        # Undo must never resurrect a clip pointing at an arbitrary file, nor at
+        # a directory (including clips_dir itself).
+        if resolved is None or not resolved.is_relative_to(clips_root) or not resolved.is_file():
+            return {
+                "ok": False,
+                "error": "Arquivo do áudio não encontrado.",
+                "clips": empty["clips"],
+                "speakers": empty["speakers"],
+            }
+
+        # A re-imported clip owns that file now: undoing would create two clips
+        # sharing one file, so one deletion would silently break the other.
+        for other in empty["clips"]:
+            other_path = str(other.get("file_path") or "")
+            if not other_path:
+                continue
+            try:
+                if Path(other_path).resolve() == resolved:
+                    return {
+                        "ok": False,
+                        "error": "Este áudio já pertence a outro botão.",
+                        "clips": empty["clips"],
+                        "speakers": empty["speakers"],
+                    }
+            except Exception:
+                continue
+
+        payload["file_path"] = str(resolved)
+        saved = self._store.add_or_update_clip(payload)
+        snap = self._store.snapshot()
+        self._hotkeys.refresh(snap["clips"], snap["settings"])
+        return {
+            "ok": True,
+            "clip": copy.deepcopy(saved),
+            "clips": snap["clips"],
+            "speakers": snap["speakers"],
+        }
 
     def update_speaker(self, spk_id: str, name: str, color: str = None, avatar: str = None) -> dict:
         spk = self._store.update_speaker(spk_id, name=name, color=color, avatar=avatar)
