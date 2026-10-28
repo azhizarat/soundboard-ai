@@ -15,6 +15,7 @@ from pathlib import Path
 
 import config
 import doctor
+import loudness
 import packs
 from store import SoundboardStore
 from ai_analyzer import AIAnalyzer
@@ -47,6 +48,9 @@ EDITABLE_CLIP_FIELDS = (
     "trim_end",
     "volume",
     "acoustic_mood",
+    "lufs",
+    "loudness_gain_db",
+    "lufs_estimated",
 )
 
 
@@ -591,6 +595,45 @@ class SoundboardAPI:
             self._notify_ui("stopped_all", {})
         return {"ok": True}
 
+    def _calculate_clip_loudness(
+        self, file_path: str, trim_start: float = 0.0, trim_end: float = 0.0
+    ) -> dict:
+        try:
+            samples, sr = self._audio.load_clip_stereo_48k(file_path)
+            if samples is None or len(samples) == 0:
+                return {"lufs": None, "loudness_gain_db": 0.0, "lufs_estimated": False}
+            dur = len(samples) / float(sr)
+            t_start = max(0.0, float(trim_start or 0.0))
+            t_end = float(trim_end or 0.0)
+            if t_end <= 0.0 or t_end > dur:
+                t_end = dur
+            if t_end > t_start:
+                i_start = int(t_start * sr)
+                i_end = int(t_end * sr)
+                samples = samples[i_start:i_end]
+            return loudness.analyze_audio_loudness(samples, sr=sr)
+        except Exception:
+            return {"lufs": None, "loudness_gain_db": 0.0, "lufs_estimated": False}
+
+    def reanalyze_clip_loudness(self, clip_id: str) -> dict:
+        clip = self._store.get_clip(clip_id)
+        if not clip:
+            return {"ok": False, "error": "Clip não encontrado."}
+        file_path = clip.get("file_path", "")
+        if not file_path or not os.path.exists(file_path):
+            return {"ok": False, "error": "Arquivo de áudio não encontrado."}
+        loud_info = self._calculate_clip_loudness(
+            file_path,
+            trim_start=float(clip.get("trim_start", 0.0)),
+            trim_end=float(clip.get("trim_end", 0.0)),
+        )
+        updated = self._store.add_or_update_clip({"id": clip_id, **loud_info})
+        snap = self._store.snapshot()
+        self._notify_ui("clips_updated", {
+            "clips": self._public_clips(snap["clips"]),
+        })
+        return {"ok": True, "clip": copy.deepcopy(updated)}
+
     def save_clip_edits(self, clip_data: dict) -> dict:
         data = dict(clip_data or {})
         # Whitelist: a draft must not be publishable (pending/file_path/duration/...).
@@ -598,6 +641,15 @@ class SoundboardAPI:
         for key in EDITABLE_CLIP_FIELDS:
             if key in data:
                 payload[key] = data[key]
+        clip_id = payload.get("id")
+        existing = self._store.get_clip(clip_id) if clip_id else None
+        if existing and existing.get("file_path"):
+            trim_start = float(payload.get("trim_start", existing.get("trim_start", 0.0)))
+            trim_end = float(payload.get("trim_end", existing.get("trim_end", 0.0)))
+            loud_info = self._calculate_clip_loudness(
+                existing["file_path"], trim_start=trim_start, trim_end=trim_end
+            )
+            payload.update(loud_info)
         updated = self._store.add_or_update_clip(payload)
         snap = self._store.snapshot()
         self._hotkeys.refresh(self._public_clips(snap["clips"]), snap["settings"])
@@ -757,6 +809,11 @@ class SoundboardAPI:
             for sid in detected_spks:
                 self._store.ensure_speaker(sid)
 
+            loud_info = self._calculate_clip_loudness(
+                clip["file_path"],
+                trim_start=float(clip.get("trim_start", 0.0)),
+                trim_end=float(clip.get("trim_end", 0.0)),
+            )
             updated = self._store.add_or_update_clip({
                 "id": clip_id,
                 "title": res["title"],
@@ -770,6 +827,7 @@ class SoundboardAPI:
                 "segments": res.get("segments") or [],
                 "acoustic_mood": res["acoustic_mood"],
                 "duration": res["duration"],
+                **loud_info,
             })
             snap = self._store.snapshot()
             return {"ok": True, "clip": copy.deepcopy(updated), "speakers": snap["speakers"]}
@@ -910,6 +968,7 @@ class SoundboardAPI:
                 for sid in spk_ids:
                     self._store.ensure_speaker(sid)
 
+                loud_info = self._calculate_clip_loudness(str(dst_path))
                 clip = self._store.add_or_update_clip({
                     "title": res.get("title") or src_path.stem[:28],
                     "file_path": str(dst_path),
@@ -924,6 +983,7 @@ class SoundboardAPI:
                     "tags": res.get("tags") or [],
                     "duration": res.get("duration") or 1.0,
                     "created_at": time.time(),
+                    **loud_info,
                 })
                 imported.append(clip)
         finally:

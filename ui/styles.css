@@ -689,6 +689,18 @@ body {
   width: min(760px, 94vw);
 }
 
+.lufs-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.lufs-row .status-pill {
+  font-size: 11px;
+  padding: 3px 8px;
+}
+
 /* Workspace */
 .workspace {
   display: flex;

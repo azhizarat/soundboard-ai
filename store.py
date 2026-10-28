@@ -347,6 +347,9 @@ class SoundboardStore:
                 "favorite": bool(clip_data.get("favorite", False)),
                 "pending": bool(clip_data.get("pending", False)),
                 "play_count": int(clip_data.get("play_count", 0)),
+                "lufs": clip_data.get("lufs"),
+                "loudness_gain_db": float(clip_data.get("loudness_gain_db", 0.0) or 0.0),
+                "lufs_estimated": bool(clip_data.get("lufs_estimated", False)),
                 "created_at": clip_data.get("created_at") or time.time(),
             }
             self.state["clips"].insert(0, new_clip)

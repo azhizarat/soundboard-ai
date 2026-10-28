@@ -614,6 +614,11 @@ class AudioEngine:
         if processed is None or len(processed) == 0:
             return ""
 
+        loudness_gain_db = float(clip.get("loudness_gain_db", 0.0) or 0.0)
+        if loudness_gain_db != 0.0:
+            scale = float(10.0 ** (loudness_gain_db / 20.0))
+            processed = (processed * scale).astype(np.float32)
+
         play_id = uuid.uuid4().hex[:8]
         session = PlaybackSession(
             play_id=play_id,

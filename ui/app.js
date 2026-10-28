@@ -833,9 +833,29 @@ async function commitReplayDraft() {
   }
 }
 
+function renderClipLufsBadge(clip) {
+  const badge = document.getElementById("clipLufsBadge");
+  if (!badge) return;
+  if (clip && typeof clip.lufs === "number") {
+    const est = clip.lufs_estimated ? " (est.)" : "";
+    const gain =
+      typeof clip.loudness_gain_db === "number"
+        ? ` [${clip.loudness_gain_db >= 0 ? "+" : ""}${clip.loudness_gain_db.toFixed(1)} dB]`
+        : "";
+    badge.textContent = `Nível: ${clip.lufs.toFixed(1)} LUFS${est}${gain}`;
+    badge.classList.remove("status-warn", "hidden");
+    badge.classList.add("status-ok");
+  } else {
+    badge.textContent = "Nível: —";
+    badge.classList.remove("status-ok");
+    badge.classList.add("status-warn");
+  }
+}
+
 function openEditModal(clip) {
   state.draftClipId = clip.pending ? clip.id : null;
   applyDraftChrome(Boolean(clip.pending));
+  renderClipLufsBadge(clip);
   document.getElementById("editClipId").value = clip.id;
   document.getElementById("editEmoji").value = clip.emoji || "🔊";
   document.getElementById("editTitle").value = clip.title || "";
@@ -1884,6 +1904,29 @@ function bindEvents() {
   const btnTrimHeader = document.getElementById("btnPreviewTrimHeader");
   if (btnTrimHeader) {
     btnTrimHeader.onclick = toggleModalAudioPreview;
+  }
+
+  const btnReanalyzeLufs = document.getElementById("btnReanalyzeLufs");
+  if (btnReanalyzeLufs) {
+    btnReanalyzeLufs.onclick = async () => {
+      const id = document.getElementById("editClipId").value;
+      if (!id || !api()) return;
+      btnReanalyzeLufs.disabled = true;
+      try {
+        const res = await api().reanalyze_clip_loudness(id);
+        if (res && res.ok && res.clip) {
+          const idx = state.clips.findIndex((c) => c.id === id);
+          if (idx >= 0) state.clips[idx] = res.clip;
+          renderClipLufsBadge(res.clip);
+          renderGrid();
+          showToast("Nível de loudness recalculado.", "#10b981");
+        } else {
+          showToast(res?.error || "Falha ao recalcular nível.", "#ef4444");
+        }
+      } finally {
+        btnReanalyzeLufs.disabled = false;
+      }
+    };
   }
 
   document.getElementById("btnReanalyzeAI").onclick = async () => {
