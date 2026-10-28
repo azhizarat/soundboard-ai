@@ -119,6 +119,7 @@ function renderDevices() {
   document.getElementById("cableVolumeVal").textContent = `${Math.round(cVol * 100)}%`;
   document.getElementById("monitorVolumeSlider").value = mVol;
   document.getElementById("monitorVolumeVal").textContent = `${Math.round(mVol * 100)}%`;
+  updateRoutingSummary();
 
   document.getElementById("micPassthroughToggle").checked = Boolean(state.settings.mic_passthrough);
   document.getElementById("overlapToggle").checked = Boolean(state.settings.overlap_audio);
@@ -134,6 +135,14 @@ function renderDevices() {
     repSelect.appendChild(customOpt);
   }
   repSelect.value = String(repSecs);
+}
+
+function updateRoutingSummary() {
+  const summaryEl = document.getElementById("routingStatusSummary");
+  if (!summaryEl) return;
+  const cVol = Math.round(Number(state.settings.cable_volume ?? 1.0) * 100);
+  const mVol = Math.round(Number(state.settings.monitor_volume ?? 0.75) * 100);
+  summaryEl.textContent = `Cable: ${cVol}% | Fone: ${mVol}%`;
 }
 
 function renderQuickImportBar() {
@@ -373,11 +382,15 @@ function renderGrid() {
       (clip.trim_end && clip.trim_end > clip.trim_start ? clip.trim_end : clip.duration || 0) -
         (clip.trim_start || 0)
     ).toFixed(1);
-    const timeStr = formatRelativeTime(clip.created_at);
+
+    const moodBadgeHtml =
+      clip.acoustic_mood && clip.acoustic_mood.toLowerCase() !== "normal"
+        ? `<span class="mood-badge">${clip.acoustic_mood}</span>`
+        : "";
 
     card.innerHTML = `
       <div class="card-top">
-        <div class="badge-row">
+        <div class="badge-row card-meta-left">
           <span class="card-emoji">${clip.emoji || "🔊"}</span>
           ${isPlaying ? `<span class="eq-bars ${state.activePlayback?.clip_id === clip.id && state.activePlayback?.paused ? "paused" : ""}"><span></span><span></span><span></span><span></span></span>` : isNew ? `<span class="new-badge">✨ NOVO!</span>` : ""}
         </div>
@@ -388,18 +401,15 @@ function renderGrid() {
         </div>
       </div>
       <div class="card-title" title="${clip.title}">${clip.title}</div>
-      <div class="card-transcript" title="${clip.transcript || ""}">${
-        clip.transcript ? `"${clip.transcript}"` : clip.category
-      }</div>
+      ${clip.transcript ? `<div class="card-transcript" title="${clip.transcript}">"${clip.transcript}"</div>` : ""}
       <div class="card-footer">
-        <div class="badge-row">
+        <div class="badge-row card-meta-left">
           ${spkBadgesHtml}
-          <span class="mood-badge">${clip.acoustic_mood || "Normal"}</span>
+          ${moodBadgeHtml}
         </div>
-        <div class="badge-row">
-          ${timeStr ? `<span class="time-badge" title="Horário em que o áudio subiu">${timeStr}</span>` : ""}
+        <div class="badge-row card-meta-right">
           ${clip.hotkey ? `<span class="hotkey-badge">${clip.hotkey}</span>` : ""}
-          <span>${effDur}s</span>
+          <span class="card-duration">${effDur}s</span>
         </div>
       </div>
       <div class="play-progress" id="prog_${clip.id}"></div>
@@ -442,6 +452,31 @@ function renderGrid() {
 
     grid.appendChild(card);
   });
+}
+
+function updateModalPreviewButtons(isPlaying) {
+  const btnFooter = document.getElementById("btnPreviewMonitor");
+  const btnTrim = document.getElementById("btnPreviewTrimHeader");
+  if (btnFooter) {
+    if (isPlaying) {
+      btnFooter.innerHTML = "⏹ Parar Teste";
+      btnFooter.classList.add("btn-danger");
+      btnFooter.classList.remove("btn-secondary");
+    } else {
+      btnFooter.innerHTML = "🎧 Testar no Fone";
+      btnFooter.classList.remove("btn-danger");
+      btnFooter.classList.add("btn-secondary");
+    }
+  }
+  if (btnTrim) {
+    if (isPlaying) {
+      btnTrim.innerHTML = "⏹ Parar";
+      btnTrim.classList.add("btn-danger");
+    } else {
+      btnTrim.innerHTML = "▶️ Testar Corte";
+      btnTrim.classList.remove("btn-danger");
+    }
+  }
 }
 
 function openEditModal(clip) {
@@ -510,6 +545,14 @@ function openEditModal(clip) {
       .catch(() => {});
   }
 
+  const curClipPlaying = Boolean(
+    state.activePlayback &&
+    state.activePlayback.clip_id === clip.id &&
+    state.activePlayback.playing
+  );
+  updateModalPreviewButtons(curClipPlaying);
+
+  document.getElementById("routingPopoverMenu")?.classList.add("hidden");
   document.getElementById("editModal").classList.remove("hidden");
 }
 
@@ -604,6 +647,7 @@ function startPlaybackRaf() {
           delete state.playingClips[ap.clip_id];
           state.activePlayback = null;
           playbackRafId = null;
+          updateModalPreviewButtons(false);
           renderGrid();
           return;
         }
@@ -701,6 +745,7 @@ function openSpeakerModal(spk) {
   document.getElementById("renameSpeakerId").value = spk.id;
   document.getElementById("renameSpeakerName").value = spk.name || "";
   document.getElementById("renameSpeakerColor").value = spk.color || "#3b82f6";
+  document.getElementById("routingPopoverMenu")?.classList.add("hidden");
   document.getElementById("speakerModal").classList.remove("hidden");
 }
 
@@ -721,6 +766,7 @@ function bindEvents() {
     const v = Number(e.target.value);
     document.getElementById("cableVolumeVal").textContent = `${Math.round(v * 100)}%`;
     state.settings.cable_volume = v;
+    updateRoutingSummary();
     api().update_settings({ cable_volume: v });
   };
 
@@ -728,6 +774,7 @@ function bindEvents() {
     const v = Number(e.target.value);
     document.getElementById("monitorVolumeVal").textContent = `${Math.round(v * 100)}%`;
     state.settings.monitor_volume = v;
+    updateRoutingSummary();
     api().update_settings({ monitor_volume: v });
   };
 
@@ -758,6 +805,33 @@ function bindEvents() {
           : "✂️ Auto-Separar Vozes desativado: o Clipar Call manterá 1 botão com todos identificados"
       );
     };
+  }
+
+  // Routing Popover toggle and outside dismissal
+  const btnRouting = document.getElementById("btnRoutingPopover");
+  const routingMenu = document.getElementById("routingPopoverMenu");
+  const btnCloseRouting = document.getElementById("btnCloseRoutingPopover");
+  if (btnRouting && routingMenu) {
+    btnRouting.onclick = (e) => {
+      e.stopPropagation();
+      routingMenu.classList.toggle("hidden");
+    };
+    if (btnCloseRouting) {
+      btnCloseRouting.onclick = (e) => {
+        e.stopPropagation();
+        routingMenu.classList.add("hidden");
+      };
+    }
+    document.addEventListener("click", (e) => {
+      if (!routingMenu.classList.contains("hidden") && !routingMenu.contains(e.target) && !btnRouting.contains(e.target)) {
+        routingMenu.classList.add("hidden");
+      }
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !routingMenu.classList.contains("hidden")) {
+        routingMenu.classList.add("hidden");
+      }
+    });
   }
 
   document.getElementById("btnStopAll").onclick = () => {
@@ -943,8 +1017,10 @@ function bindEvents() {
   });
 
   // Modal bindings
-  document.getElementById("btnCloseModal").onclick = () =>
+  document.getElementById("btnCloseModal").onclick = () => {
     document.getElementById("editModal").classList.add("hidden");
+    updateModalPreviewButtons(false);
+  };
 
   const trimStartSlider = document.getElementById("editTrimStart");
   const trimEndSlider = document.getElementById("editTrimEnd");
@@ -1001,7 +1077,7 @@ function bindEvents() {
   trimStartNum.onchange = (e) => syncTrimValues(e.target.value, trimEndNum.value);
   trimEndNum.onchange = (e) => syncTrimValues(trimStartNum.value, e.target.value);
 
-  document.querySelectorAll(".btn-preset").forEach((btn) => {
+  document.querySelectorAll(".btn-preset[data-preset]").forEach((btn) => {
     btn.onclick = () => {
       const maxDur = Number(trimEndSlider.max) || 10;
       const preset = btn.getAttribute("data-preset");
@@ -1009,7 +1085,7 @@ function bindEvents() {
       else if (preset === "first5") syncTrimValues(0, Math.min(5, maxDur));
       else if (preset === "last3") syncTrimValues(Math.max(0, maxDur - 3), maxDur);
       else if (preset === "last5") syncTrimValues(Math.max(0, maxDur - 5), maxDur);
-      else syncTrimValues(0, maxDur);
+      else if (preset === "full") syncTrimValues(0, maxDur);
     };
   });
 
@@ -1036,10 +1112,12 @@ function bindEvents() {
     hkInput.value = "";
   };
 
-  document.getElementById("btnSaveClip").onclick = async () => {
+  async function saveCurrentClipEdits(closeModalAfter = true) {
+    const id = document.getElementById("editClipId").value;
+    if (!id) return null;
     const selSpk = document.getElementById("editSpeaker").value;
     const payload = {
-      id: document.getElementById("editClipId").value,
+      id,
       emoji: document.getElementById("editEmoji").value || "🔊",
       title: document.getElementById("editTitle").value || "Áudio",
       color: document.getElementById("editColor").value,
@@ -1057,20 +1135,47 @@ function bindEvents() {
       const idx = state.clips.findIndex((c) => c.id === payload.id);
       if (idx >= 0) state.clips[idx] = res.clip;
       state.speakers = res.speakers || state.speakers;
-      document.getElementById("editModal").classList.add("hidden");
       renderSidebar();
       renderGrid();
-      showToast("💾 Alterações salvas!");
+      if (closeModalAfter) {
+        document.getElementById("editModal").classList.add("hidden");
+        updateModalPreviewButtons(false);
+        showToast("💾 Alterações salvas!");
+      }
+      return res.clip;
     }
+    return null;
+  }
+
+  async function toggleModalAudioPreview() {
+    const id = document.getElementById("editClipId").value;
+    if (!id) return;
+    if (state.activePlayback && state.activePlayback.clip_id === id && state.activePlayback.playing) {
+      api().stop_all();
+      updateModalPreviewButtons(false);
+      return;
+    }
+
+    // Save temporary adjustments without closing modal
+    await saveCurrentClipEdits(false);
+
+    // Play clip locally on headphone monitor only
+    const res = await api().play_clip(id, true);
+    if (res && res.status) {
+      syncActivePlayback(res.status);
+      updateModalPreviewButtons(true);
+    }
+  }
+
+  document.getElementById("btnSaveClip").onclick = async () => {
+    await saveCurrentClipEdits(true);
   };
 
-  document.getElementById("btnPreviewMonitor").onclick = async () => {
-    const id = document.getElementById("editClipId").value;
-    // Save temporary trim/vol adjustments before previewing
-    await document.getElementById("btnSaveClip").onclick();
-    const res = await api().play_clip(id, true);
-    if (res && res.status) syncActivePlayback(res.status);
-  };
+  document.getElementById("btnPreviewMonitor").onclick = toggleModalAudioPreview;
+  const btnTrimHeader = document.getElementById("btnPreviewTrimHeader");
+  if (btnTrimHeader) {
+    btnTrimHeader.onclick = toggleModalAudioPreview;
+  }
 
   document.getElementById("btnReanalyzeAI").onclick = async () => {
     const id = document.getElementById("editClipId").value;
@@ -1175,10 +1280,12 @@ window.onBackendEvent = (event, payload) => {
     if (state.activePlayback?.clip_id === payload.clip_id) {
       state.activePlayback = null;
     }
+    updateModalPreviewButtons(false);
     renderGrid();
   } else if (event === "stopped_all") {
     state.playingClips = {};
     state.activePlayback = null;
+    updateModalPreviewButtons(false);
     renderGrid();
   } else if (event === "replay_captured" || event === "clips_updated") {
     if (payload.clips) state.clips = payload.clips;

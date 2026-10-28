@@ -18,49 +18,65 @@
         </div>
       </div>
 
-      <div class="routing-controls">
-        <div class="device-group">
-          <label title="Dispositivo VB-Audio CABLE Input que envia o som para o seu CABLE Output no Discord/Jogo">
-            🔌 Saída p/ Cable Output (VB-Audio)
-          </label>
-          <div class="device-row">
-            <select id="cableDeviceSelect"></select>
-            <input type="range" id="cableVolumeSlider" min="0" max="1.5" step="0.02" value="1.0" title="Volume no Cabo Virtual" />
-            <span id="cableVolumeVal" class="vol-label">100%</span>
-          </div>
-        </div>
+      <div class="routing-pill-wrapper">
+        <button type="button" id="btnRoutingPopover" class="btn btn-routing-pill" title="Configurar dispositivos de saída, monitor e microfone (Alt+R)">
+          <span class="routing-icon">🎧</span>
+          <span class="routing-label">Roteamento</span>
+          <span id="routingStatusSummary" class="routing-summary">Cable: 100% | Fone: 75%</span>
+          <span class="routing-caret">▾</span>
+        </button>
 
-        <div class="device-group">
-          <label title="Seu fone/caixa de som para você ouvir o que está soltando">
-            🎧 Monitor Local (Seu Fone)
-          </label>
-          <div class="device-row">
-            <select id="monitorDeviceSelect"></select>
-            <input type="range" id="monitorVolumeSlider" min="0" max="1.5" step="0.02" value="0.75" title="Volume no seu Fone" />
-            <span id="monitorVolumeVal" class="vol-label">75%</span>
+        <!-- Floating Popover Menu -->
+        <div id="routingPopoverMenu" class="routing-popover hidden">
+          <div class="popover-header">
+            <h4>🎛️ Dispositivos & Mix de Áudio</h4>
+            <button type="button" id="btnCloseRoutingPopover" class="btn-clear" title="Fechar">✕</button>
           </div>
-        </div>
+          <div class="popover-body">
+            <div class="device-group">
+              <label title="Dispositivo VB-Audio CABLE Input que envia o som para o seu CABLE Output no Discord/Jogo">
+                🔌 Saída p/ Cable Output (VB-Audio)
+              </label>
+              <div class="device-row">
+                <select id="cableDeviceSelect"></select>
+                <input type="range" id="cableVolumeSlider" min="0" max="1.5" step="0.02" value="1.0" title="Volume no Cabo Virtual" />
+                <span id="cableVolumeVal" class="vol-label">100%</span>
+              </div>
+            </div>
 
-        <div class="toggles-group">
-          <label class="toggle-chip" title="Encaminha seu microfone físico direto para o CABLE Input em tempo real">
-            <input type="checkbox" id="micPassthroughToggle" />
-            <span>🎙️ Mic no Cabo</span>
-          </label>
-          <label class="toggle-chip" title="Permite tocar vários áudios ao mesmo tempo sem cortar o anterior">
-            <input type="checkbox" id="overlapToggle" />
-            <span>🔀 Sobrepor</span>
-          </label>
-          <label class="toggle-chip" title="Quando ativado, o Clipar Call já divide automaticamente cada fala/amigo em um botão separado">
-            <input type="checkbox" id="autoSplitToggle" />
-            <span>✂️ Auto-Separar Vozes</span>
-          </label>
+            <div class="device-group">
+              <label title="Seu fone/caixa de som para você ouvir o que está soltando">
+                🎧 Monitor Local (Seu Fone)
+              </label>
+              <div class="device-row">
+                <select id="monitorDeviceSelect"></select>
+                <input type="range" id="monitorVolumeSlider" min="0" max="1.5" step="0.02" value="0.75" title="Volume no seu Fone" />
+                <span id="monitorVolumeVal" class="vol-label">75%</span>
+              </div>
+            </div>
+
+            <div class="toggles-group">
+              <label class="toggle-chip" title="Encaminha seu microfone físico direto para o CABLE Input em tempo real">
+                <input type="checkbox" id="micPassthroughToggle" />
+                <span>🎙️ Mic no Cabo</span>
+              </label>
+              <label class="toggle-chip" title="Permite tocar vários áudios ao mesmo tempo sem cortar o anterior">
+                <input type="checkbox" id="overlapToggle" />
+                <span>🔀 Sobrepor</span>
+              </label>
+              <label class="toggle-chip" title="Quando ativado, o Clipar Call já divide automaticamente cada fala/amigo em um botão separado">
+                <input type="checkbox" id="autoSplitToggle" />
+                <span>✂️ Auto-Separar Vozes</span>
+              </label>
+            </div>
+          </div>
         </div>
       </div>
 
       <div class="deck-actions">
         <div class="replay-control-group" title="Escolha quantos segundos da call quer salvar e clique em Clipar Call (ou aperte Alt+F10)">
           <button id="btnReplayClip" class="btn btn-replay">
-            ⚡ Clipar Call (<span id="replaySecsLabel">15</span>s)
+            ⚡ Clipar<span class="replay-full-label"> Call</span> (<span id="replaySecsLabel">15</span>s)
           </button>
           <div class="replay-duration-picker">
             <select id="replaySecondsInput" title="Selecione o intervalo do clip da call">
@@ -78,10 +94,10 @@
           </div>
         </div>
         <button id="btnImportFiles" class="btn btn-secondary" title="Importar áudios identificando quem falou e classificando com IA">
-          ➕ Áudios (IA)
+          ➕ Áudios<span class="btn-extra-text"> (IA)</span>
         </button>
         <button id="btnImportVinheta" class="btn btn-vinheta" title="Importar efeitos/músicas direto para a categoria 'Vinhetas' (sem associar a nenhuma pessoa)">
-          🎵 + Vinheta
+          🎵<span class="btn-extra-text"> +</span> Vinheta
         </button>
         <button id="btnImportFolder" class="btn btn-secondary" title="Importar pasta 'separados' (com mapa_de_falas.json) ou pasta de áudios">
           📂 Pasta
@@ -158,7 +174,7 @@
               <button type="button" class="density-btn" data-density="large">Grande</button>
             </div>
             <label class="sort-wrap" title="Escolha a ordem em que os botões aparecem no grid">
-              <span>Ordenar:</span>
+              <span class="sort-label">Ordenar:</span>
               <select id="sortSelect">
                 <option value="newest" selected>🕒 Mais Recentes Primeiro</option>
                 <option value="most_played">🔥 Mais Tocados</option>
@@ -286,6 +302,7 @@
                 <button type="button" class="btn-preset" data-preset="last3">Final 3s</button>
                 <button type="button" class="btn-preset" data-preset="last5">Final 5s</button>
                 <button type="button" class="btn-preset" data-preset="full">Inteiro</button>
+                <button type="button" id="btnPreviewTrimHeader" class="btn-preset btn-preset-test" title="Ouvir o trecho cortado no seu fone sem fechar o modal">▶️ Testar Corte</button>
               </div>
             </div>
             <div class="waveform-wrap" title="Clique ou arraste nas bordas da onda sonora para ajustar o início e o fim do corte">
@@ -319,15 +336,17 @@
 
         <div class="modal-footer">
           <div class="left-footer-btns">
-            <button type="button" id="btnDeleteClip" class="btn btn-danger">🗑️ Excluir</button>
-            <button type="button" id="btnReanalyzeAI" class="btn btn-ai">✨ Re-analisar com IA</button>
-            <button type="button" id="btnSplitSpeakers" class="btn btn-secondary" title="Divide cada fala/interlocutor deste áudio em um botão individual no Soundboard">
-              ✂️ Separar Falas em Botões
+            <button type="button" id="btnDeleteClip" class="btn btn-danger" title="Excluir este áudio do Soundboard">🗑️ Excluir</button>
+            <button type="button" id="btnReanalyzeAI" class="btn btn-ai" title="Reanalisar vozes e emoções com IA">✨ Re-analisar IA</button>
+            <button type="button" id="btnSplitSpeakers" class="btn btn-secondary" title="Divide cada fala/interlocutor deste áudio em um botão individual">
+              ✂️ Separar Falas
             </button>
-            <button type="button" id="btnPreviewMonitor" class="btn btn-secondary">🎧 Testar só no Fone</button>
           </div>
           <div class="right-footer-btns">
-            <button type="button" id="btnSaveClip" class="btn btn-primary">💾 Salvar</button>
+            <button type="button" id="btnPreviewMonitor" class="btn btn-secondary" title="Ouvir no seu fone para testar o corte sem fechar o modal">
+              🎧 Testar no Fone
+            </button>
+            <button type="button" id="btnSaveClip" class="btn btn-primary" title="Salvar alterações e fechar">💾 Salvar</button>
           </div>
         </div>
       </div>
