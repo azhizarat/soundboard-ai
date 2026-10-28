@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.uv-cache/
+data/clips/*
+!data/clips/.gitkeep
+data/models/
+data/soundboard.json
+*.gguf
+*.onnx
+*.npz
+.DS_Store
+Thumbs.db
