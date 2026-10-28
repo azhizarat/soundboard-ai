@@ -14,3 +14,4 @@ data/soundboard.json
 *.npz
 .DS_Store
 Thumbs.db
+.worktrees/
