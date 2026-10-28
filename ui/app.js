@@ -48,14 +48,30 @@ function isClipNew(clip) {
   return (nowSec - created <= 600) || (created >= state.sessionStartSec && Number(clip.play_count || 0) === 0);
 }
 
-function showToast(message, color = "#3b82f6") {
+let pendingUndoToast = null;
+
+function showToast(message, color = "#3b82f6", options = {}) {
   const container = document.getElementById("toastContainer");
   const el = document.createElement("div");
   el.className = "toast";
   el.style.borderLeftColor = color;
-  el.textContent = message;
+  const label = document.createElement("span");
+  label.textContent = message;
+  el.appendChild(label);
+  if (options.actionLabel && typeof options.onAction === "function") {
+    const action = document.createElement("button");
+    action.className = "toast-action";
+    action.textContent = options.actionLabel;
+    action.onclick = () => {
+      el.remove();
+      options.onAction();
+    };
+    el.appendChild(action);
+  }
   container.appendChild(el);
-  setTimeout(() => el.remove(), 3400);
+  const timeout = Number(options.duration) > 0 ? Number(options.duration) : 3400;
+  setTimeout(() => el.remove(), timeout);
+  return el;
 }
 
 function showPlayFailure(res) {
@@ -144,6 +160,15 @@ function renderDevices() {
   document.getElementById("overlapToggle").checked = Boolean(state.settings.overlap_audio);
   const autoSplitEl = document.getElementById("autoSplitToggle");
   if (autoSplitEl) autoSplitEl.checked = Boolean(state.settings.auto_split_speakers);
+  const duckToggle = document.getElementById("duckToggle");
+  if (duckToggle) duckToggle.checked = Boolean(state.settings.duck_enabled);
+  const duckSlider = document.getElementById("duckAmountSlider");
+  if (duckSlider) {
+    const db = Number(state.settings.duck_amount_db ?? -12);
+    duckSlider.value = String(db);
+    const lbl = document.getElementById("duckAmountVal");
+    if (lbl) lbl.textContent = `${db} dB`;
+  }
   const repSecs = Number(state.settings.replay_seconds || 15);
   document.getElementById("replaySecsLabel").textContent = repSecs;
   const repSelect = document.getElementById("replaySecondsInput");
@@ -313,7 +338,8 @@ function renderSidebar() {
 }
 
 function getFilteredClips() {
-  const q = (state.searchQuery || "").trim().toLowerCase();
+  const q = (state.searchQuery || "").trim();
+  const scores = new Map();
   const filtered = state.clips.filter((c) => {
     if (state.favoritesOnly && !c.favorite) return false;
     if (state.activeCategory !== "Todos" && c.category !== state.activeCategory) return false;
@@ -324,24 +350,22 @@ function getFilteredClips() {
       return false;
     }
     if (q) {
-      const spkNames = clipSpks.map((sid) => state.speakers[sid]?.name || "").join(" ");
-      const hay = [
-        c.title,
-        c.transcript,
-        c.category,
-        c.acoustic_mood,
-        spkNames,
-        c.hotkey,
-        ...(c.tags || []),
-      ]
-        .join(" ")
-        .toLowerCase();
-      if (!hay.includes(q)) return false;
+      const s = SBFuzzy.scoreClip(c, q, state.speakers);
+      if (s === null) return false;
+      scores.set(c, s);
     }
     return true;
   });
 
   filtered.sort((a, b) => {
+    if (q) {
+      const sa = scores.get(a) || 0;
+      const sb = scores.get(b) || 0;
+      if (sb !== sa) return sb - sa;
+      if (!!b.favorite !== !!a.favorite) return b.favorite ? 1 : -1;
+      const plays = Number(b.play_count || 0) - Number(a.play_count || 0);
+      if (plays !== 0) return plays;
+    }
     if (state.sortBy === "most_played") {
       const diff = Number(b.play_count || 0) - Number(a.play_count || 0);
       if (diff !== 0) return diff;
@@ -358,6 +382,7 @@ function getFilteredClips() {
 
 function renderGrid() {
   const grid = document.getElementById("soundGrid");
+  const q = (state.searchQuery || "").trim();
   const filtered = getFilteredClips();
   document.getElementById("clipCountBadge").textContent = `${filtered.length} áudios`;
   grid.classList.toggle("density-compact", state.gridDensity === "compact");
@@ -409,6 +434,9 @@ function renderGrid() {
         ? `<span class="mood-badge">${escapeHtml(clip.acoustic_mood)}</span>`
         : "";
 
+    const titleHtml = q ? SBFuzzy.highlight(clip.title, q) : escapeHtml(clip.title);
+    const transcriptHtml = q ? SBFuzzy.highlight(clip.transcript, q) : escapeHtml(clip.transcript);
+
     card.innerHTML = `
       <div class="card-top">
         <div class="badge-row card-meta-left">
@@ -421,8 +449,8 @@ function renderGrid() {
           <button class="card-icon-btn btn-edit" title="Editar nome, corte, atalho ou IA">⚙️</button>
         </div>
       </div>
-      <div class="card-title" title="${escapeHtml(clip.title)}">${escapeHtml(clip.title)}</div>
-      ${clip.transcript ? `<div class="card-transcript" title="${escapeHtml(clip.transcript)}">"${escapeHtml(clip.transcript)}"</div>` : ""}
+      <div class="card-title" title="${escapeHtml(clip.title)}">${titleHtml}</div>
+      ${clip.transcript ? `<div class="card-transcript" title="${escapeHtml(clip.transcript)}">"${transcriptHtml}"</div>` : ""}
       <div class="card-footer">
         <div class="badge-row card-meta-left">
           ${spkBadgesHtml}
@@ -764,12 +792,112 @@ function updateTrimTotalBadge(st, en) {
   if (badge) badge.textContent = `${dur.toFixed(2)}s`;
 }
 
+let speakerConfirmTimer = null;
+
+function resetSpeakerDeleteConfirm() {
+  if (speakerConfirmTimer) {
+    clearTimeout(speakerConfirmTimer);
+    speakerConfirmTimer = null;
+  }
+  const btn = document.getElementById("btnDeleteSpeakerModal");
+  if (!btn) return;
+  delete btn.dataset.confirming;
+  delete btn.dataset.confirmTarget;
+  delete btn.dataset.lastClick;
+  btn.textContent = "🗑️ Excluir Pessoa";
+}
+
 function openSpeakerModal(spk) {
   document.getElementById("renameSpeakerId").value = spk.id;
   document.getElementById("renameSpeakerName").value = spk.name || "";
   document.getElementById("renameSpeakerColor").value = spk.color || "#3b82f6";
   document.getElementById("routingPopoverMenu")?.classList.add("hidden");
+  resetSpeakerDeleteConfirm();
   document.getElementById("speakerModal").classList.remove("hidden");
+}
+
+const commandState = { open: false, index: 0, results: [], returnFocus: null };
+
+function commandPaletteResults(query) {
+  const q = (query || "").trim();
+  const clips = state.clips;
+  if (!q) return clips.slice(0, 12);
+  return clips
+    .map((clip) => ({ clip, score: SBFuzzy.scoreClip(clip, q, state.speakers) }))
+    .filter((row) => row.score !== null)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 12)
+    .map((row) => row.clip);
+}
+
+function renderCommandPalette() {
+  const list = document.getElementById("commandResults");
+  if (!list) return;
+  list.innerHTML = "";
+  commandState.results.forEach((clip, idx) => {
+    const item = document.createElement("div");
+    item.className = `command-item ${idx === commandState.index ? "active" : ""}`;
+    const spk = (clip.speaker_ids || []).map((id) => state.speakers[id]?.name).filter(Boolean)[0] || "Sem pessoa";
+    const title = document.getElementById("commandInput").value.trim();
+    item.innerHTML = `
+      <span>${escapeHtml(clip.emoji || "🔊")}</span>
+      <span class="ci-title">${title ? SBFuzzy.highlight(clip.title, title) : escapeHtml(clip.title)}</span>
+      <span class="ci-meta">${escapeHtml(spk)}</span>
+      ${clip.hotkey ? `<span class="hotkey-badge">${escapeHtml(clip.hotkey)}</span>` : ""}
+    `;
+    item.onclick = () => playFromPalette(clip, false);
+    list.appendChild(item);
+  });
+  if (commandState.results.length === 0) {
+    list.innerHTML = `<div class="command-item"><span class="ci-meta">Nenhum áudio encontrado</span></div>`;
+  }
+}
+
+function playFromPalette(clip, monitorOnly) {
+  closeCommandPalette();
+  if (monitorOnly) {
+    api().play_clip(clip.id, true).then((res) => {
+      if (showPlayFailure(res)) return;
+      if (res && res.status) syncActivePlayback(res.status);
+    });
+  } else {
+    const res = api().play_clip(clip.id, false);
+    res.then((r) => { if (showPlayFailure(r)) return; if (r && r.status) syncActivePlayback(r.status); });
+  }
+}
+
+function openCommandPalette() {
+  const el = document.getElementById("commandPalette");
+  if (!el) return;
+  commandState.open = true;
+  commandState.index = 0;
+  commandState.returnFocus = document.activeElement;
+  el.classList.remove("hidden");
+  const input = document.getElementById("commandInput");
+  input.value = "";
+  commandState.results = commandPaletteResults("");
+  renderCommandPalette();
+  input.focus();
+}
+
+function closeCommandPalette() {
+  const el = document.getElementById("commandPalette");
+  if (!el) return;
+  commandState.open = false;
+  el.classList.add("hidden");
+  const previous = commandState.returnFocus;
+  commandState.returnFocus = null;
+  if (previous && document.contains(previous) && typeof previous.focus === "function") {
+    previous.focus();
+  }
+}
+
+function moveCommandSelection(delta) {
+  if (!commandState.results.length) return;
+  commandState.index = (commandState.index + delta + commandState.results.length) % commandState.results.length;
+  renderCommandPalette();
+  const active = document.querySelector(".command-item.active");
+  if (active) active.scrollIntoView({ block: "nearest" });
 }
 
 function bindEvents() {
@@ -827,6 +955,40 @@ function bindEvents() {
           ? "✂️ Auto-Separar Vozes ativado: o Clipar Call criará botões individuais por fala/amigo"
           : "✂️ Auto-Separar Vozes desativado: o Clipar Call manterá 1 botão com todos identificados"
       );
+    };
+  }
+
+  const duckToggle = document.getElementById("duckToggle");
+  if (duckToggle) {
+    duckToggle.onchange = async (e) => {
+      const enabled = e.target.checked;
+      state.settings.duck_enabled = enabled;
+      const res = await api().set_ducking({ enabled });
+      if (!res || !res.ok) {
+        showToast((res && res.error) || "Não foi possível configurar o ducking.", "#ef4444");
+        e.target.checked = !enabled;
+        state.settings.duck_enabled = !enabled;
+        return;
+      }
+      state.settings = res.settings || state.settings;
+      showToast(enabled ? "🔉 Ducking ativado." : "Ducking desativado.");
+    };
+  }
+
+  const duckSlider = document.getElementById("duckAmountSlider");
+  if (duckSlider) {
+    let duckTimer = null;
+    duckSlider.oninput = (e) => {
+      const db = Number(e.target.value);
+      const lbl = document.getElementById("duckAmountVal");
+      if (lbl) lbl.textContent = `${db} dB`;
+      state.settings.duck_amount_db = db;
+      clearTimeout(duckTimer);
+      duckTimer = setTimeout(() => {
+        api().set_ducking({ amount_db: db }).then((res) => {
+          if (res && res.ok) state.settings = res.settings || state.settings;
+        }).catch(() => {});
+      }, 150);
     };
   }
 
@@ -1042,6 +1204,46 @@ function bindEvents() {
     clearBtn.classList.add("hidden");
     renderGrid();
   };
+
+  // Ctrl+K command palette
+  const commandInput = document.getElementById("commandInput");
+  if (commandInput) {
+    commandInput.oninput = (e) => {
+      commandState.index = 0;
+      commandState.results = commandPaletteResults(e.target.value);
+      renderCommandPalette();
+    };
+  }
+  const commandPaletteEl = document.getElementById("commandPalette");
+  if (commandPaletteEl) {
+    commandPaletteEl.onkeydown = (e) => {
+      if (e.key === "ArrowDown") { e.preventDefault(); moveCommandSelection(1); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); moveCommandSelection(-1); }
+      else if (e.key === "Enter") {
+        e.preventDefault();
+        const clip = commandState.results[commandState.index];
+        if (clip) playFromPalette(clip, e.shiftKey);
+      } else if (e.key === "Escape") { e.preventDefault(); closeCommandPalette(); }
+    };
+    commandPaletteEl.onclick = (e) => {
+      if (e.target.id === "commandPalette") {
+        closeCommandPalette();
+        return;
+      }
+      // Keep keyboard shortcuts working after clicking panel padding/footer.
+      if (commandInput && e.target !== commandInput && !e.target.closest(".command-item")) {
+        commandInput.focus();
+      }
+    };
+  }
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+      const openOverlay = document.querySelector(".modal-backdrop:not(.hidden)");
+      if (openOverlay) return;
+      e.preventDefault();
+      if (commandState.open) closeCommandPalette(); else openCommandPalette();
+    }
+  });
 
   window.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
@@ -1262,30 +1464,84 @@ function bindEvents() {
   document.getElementById("btnDeleteClip").onclick = async () => {
     const id = document.getElementById("editClipId").value;
     const res = await api().delete_clip(id, false);
-    if (res && res.ok) {
-      state.clips = state.clips.filter((c) => c.id !== id);
-      document.getElementById("editModal").classList.add("hidden");
-      renderSidebar();
-      renderGrid();
-      showToast("🗑️ Botão removido do Soundboard.");
+    if (!res || !res.ok) {
+      showToast((res && res.error) || "Não foi possível remover.", "#ef4444");
+      return;
+    }
+    state.clips = state.clips.filter((c) => c.id !== id);
+    document.getElementById("editModal").classList.add("hidden");
+    renderSidebar();
+    renderGrid();
+
+    const deleted = res.clip;
+    if (res.can_undo && deleted) {
+      if (pendingUndoToast) {
+        pendingUndoToast.remove();
+        pendingUndoToast = null;
+      }
+      const toastEl = showToast("🗑️ Removido do Soundboard", "#f59e0b", {
+        actionLabel: "Desfazer",
+        duration: 8000,
+        onAction: async () => {
+          const restored = await api().restore_clip(deleted);
+          if (!restored || !restored.ok) {
+            showToast((restored && restored.error) || "Não foi possível desfazer.", "#ef4444");
+            return;
+          }
+          state.clips = restored.clips || state.clips;
+          state.speakers = restored.speakers || state.speakers;
+          renderSidebar();
+          renderGrid();
+          showToast("✅ Botão restaurado.", "#10b981");
+        },
+      });
+      pendingUndoToast = toastEl;
+      setTimeout(() => {
+        if (pendingUndoToast === toastEl) pendingUndoToast = null;
+      }, 8200);
+    } else {
+      showToast("🗑️ Botão removido.");
     }
   };
 
   // Speaker rename & delete modal
-  document.getElementById("btnCloseSpeakerModal").onclick = () =>
+  document.getElementById("btnCloseSpeakerModal").onclick = () => {
+    resetSpeakerDeleteConfirm();
     document.getElementById("speakerModal").classList.add("hidden");
+  };
 
-  document.getElementById("btnDeleteSpeakerModal").onclick = async () => {
-    const spkId = document.getElementById("renameSpeakerId").value;
-    const res = await api().delete_speaker(spkId);
+  const deleteSpeakerBtn = document.getElementById("btnDeleteSpeakerModal");
+  deleteSpeakerBtn.onclick = async () => {
+    const now = Date.now();
+    const lastClick = Number(deleteSpeakerBtn.dataset.lastClick || 0);
+    deleteSpeakerBtn.dataset.lastClick = String(now);
+    if (now - lastClick < 250) return;
+
+    const currentSpeakerId = document.getElementById("renameSpeakerId").value;
+
+    if (!deleteSpeakerBtn.dataset.confirming) {
+      deleteSpeakerBtn.dataset.confirming = "1";
+      deleteSpeakerBtn.dataset.confirmTarget = currentSpeakerId;
+      deleteSpeakerBtn.textContent = "⚠️ Clique de novo para excluir";
+      speakerConfirmTimer = setTimeout(() => {
+        resetSpeakerDeleteConfirm();
+      }, 4000);
+      return;
+    }
+
+    const armedTarget = deleteSpeakerBtn.dataset.confirmTarget;
+    resetSpeakerDeleteConfirm();
+    if (!armedTarget || armedTarget !== currentSpeakerId) return;
+
+    const res = await api().delete_speaker(currentSpeakerId);
     if (res && res.ok) {
       state.speakers = res.speakers || {};
       state.clips = res.clips || state.clips;
-      if (state.activeSpeaker === spkId) state.activeSpeaker = "Todos";
+      if (state.activeSpeaker === currentSpeakerId) state.activeSpeaker = "Todos";
       document.getElementById("speakerModal").classList.add("hidden");
       renderSidebar();
       renderGrid();
-      showToast("🗑️ Pessoa excluída com sucesso.");
+      showToast("🗑️ Interlocutor excluído (áudios mantidos).");
     }
   };
 

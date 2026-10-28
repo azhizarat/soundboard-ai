@@ -277,6 +277,18 @@ body {
   accent-color: var(--accent);
 }
 
+.duck-group {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 10px;
+}
+
+.duck-hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 11px;
+  opacity: 0.55;
+}
+
 .deck-actions {
   display: flex;
   align-items: center;
@@ -827,6 +839,14 @@ body {
   display: block;
   margin-bottom: 2px;
   flex-shrink: 0;
+}
+
+.card-title mark,
+.card-transcript mark {
+  background: rgba(59, 130, 246, 0.35);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
 }
 
 /* Adaptive Card Sizing via Container Queries */
@@ -1455,7 +1475,7 @@ body.mini-overlay .np-vol-wrap {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  z-index: 200;
+  z-index: 1200;
 }
 
 .toast {
@@ -1466,6 +1486,99 @@ body.mini-overlay .np-vol-wrap {
   border-radius: 8px;
   font-size: 12px;
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.toast-action {
+  margin-left: auto;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: inherit;
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.toast-action:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Ctrl+K Command Palette */
+.command-palette {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  background: rgba(3, 7, 18, 0.72);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+}
+
+.command-palette.hidden {
+  display: none;
+}
+
+.command-panel {
+  width: min(640px, 92vw);
+  background: rgba(15, 22, 38, 0.98);
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.75);
+  overflow: hidden;
+}
+
+#commandInput {
+  width: 100%;
+  padding: 16px 18px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  color: inherit;
+  font-size: 15px;
+  outline: none;
+}
+
+.command-results {
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.command-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+}
+
+.command-item.active {
+  background: rgba(59, 130, 246, 0.16);
+  border-left-color: var(--accent);
+}
+
+.command-item .ci-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-item .ci-meta {
+  opacity: 0.7;
+  font-size: 11px;
+}
+
+.command-hint {
+  padding: 8px 16px;
+  font-size: 11px;
+  opacity: 0.55;
+  border-top: 1px solid var(--border-subtle);
 }
 
 /* Grid Density Controls */

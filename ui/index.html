@@ -69,6 +69,18 @@
                 <span>✂️ Auto-Separar Vozes</span>
               </label>
             </div>
+
+            <div class="device-group duck-group">
+              <label class="toggle-chip" title="Abaixa os clipes do soundboard enquanto você fala no microfone">
+                <input type="checkbox" id="duckToggle" />
+                <span>🔉 Ducking do mic</span>
+              </label>
+              <div class="device-row">
+                <input type="range" id="duckAmountSlider" min="-24" max="0" step="1" value="-12" title="Quanto o som abaixa quando você fala" />
+                <span id="duckAmountVal" class="vol-label">-12 dB</span>
+              </div>
+              <small class="duck-hint">Só funciona com o Mic no Cabo ativo.</small>
+            </div>
           </div>
         </div>
       </div>
@@ -163,7 +175,7 @@
             <input
               type="text"
               id="searchInput"
-              placeholder="Buscar por nome do botão, frase falada na transcrição, amigo, humor ou atalho (Ctrl+F)..."
+              placeholder="Buscar título, frase, pessoa, humor ou atalho… (Ctrl+K)"
             />
             <button id="btnClearSearch" class="btn-clear hidden" title="Limpar busca">✕</button>
           </div>
@@ -381,6 +393,16 @@
     <div id="toastContainer" class="toast-container"></div>
   </div>
 
+  <!-- Ctrl+K Command Palette -->
+  <div id="commandPalette" class="command-palette hidden">
+    <div class="command-panel">
+      <input id="commandInput" type="text" placeholder="Tocar um áudio… (Enter toca, Shift+Enter ouve no fone)" autocomplete="off" />
+      <div id="commandResults" class="command-results"></div>
+      <div class="command-hint">↑↓ navegar · Enter tocar · Shift+Enter fone · Esc fechar</div>
+    </div>
+  </div>
+
+  <script src="fuzzy.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
