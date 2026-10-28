@@ -18,6 +18,7 @@ CATEGORY_STYLE = {
     "Risada": {"emoji": "😂", "color": "#f59e0b"},
     "Meme": {"emoji": "🤡", "color": "#8b5cf6"},
     "Call": {"emoji": "🎙️", "color": "#3b82f6"},
+    "Vinhetas": {"emoji": "🎵", "color": "#06b6d4"},
     "Efeito": {"emoji": "🔊", "color": "#10b981"},
     "Clássico": {"emoji": "👑", "color": "#ec4899"},
 }
@@ -652,27 +653,32 @@ class AIAnalyzer:
         speaker_name: str = "",
         speaker_names: dict = None,
         use_llm: bool = True,
+        skip_speaker_id: bool = False,
+        forced_category: str = None,
     ) -> dict:
         audio_16k, duration_s = load_audio_mono_16k(file_path)
         acoustics = analyze_acoustics(audio_16k, sr=16000)
         speaker_names = dict(speaker_names or {})
 
-        # When speaker is not pre-fixed (e.g. Call Replay or loose file), run multi-speaker diarization
         segments = []
         speaker_ids = []
-        if not existing_speaker_id and duration_s >= 1.2:
-            segments = self.diarize_and_identify(audio_16k, speaker_names=speaker_names)
-            for seg in segments:
-                sid = seg.get("speaker_id", "")
-                if sid and sid not in speaker_ids:
-                    speaker_ids.append(sid)
+        speaker_id = ""
+        speaker_sim = 0.0
 
-        speaker_id = existing_speaker_id or (speaker_ids[0] if speaker_ids else "")
-        speaker_sim = 1.0 if speaker_id else 0.0
-        if not speaker_id:
-            speaker_id, speaker_sim = self.identify_speaker(audio_16k)
-            if speaker_id:
-                speaker_ids = [speaker_id]
+        if not skip_speaker_id:
+            if not existing_speaker_id and duration_s >= 1.2:
+                segments = self.diarize_and_identify(audio_16k, speaker_names=speaker_names)
+                for seg in segments:
+                    sid = seg.get("speaker_id", "")
+                    if sid and sid not in speaker_ids:
+                        speaker_ids.append(sid)
+
+            speaker_id = existing_speaker_id or (speaker_ids[0] if speaker_ids else "")
+            speaker_sim = 1.0 if speaker_id else 0.0
+            if not speaker_id:
+                speaker_id, speaker_sim = self.identify_speaker(audio_16k)
+                if speaker_id:
+                    speaker_ids = [speaker_id]
 
         transcript = (existing_transcript or "").strip()
         if not transcript:
@@ -693,15 +699,21 @@ class AIAnalyzer:
         if not speaker_name and speaker_id:
             speaker_name = speaker_names.get(speaker_id, "")
 
-        # Strip '[Amigo X]: ' prefix when extracting punchy button title
         clean_for_title = re.sub(r"\[[^\]]+\]:\s*", "", transcript)
         meta = generate_smart_metadata(
             transcript=clean_for_title,
             mood=acoustics["mood"],
-            speaker_name=speaker_name,
+            speaker_name=speaker_name if not skip_speaker_id else "",
             duration_s=duration_s,
             use_llm=use_llm,
         )
+        if forced_category and forced_category in CATEGORY_STYLE:
+            meta["category"] = forced_category
+            meta["emoji"] = CATEGORY_STYLE[forced_category]["emoji"]
+            meta["color"] = CATEGORY_STYLE[forced_category]["color"]
+            if not clean_for_title.strip():
+                meta["title"] = Path(file_path).stem[:28].replace("_", " ").strip().capitalize()
+
         return {
             "title": meta["title"],
             "category": meta["category"],
@@ -709,10 +721,10 @@ class AIAnalyzer:
             "color": meta["color"],
             "tags": meta["tags"],
             "transcript": transcript,
-            "speaker_id": speaker_id,
-            "speaker_ids": speaker_ids or ([speaker_id] if speaker_id else []),
-            "segments": segments,
-            "speaker_similarity": speaker_sim,
+            "speaker_id": "" if skip_speaker_id else speaker_id,
+            "speaker_ids": [] if skip_speaker_id else (speaker_ids or ([speaker_id] if speaker_id else [])),
+            "segments": [] if skip_speaker_id else segments,
+            "speaker_similarity": 0.0 if skip_speaker_id else speaker_sim,
             "acoustic_mood": acoustics["mood"],
             "duration": round(duration_s, 2),
             "acoustics": acoustics,

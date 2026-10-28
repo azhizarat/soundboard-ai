@@ -158,6 +158,40 @@ def test_multi_speaker_merge_and_store_filtering(tmp_path):
     assert len(store.search_clips(speaker_id="interlocutor_2")) == 1
 
 
+def test_delete_speaker_and_vinheta_import_without_person(tmp_path):
+    import soundfile as sf
+
+    store = SoundboardStore(data_dir=str(tmp_path / "store_data"))
+    cat_ids = [c["id"] for c in store.state["categories"]]
+    assert "Vinhetas" in cat_ids
+
+    store.add_or_update_clip({
+        "title": "Fala dupla",
+        "file_path": "clips/fala.wav",
+        "speaker_id": "interlocutor_1",
+        "speaker_ids": ["interlocutor_1", "interlocutor_2"],
+    })
+    assert "interlocutor_1" in store.state["speakers"]
+    assert store.delete_speaker("interlocutor_1") is True
+    assert "interlocutor_1" not in store.state["speakers"]
+    clip = store.state["clips"][0]
+    assert clip["speaker_id"] == "interlocutor_2"
+    assert clip["speaker_ids"] == ["interlocutor_2"]
+
+    # Import directly as 'Vinhetas' with skip_speaker_id=True must not assign any speaker
+    wav_file = tmp_path / "vinheta_boom.wav"
+    sf.write(str(wav_file), np.sin(np.linspace(0, 50, 16000)).astype("float32"), 16000)
+
+    api = SoundboardAPI(data_dir=str(tmp_path / "api_data"), start_background_services=False)
+    res = api.import_audio_files([str(wav_file)], skip_speaker_id=True, forced_category="Vinhetas")
+    assert res["ok"] is True
+    imported_clip = res["imported"][0]
+    assert imported_clip["category"] == "Vinhetas"
+    assert imported_clip["speaker_id"] == ""
+    assert imported_clip["speaker_ids"] == []
+
+
+
 
 
 

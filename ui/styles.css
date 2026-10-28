@@ -262,6 +262,74 @@ body {
   background: linear-gradient(135deg, #8b5cf6, #ec4899);
 }
 
+.btn-vinheta {
+  background: linear-gradient(135deg, #06b6d4, #0284c7);
+  color: #fff;
+  box-shadow: 0 3px 10px rgba(6, 182, 212, 0.25);
+}
+
+/* Progress Banner */
+.progress-banner {
+  background: linear-gradient(90deg, rgba(19, 26, 42, 0.98), rgba(30, 41, 69, 0.98));
+  border-bottom: 1px solid rgba(139, 92, 246, 0.45);
+  padding: 8px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.progress-info-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.progress-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spinner-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #a855f7;
+  box-shadow: 0 0 10px #a855f7;
+  animation: pulseDot 0.9s infinite alternate;
+}
+
+@keyframes pulseDot {
+  from { transform: scale(0.8); opacity: 0.6; }
+  to { transform: scale(1.25); opacity: 1; }
+}
+
+.progress-detail {
+  color: var(--text-muted);
+  font-family: monospace;
+  font-size: 11px;
+}
+
+.progress-pct {
+  font-weight: 700;
+  color: #c4b5fd;
+}
+
+.progress-track {
+  height: 5px;
+  background: rgba(11, 15, 25, 0.8);
+  border-radius: 99px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #8b5cf6, #ec4899);
+  border-radius: 99px;
+  transition: width 0.18s ease;
+}
+
 .btn-icon {
   background: var(--bg-card);
   border-color: var(--border-subtle);
@@ -399,7 +467,8 @@ body {
   color: var(--text-muted);
 }
 
-.btn-rename-spk {
+.btn-rename-spk,
+.btn-delete-spk {
   background: transparent;
   border: none;
   color: var(--text-muted);
@@ -408,7 +477,8 @@ body {
   padding: 2px;
 }
 
-.btn-rename-spk:hover {
+.btn-rename-spk:hover,
+.btn-delete-spk:hover {
   color: #fff;
 }
 
@@ -488,8 +558,47 @@ body {
 }
 
 .toolbar-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   font-size: 12px;
   color: var(--text-muted);
+}
+
+.sort-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sort-wrap select {
+  background: var(--bg-panel);
+  color: var(--text-main);
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  padding: 6px 9px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.new-badge {
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  padding: 2px 6px;
+  border-radius: 99px;
+  letter-spacing: 0.4px;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.45);
+}
+
+.time-badge {
+  font-size: 10px;
+  color: #64748b;
+}
+
+.sound-card.is-new-card {
+  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.35);
 }
 
 /* SoundDeck Grid */
@@ -664,6 +773,7 @@ body.mini-overlay .sidebar,
 body.mini-overlay .routing-controls,
 body.mini-overlay .brand-text span.status-pill,
 body.mini-overlay #btnImportFiles,
+body.mini-overlay #btnImportVinheta,
 body.mini-overlay #btnImportFolder,
 body.mini-overlay .quick-import-bar,
 body.mini-overlay .card-transcript {

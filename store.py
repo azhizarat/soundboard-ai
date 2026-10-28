@@ -11,6 +11,7 @@ DEFAULT_CATEGORIES = [
     {"id": "Risada", "name": "Risada", "emoji": "😂", "color": "#f59e0b"},
     {"id": "Meme", "name": "Meme / Pérola", "emoji": "🤡", "color": "#8b5cf6"},
     {"id": "Call", "name": "Fala / Call", "emoji": "🎙️", "color": "#3b82f6"},
+    {"id": "Vinhetas", "name": "Vinhetas / Sons", "emoji": "🎵", "color": "#06b6d4"},
     {"id": "Efeito", "name": "Efeito Sonoro", "emoji": "🔊", "color": "#10b981"},
     {"id": "Clássico", "name": "Clássico", "emoji": "👑", "color": "#ec4899"},
 ]
@@ -67,7 +68,12 @@ class SoundboardStore:
                     loaded = json.loads(self.db_path.read_text(encoding="utf-8"))
                     if isinstance(loaded, dict):
                         self.state["settings"] = {**DEFAULT_SETTINGS, **loaded.get("settings", {})}
-                        self.state["categories"] = loaded.get("categories") or list(DEFAULT_CATEGORIES)
+                        loaded_cats = loaded.get("categories") or []
+                        existing_cat_ids = {c.get("id") for c in loaded_cats if isinstance(c, dict)}
+                        for def_cat in DEFAULT_CATEGORIES:
+                            if def_cat["id"] not in existing_cat_ids:
+                                loaded_cats.append(dict(def_cat))
+                        self.state["categories"] = loaded_cats or list(DEFAULT_CATEGORIES)
                         self.state["speakers"] = loaded.get("speakers") or {}
                         self.state["clips"] = loaded.get("clips") or []
                 except Exception:
@@ -109,6 +115,20 @@ class SoundboardStore:
             self.save()
             return spk
 
+    def delete_speaker(self, spk_id: str) -> bool:
+        if not spk_id:
+            return False
+        with self._lock:
+            existed = spk_id in self.state["speakers"]
+            self.state["speakers"].pop(spk_id, None)
+            for c in self.state["clips"]:
+                spks = [s for s in (c.get("speaker_ids") or []) if s != spk_id]
+                c["speaker_ids"] = spks
+                if c.get("speaker_id") == spk_id:
+                    c["speaker_id"] = spks[0] if spks else ""
+            self.save()
+            return existed
+
     def update_settings(self, updates: dict) -> dict:
         with self._lock:
             self.state["settings"].update(updates or {})
@@ -139,8 +159,18 @@ class SoundboardStore:
                         existing = c
                         break
 
-            spk_id = clip_data.get("speaker_id") or (existing.get("speaker_id") if existing else "")
-            spk_ids = list(clip_data.get("speaker_ids") or (existing.get("speaker_ids") if existing else []) or [])
+            if "speaker_id" in clip_data:
+                spk_id = clip_data.get("speaker_id") or ""
+            else:
+                spk_id = existing.get("speaker_id", "") if existing else ""
+
+            if "speaker_ids" in clip_data:
+                spk_ids = [s for s in (clip_data.get("speaker_ids") or []) if s]
+            elif "speaker_id" in clip_data:
+                spk_ids = [spk_id] if spk_id else []
+            else:
+                spk_ids = list((existing.get("speaker_ids") if existing else []) or [])
+
             if spk_id and spk_id not in spk_ids:
                 spk_ids.insert(0, spk_id)
             if not spk_id and spk_ids:
@@ -226,7 +256,10 @@ class SoundboardStore:
                     continue
                 if speaker_id and speaker_id != "Todos":
                     c_spks = c.get("speaker_ids") or ([c["speaker_id"]] if c.get("speaker_id") else [])
-                    if speaker_id != c.get("speaker_id") and speaker_id not in c_spks:
+                    if speaker_id == "__none__":
+                        if c_spks or c.get("speaker_id"):
+                            continue
+                    elif speaker_id != c.get("speaker_id") and speaker_id not in c_spks:
                         continue
                 if q:
                     c_spks = c.get("speaker_ids") or ([c["speaker_id"]] if c.get("speaker_id") else [])
@@ -245,7 +278,7 @@ class SoundboardStore:
                 results.append(c)
             return results
 
-    def import_separados_manifest(self, separados_dir: str, analyzer_fn=None) -> list[dict]:
+    def import_separados_manifest(self, separados_dir: str, analyzer_fn=None, progress_fn=None) -> list[dict]:
         sep_path = Path(separados_dir).resolve()
         manifest_path = sep_path / "mapa_de_falas.json"
         if not manifest_path.exists():
@@ -257,13 +290,20 @@ class SoundboardStore:
             return []
 
         imported = []
-        for entry in items:
+        total_items = len(items)
+        for idx, entry in enumerate(items, 1):
             rel_file = entry.get("arquivo_trecho", "")
             if not rel_file:
                 continue
             src_path = (sep_path / rel_file).resolve()
             if not src_path.exists() or not src_path.is_file():
                 continue
+
+            if callable(progress_fn):
+                try:
+                    progress_fn(idx, total_items, src_path.name)
+                except Exception:
+                    pass
 
             spk_num = entry.get("interlocutor", 1)
             spk_id = f"interlocutor_{spk_num}"

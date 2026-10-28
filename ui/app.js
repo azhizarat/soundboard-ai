@@ -9,9 +9,33 @@ const state = {
   activeSpeaker: "Todos",
   favoritesOnly: false,
   searchQuery: "",
+  sortBy: "newest",
   playingClips: {},
   recordingHotkey: false,
+  sessionStartSec: Date.now() / 1000,
 };
+
+function formatRelativeTime(createdAtSec) {
+  if (!createdAtSec) return "";
+  const nowSec = Date.now() / 1000;
+  const diff = Math.max(0, nowSec - Number(createdAtSec));
+  if (diff < 60) return "agora";
+  if (diff < 3600) return `há ${Math.floor(diff / 60)} min`;
+  const d = new Date(Number(createdAtSec) * 1000);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  if (diff < 86400) return `Hoje ${hh}:${mm}`;
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  return `${dd}/${mo} ${hh}:${mm}`;
+}
+
+function isClipNew(clip) {
+  const created = Number(clip.created_at || 0);
+  const nowSec = Date.now() / 1000;
+  // Consider 'NOVO!' if created within the last 10 minutes or created in this session and not played yet
+  return (nowSec - created <= 600) || (created >= state.sessionStartSec && Number(clip.play_count || 0) === 0);
+}
 
 function showToast(message, color = "#3b82f6") {
   const container = document.getElementById("toastContainer");
@@ -176,8 +200,8 @@ function renderSidebar() {
   const allSpkDiv = document.createElement("div");
   allSpkDiv.className = `nav-item ${state.activeSpeaker === "Todos" ? "active" : ""}`;
   allSpkDiv.innerHTML = `
-    <div class="nav-item-left"><span>👥</span><span>Todos os Amigos</span></div>
-    <span class="count-pill">${Object.keys(state.speakers).length}</span>
+    <div class="nav-item-left"><span>👥</span><span>Todos</span></div>
+    <span class="count-pill">${state.clips.length}</span>
   `;
   allSpkDiv.onclick = () => {
     state.activeSpeaker = "Todos";
@@ -185,6 +209,23 @@ function renderSidebar() {
     renderGrid();
   };
   spkList.appendChild(allSpkDiv);
+
+  const noSpkCount = state.clips.filter((c) => {
+    const spks = c.speaker_ids && c.speaker_ids.length ? c.speaker_ids : c.speaker_id ? [c.speaker_id] : [];
+    return spks.length === 0;
+  }).length;
+  const noSpkDiv = document.createElement("div");
+  noSpkDiv.className = `nav-item ${state.activeSpeaker === "__none__" ? "active" : ""}`;
+  noSpkDiv.innerHTML = `
+    <div class="nav-item-left"><span>🎵</span><span>Sem Pessoa / Vinhetas</span></div>
+    <span class="count-pill">${noSpkCount}</span>
+  `;
+  noSpkDiv.onclick = () => {
+    state.activeSpeaker = "__none__";
+    renderSidebar();
+    renderGrid();
+  };
+  spkList.appendChild(noSpkDiv);
 
   Object.values(state.speakers).forEach((spk) => {
     const count = state.clips.filter((c) => {
@@ -201,12 +242,26 @@ function renderSidebar() {
       <div class="nav-item-right">
         <span class="count-pill">${count}</span>
         <button class="btn-rename-spk" title="Renomear este amigo">✏️</button>
+        <button class="btn-delete-spk" title="Excluir esta pessoa (mantém os áudios sem pessoa)">🗑️</button>
       </div>
     `;
-    div.onclick = (e) => {
+    div.onclick = async (e) => {
       if (e.target.classList.contains("btn-rename-spk")) {
         e.stopPropagation();
         openSpeakerModal(spk);
+        return;
+      }
+      if (e.target.classList.contains("btn-delete-spk")) {
+        e.stopPropagation();
+        const res = await api().delete_speaker(spk.id);
+        if (res && res.ok) {
+          state.speakers = res.speakers || {};
+          state.clips = res.clips || state.clips;
+          if (state.activeSpeaker === spk.id) state.activeSpeaker = "Todos";
+          renderSidebar();
+          renderGrid();
+          showToast(`🗑️ "${spk.name}" removido da lista de pessoas.`);
+        }
         return;
       }
       state.activeSpeaker = spk.id;
@@ -219,11 +274,15 @@ function renderSidebar() {
 
 function getFilteredClips() {
   const q = (state.searchQuery || "").trim().toLowerCase();
-  return state.clips.filter((c) => {
+  const filtered = state.clips.filter((c) => {
     if (state.favoritesOnly && !c.favorite) return false;
     if (state.activeCategory !== "Todos" && c.category !== state.activeCategory) return false;
     const clipSpks = c.speaker_ids && c.speaker_ids.length ? c.speaker_ids : c.speaker_id ? [c.speaker_id] : [];
-    if (state.activeSpeaker !== "Todos" && !clipSpks.includes(state.activeSpeaker)) return false;
+    if (state.activeSpeaker === "__none__") {
+      if (clipSpks.length > 0) return false;
+    } else if (state.activeSpeaker !== "Todos" && !clipSpks.includes(state.activeSpeaker)) {
+      return false;
+    }
     if (q) {
       const spkNames = clipSpks.map((sid) => state.speakers[sid]?.name || "").join(" ");
       const hay = [
@@ -241,6 +300,20 @@ function getFilteredClips() {
     }
     return true;
   });
+
+  filtered.sort((a, b) => {
+    if (state.sortBy === "most_played") {
+      const diff = Number(b.play_count || 0) - Number(a.play_count || 0);
+      if (diff !== 0) return diff;
+    } else if (state.sortBy === "alpha") {
+      return String(a.title || "").localeCompare(String(b.title || ""), "pt-BR");
+    } else if (state.sortBy === "shortest") {
+      return Number(a.duration || 0) - Number(b.duration || 0);
+    }
+    return Number(b.created_at || 0) - Number(a.created_at || 0);
+  });
+
+  return filtered;
 }
 
 function renderGrid() {
@@ -277,7 +350,8 @@ function renderGrid() {
 
     const card = document.createElement("div");
     const isPlaying = Boolean(state.playingClips[clip.id]);
-    card.className = `sound-card ${isPlaying ? "playing" : ""}`;
+    const isNew = isClipNew(clip);
+    card.className = `sound-card ${isPlaying ? "playing" : ""} ${isNew ? "is-new-card" : ""}`;
     card.style.setProperty("--card-color", clip.color || "#3b82f6");
 
     const effDur = Math.max(
@@ -285,10 +359,14 @@ function renderGrid() {
       (clip.trim_end && clip.trim_end > clip.trim_start ? clip.trim_end : clip.duration || 0) -
         (clip.trim_start || 0)
     ).toFixed(1);
+    const timeStr = formatRelativeTime(clip.created_at);
 
     card.innerHTML = `
       <div class="card-top">
-        <span class="card-emoji">${clip.emoji || "🔊"}</span>
+        <div class="badge-row">
+          <span class="card-emoji">${clip.emoji || "🔊"}</span>
+          ${isNew ? `<span class="new-badge">✨ NOVO!</span>` : ""}
+        </div>
         <div class="card-actions">
           <button class="card-icon-btn btn-preview" title="Ouvir somente no meu fone (sem mandar pro VB-Cable)">🎧</button>
           <button class="card-icon-btn btn-fav ${clip.favorite ? "fav-active" : ""}" title="Favoritar">★</button>
@@ -305,6 +383,7 @@ function renderGrid() {
           <span class="mood-badge">${clip.acoustic_mood || "Normal"}</span>
         </div>
         <div class="badge-row">
+          ${timeStr ? `<span class="time-badge" title="Horário em que o áudio subiu">${timeStr}</span>` : ""}
           ${clip.hotkey ? `<span class="hotkey-badge">${clip.hotkey}</span>` : ""}
           <span>${effDur}s</span>
         </div>
@@ -506,7 +585,7 @@ function bindEvents() {
   };
 
   document.getElementById("btnImportFiles").onclick = async () => {
-    const res = await api().import_audio_files();
+    const res = await api().import_audio_files(null, false, null);
     if (res && res.ok) {
       state.clips = res.clips;
       state.speakers = res.speakers;
@@ -516,8 +595,24 @@ function bindEvents() {
     }
   };
 
+  document.getElementById("btnImportVinheta").onclick = async () => {
+    const res = await api().import_audio_files(null, true, "Vinhetas");
+    if (res && res.ok) {
+      state.clips = res.clips;
+      state.speakers = res.speakers;
+      renderSidebar();
+      renderGrid();
+      showToast(`🎵 ${res.imported.length} vinheta(s) importada(s) sem associar pessoa!`, "#06b6d4");
+    }
+  };
+
   document.getElementById("btnImportFolder").onclick = async () => {
-    const res = await api().import_folder_or_separados();
+    const isVinhetaFilter = state.activeCategory === "Vinhetas" || state.activeSpeaker === "__none__";
+    const res = await api().import_folder_or_separados(
+      null,
+      isVinhetaFilter,
+      isVinhetaFilter ? "Vinhetas" : null
+    );
     if (res && res.ok) {
       state.clips = res.clips;
       state.speakers = res.speakers;
@@ -534,7 +629,14 @@ function bindEvents() {
     }
   };
 
-  // Search
+  // Search & Sort
+  const sortSelect = document.getElementById("sortSelect");
+  if (sortSelect) {
+    sortSelect.onchange = (e) => {
+      state.sortBy = e.target.value;
+      renderGrid();
+    };
+  }
   const searchInput = document.getElementById("searchInput");
   const clearBtn = document.getElementById("btnClearSearch");
   searchInput.oninput = (e) => {
@@ -617,13 +719,15 @@ function bindEvents() {
   };
 
   document.getElementById("btnSaveClip").onclick = async () => {
+    const selSpk = document.getElementById("editSpeaker").value;
     const payload = {
       id: document.getElementById("editClipId").value,
       emoji: document.getElementById("editEmoji").value || "🔊",
       title: document.getElementById("editTitle").value || "Áudio",
       color: document.getElementById("editColor").value,
       category: document.getElementById("editCategory").value,
-      speaker_id: document.getElementById("editSpeaker").value,
+      speaker_id: selSpk,
+      speaker_ids: selSpk ? [selSpk] : [],
       hotkey: document.getElementById("editHotkey").value,
       transcript: document.getElementById("editTranscript").value,
       trim_start: Number(document.getElementById("editTrimStart").value),
@@ -705,9 +809,23 @@ function bindEvents() {
     }
   };
 
-  // Speaker rename modal
+  // Speaker rename & delete modal
   document.getElementById("btnCloseSpeakerModal").onclick = () =>
     document.getElementById("speakerModal").classList.add("hidden");
+
+  document.getElementById("btnDeleteSpeakerModal").onclick = async () => {
+    const spkId = document.getElementById("renameSpeakerId").value;
+    const res = await api().delete_speaker(spkId);
+    if (res && res.ok) {
+      state.speakers = res.speakers || {};
+      state.clips = res.clips || state.clips;
+      if (state.activeSpeaker === spkId) state.activeSpeaker = "Todos";
+      document.getElementById("speakerModal").classList.add("hidden");
+      renderSidebar();
+      renderGrid();
+      showToast("🗑️ Pessoa excluída com sucesso.");
+    }
+  };
 
   document.getElementById("btnSaveSpeaker").onclick = async () => {
     const spkId = document.getElementById("renameSpeakerId").value;
@@ -752,6 +870,20 @@ window.onBackendEvent = (event, payload) => {
     }
   } else if (event === "overlay_toggled") {
     document.body.classList.toggle("mini-overlay", Boolean(payload.is_mini_overlay));
+  } else if (event === "progress") {
+    const banner = document.getElementById("progressBanner");
+    if (!banner) return;
+    if (payload.active) {
+      banner.classList.remove("hidden");
+      document.getElementById("progressLabel").textContent = payload.label || "Processando...";
+      document.getElementById("progressDetail").textContent = payload.detail ? `— ${payload.detail}` : "";
+      document.getElementById("progressPercent").textContent = `${payload.percent || 0}%`;
+      document.getElementById("progressFill").style.width = `${payload.percent || 0}%`;
+    } else {
+      document.getElementById("progressPercent").textContent = "100%";
+      document.getElementById("progressFill").style.width = "100%";
+      setTimeout(() => banner.classList.add("hidden"), 450);
+    }
   } else if (event === "toast") {
     showToast(payload.message || "", "#f59e0b");
   }

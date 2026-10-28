@@ -106,6 +106,17 @@ class SoundboardAPI:
         except Exception:
             pass
 
+    def _emit_progress(self, active: bool, current: int = 0, total: int = 1, label: str = "", detail: str = ""):
+        pct = min(100, int(round((current / max(1, total)) * 100))) if active else 100
+        self._notify_ui("progress", {
+            "active": active,
+            "current": current,
+            "total": total,
+            "percent": pct,
+            "label": label,
+            "detail": detail,
+        })
+
     def get_initial_state(self) -> dict:
         devs = self._audio.list_devices()
         discovered_separados = []
@@ -197,6 +208,22 @@ class SoundboardAPI:
         spk = self._store.update_speaker(spk_id, name=name, color=color, avatar=avatar)
         return {"ok": True, "speaker": spk, "speakers": self._store.state["speakers"]}
 
+    def delete_speaker(self, spk_id: str) -> dict:
+        ok = self._store.delete_speaker(spk_id)
+        if self._ai.ref_voices_path.exists():
+            try:
+                import numpy as np
+                old = np.load(self._ai.ref_voices_path)
+                kept = {k: old[k] for k in old.files if k != spk_id}
+                np.savez(self._ai.ref_voices_path, **kept)
+            except Exception:
+                pass
+        return {
+            "ok": ok,
+            "speakers": self._store.state["speakers"],
+            "clips": self._store.state["clips"],
+        }
+
     def enroll_speaker_from_clip(self, clip_id: str, spk_id: str, speaker_name: str = "") -> dict:
         clip = self._store.get_clip(clip_id)
         if not clip or not clip.get("file_path"):
@@ -218,37 +245,41 @@ class SoundboardAPI:
         if not clip or not clip.get("file_path") or not os.path.exists(clip["file_path"]):
             return {"ok": False, "error": "Arquivo de áudio não encontrado"}
 
-        spk_id = clip.get("speaker_id", "")
-        spk_names = self._get_speaker_names_map()
-        spk_name = spk_names.get(spk_id, "")
-        res = self._ai.analyze_file(
-            clip["file_path"],
-            existing_transcript=None,
-            existing_speaker_id=None,
-            speaker_name=spk_name,
-            speaker_names=spk_names,
-            use_llm=bool(self._store.state["settings"].get("use_local_llm", True)),
-        )
-        detected_spk = res.get("speaker_id") or spk_id
-        detected_spks = res.get("speaker_ids") or ([detected_spk] if detected_spk else [])
-        for sid in detected_spks:
-            self._store.ensure_speaker(sid)
+        self._emit_progress(True, 1, 2, "Re-analisando com IA Local...", clip.get("title", ""))
+        try:
+            spk_id = clip.get("speaker_id", "")
+            spk_names = self._get_speaker_names_map()
+            spk_name = spk_names.get(spk_id, "")
+            res = self._ai.analyze_file(
+                clip["file_path"],
+                existing_transcript=None,
+                existing_speaker_id=None,
+                speaker_name=spk_name,
+                speaker_names=spk_names,
+                use_llm=bool(self._store.state["settings"].get("use_local_llm", True)),
+            )
+            detected_spk = res.get("speaker_id") or spk_id
+            detected_spks = res.get("speaker_ids") or ([detected_spk] if detected_spk else [])
+            for sid in detected_spks:
+                self._store.ensure_speaker(sid)
 
-        updated = self._store.add_or_update_clip({
-            "id": clip_id,
-            "title": res["title"],
-            "category": res["category"],
-            "emoji": res["emoji"],
-            "color": res["color"],
-            "tags": res["tags"],
-            "transcript": res["transcript"],
-            "speaker_id": detected_spk,
-            "speaker_ids": detected_spks,
-            "segments": res.get("segments") or [],
-            "acoustic_mood": res["acoustic_mood"],
-            "duration": res["duration"],
-        })
-        return {"ok": True, "clip": updated, "speakers": self._store.state["speakers"]}
+            updated = self._store.add_or_update_clip({
+                "id": clip_id,
+                "title": res["title"],
+                "category": res["category"],
+                "emoji": res["emoji"],
+                "color": res["color"],
+                "tags": res["tags"],
+                "transcript": res["transcript"],
+                "speaker_id": detected_spk,
+                "speaker_ids": detected_spks,
+                "segments": res.get("segments") or [],
+                "acoustic_mood": res["acoustic_mood"],
+                "duration": res["duration"],
+            })
+            return {"ok": True, "clip": updated, "speakers": self._store.state["speakers"]}
+        finally:
+            self._emit_progress(False)
 
     def split_clip_by_speakers(self, clip_id: str) -> dict:
         import soundfile as sf
@@ -258,66 +289,78 @@ class SoundboardAPI:
         if not clip or not clip.get("file_path") or not os.path.exists(clip["file_path"]):
             return {"ok": False, "error": "Arquivo de áudio não encontrado"}
 
-        spk_names = self._get_speaker_names_map()
-        segments = clip.get("segments") or []
-        if len(segments) <= 1:
-            audio_16k, _ = load_audio_mono_16k(clip["file_path"])
-            segments = self._ai.diarize_and_identify(audio_16k, speaker_names=spk_names)
+        self._emit_progress(True, 1, 2, "Separando falas por voz...", clip.get("title", ""))
+        try:
+            spk_names = self._get_speaker_names_map()
+            segments = clip.get("segments") or []
+            if len(segments) <= 1:
+                audio_16k, _ = load_audio_mono_16k(clip["file_path"])
+                segments = self._ai.diarize_and_identify(audio_16k, speaker_names=spk_names)
 
-        if len(segments) <= 1:
-            return {"ok": False, "error": "Apenas 1 fala/interlocutor contínuo foi detectado neste áudio."}
+            if len(segments) <= 1:
+                return {"ok": False, "error": "Apenas 1 fala/interlocutor contínuo foi detectado neste áudio."}
 
-        stereo_data, _ = self._audio.load_clip_stereo_48k(clip["file_path"])
-        sr = self._audio.TARGET_SR
-        created_clips = []
-        base_stem = Path(clip["file_path"]).stem
+            stereo_data, _ = self._audio.load_clip_stereo_48k(clip["file_path"])
+            sr = self._audio.TARGET_SR
+            created_clips = []
+            base_stem = Path(clip["file_path"]).stem
+            total_segs = len(segments)
 
-        for idx, seg in enumerate(segments, 1):
-            st_s = float(seg.get("start", 0.0))
-            en_s = float(seg.get("end", 0.0))
-            if en_s - st_s < 0.25:
-                continue
-            st_idx = max(0, int(round(st_s * sr)))
-            en_idx = min(len(stereo_data), int(round(en_s * sr)))
-            chunk = stereo_data[st_idx:en_idx]
-            if len(chunk) == 0:
-                continue
+            for idx, seg in enumerate(segments, 1):
+                self._emit_progress(True, idx, total_segs, f"Cortando fala {idx}/{total_segs}...", seg.get("title", ""))
+                st_s = float(seg.get("start", 0.0))
+                en_s = float(seg.get("end", 0.0))
+                if en_s - st_s < 0.25:
+                    continue
+                st_idx = max(0, int(round(st_s * sr)))
+                en_idx = min(len(stereo_data), int(round(en_s * sr)))
+                chunk = stereo_data[st_idx:en_idx]
+                if len(chunk) == 0:
+                    continue
 
-            spk_id = seg.get("speaker_id") or "interlocutor_1"
-            spk_obj = self._store.ensure_speaker(spk_id)
-            out_name = f"{base_stem}_part{idx:02d}_{spk_id}.wav"
-            out_path = str(self._store.clips_dir / out_name)
-            sf.write(out_path, chunk, sr, subtype="PCM_16")
+                spk_id = seg.get("speaker_id") or "interlocutor_1"
+                spk_obj = self._store.ensure_speaker(spk_id)
+                out_name = f"{base_stem}_part{idx:02d}_{spk_id}.wav"
+                out_path = str(self._store.clips_dir / out_name)
+                sf.write(out_path, chunk, sr, subtype="PCM_16")
 
-            new_c = self._store.add_or_update_clip({
-                "title": seg.get("title") or f"{spk_obj.get('name', spk_id)} #{idx}",
-                "file_path": out_path,
-                "category": seg.get("category") or clip.get("category") or "Call",
-                "speaker_id": spk_id,
-                "speaker_ids": [spk_id],
-                "segments": [seg],
-                "transcript": seg.get("transcript") or "",
-                "acoustic_mood": seg.get("mood") or "Normal",
-                "emoji": seg.get("emoji") or "🎙️",
-                "color": spk_obj.get("color") or seg.get("color") or "#3b82f6",
-                "tags": [spk_obj.get("name", spk_id).lower(), "separado"],
-                "duration": round(en_s - st_s, 2),
+                new_c = self._store.add_or_update_clip({
+                    "title": seg.get("title") or f"{spk_obj.get('name', spk_id)} #{idx}",
+                    "file_path": out_path,
+                    "category": seg.get("category") or clip.get("category") or "Call",
+                    "speaker_id": spk_id,
+                    "speaker_ids": [spk_id],
+                    "segments": [seg],
+                    "transcript": seg.get("transcript") or "",
+                    "acoustic_mood": seg.get("mood") or "Normal",
+                    "emoji": seg.get("emoji") or "🎙️",
+                    "color": spk_obj.get("color") or seg.get("color") or "#3b82f6",
+                    "tags": [spk_obj.get("name", spk_id).lower(), "separado"],
+                    "duration": round(en_s - st_s, 2),
+                    "created_at": time.time(),
+                })
+                created_clips.append(new_c)
+
+            self._notify_ui("clips_updated", {
+                "clips": self._store.state["clips"],
+                "speakers": self._store.state["speakers"],
             })
-            created_clips.append(new_c)
+            return {
+                "ok": True,
+                "created_count": len(created_clips),
+                "created_clips": created_clips,
+                "clips": self._store.state["clips"],
+                "speakers": self._store.state["speakers"],
+            }
+        finally:
+            self._emit_progress(False)
 
-        self._notify_ui("clips_updated", {
-            "clips": self._store.state["clips"],
-            "speakers": self._store.state["speakers"],
-        })
-        return {
-            "ok": True,
-            "created_count": len(created_clips),
-            "created_clips": created_clips,
-            "clips": self._store.state["clips"],
-            "speakers": self._store.state["speakers"],
-        }
-
-    def import_audio_files(self, file_paths: list[str] = None) -> dict:
+    def import_audio_files(
+        self,
+        file_paths: list[str] = None,
+        skip_speaker_id: bool = False,
+        forced_category: str = None,
+    ) -> dict:
         if not file_paths and self._window is not None:
             try:
                 import webview
@@ -335,39 +378,49 @@ class SoundboardAPI:
 
         imported = []
         use_llm = bool(self._store.state["settings"].get("use_local_llm", True))
-        for src in file_paths:
-            src_path = Path(src)
-            if not src_path.exists() or not src_path.is_file():
-                continue
-            dst_name = f"{int(time.time() * 1000) % 1000000}_{src_path.name}"
-            dst_path = self._store.clips_dir / dst_name
-            shutil.copy2(src_path, dst_path)
+        total_files = len(file_paths)
+        mode_lbl = "Importando Vinhetas / Sons" if skip_speaker_id else "Importando e analisando áudios com IA"
 
-            res = self._ai.analyze_file(
-                str(dst_path),
-                speaker_names=self._get_speaker_names_map(),
-                use_llm=use_llm,
-            )
-            spk_id = res.get("speaker_id", "")
-            spk_ids = res.get("speaker_ids") or ([spk_id] if spk_id else [])
-            for sid in spk_ids:
-                self._store.ensure_speaker(sid)
+        try:
+            for idx, src in enumerate(file_paths, 1):
+                src_path = Path(src)
+                if not src_path.exists() or not src_path.is_file():
+                    continue
+                self._emit_progress(True, idx, total_files, f"{mode_lbl} ({idx}/{total_files})", src_path.name)
+                dst_name = f"{int(time.time() * 1000) % 1000000}_{src_path.name}"
+                dst_path = self._store.clips_dir / dst_name
+                shutil.copy2(src_path, dst_path)
 
-            clip = self._store.add_or_update_clip({
-                "title": res.get("title") or src_path.stem[:28],
-                "file_path": str(dst_path),
-                "category": res.get("category") or "Call",
-                "speaker_id": spk_id,
-                "speaker_ids": spk_ids,
-                "segments": res.get("segments") or [],
-                "transcript": res.get("transcript") or "",
-                "acoustic_mood": res.get("acoustic_mood") or "Normal",
-                "emoji": res.get("emoji") or "🔊",
-                "color": res.get("color") or "#3b82f6",
-                "tags": res.get("tags") or [],
-                "duration": res.get("duration") or 1.0,
-            })
-            imported.append(clip)
+                res = self._ai.analyze_file(
+                    str(dst_path),
+                    speaker_names=self._get_speaker_names_map(),
+                    use_llm=use_llm,
+                    skip_speaker_id=bool(skip_speaker_id),
+                    forced_category=forced_category,
+                )
+                spk_id = "" if skip_speaker_id else res.get("speaker_id", "")
+                spk_ids = [] if skip_speaker_id else (res.get("speaker_ids") or ([spk_id] if spk_id else []))
+                for sid in spk_ids:
+                    self._store.ensure_speaker(sid)
+
+                clip = self._store.add_or_update_clip({
+                    "title": res.get("title") or src_path.stem[:28],
+                    "file_path": str(dst_path),
+                    "category": forced_category or res.get("category") or "Call",
+                    "speaker_id": spk_id,
+                    "speaker_ids": spk_ids,
+                    "segments": [] if skip_speaker_id else (res.get("segments") or []),
+                    "transcript": res.get("transcript") or "",
+                    "acoustic_mood": res.get("acoustic_mood") or "Normal",
+                    "emoji": res.get("emoji") or ("🎵" if forced_category == "Vinhetas" else "🔊"),
+                    "color": res.get("color") or ("#06b6d4" if forced_category == "Vinhetas" else "#3b82f6"),
+                    "tags": res.get("tags") or [],
+                    "duration": res.get("duration") or 1.0,
+                    "created_at": time.time(),
+                })
+                imported.append(clip)
+        finally:
+            self._emit_progress(False)
 
         self._notify_ui("clips_updated", {
             "clips": self._store.state["clips"],
@@ -375,7 +428,12 @@ class SoundboardAPI:
         })
         return {"ok": True, "imported": imported, "clips": self._store.state["clips"], "speakers": self._store.state["speakers"]}
 
-    def import_folder_or_separados(self, folder_path: str = None) -> dict:
+    def import_folder_or_separados(
+        self,
+        folder_path: str = None,
+        skip_speaker_id: bool = False,
+        forced_category: str = None,
+    ) -> dict:
         if not folder_path and self._window is not None:
             try:
                 import webview
@@ -392,21 +450,32 @@ class SoundboardAPI:
         if not target.exists():
             return {"ok": False, "error": "Pasta não encontrada"}
 
-        if (target / "separados" / "mapa_de_falas.json").exists():
+        if not skip_speaker_id and (target / "separados" / "mapa_de_falas.json").exists():
             target = target / "separados"
 
         use_llm = bool(self._store.state["settings"].get("use_local_llm", True))
-        if (target / "mapa_de_falas.json").exists():
-            def _fast_analyzer(fp, existing_transcript="", existing_speaker_id="", speaker_name=""):
-                return self._ai.analyze_file(
-                    fp,
-                    existing_transcript=existing_transcript,
-                    existing_speaker_id=existing_speaker_id,
-                    speaker_name=speaker_name,
-                    use_llm=use_llm,
-                )
+        if not skip_speaker_id and (target / "mapa_de_falas.json").exists():
+            try:
+                def _fast_analyzer(fp, existing_transcript="", existing_speaker_id="", speaker_name=""):
+                    return self._ai.analyze_file(
+                        fp,
+                        existing_transcript=existing_transcript,
+                        existing_speaker_id=existing_speaker_id,
+                        speaker_name=speaker_name,
+                        use_llm=use_llm,
+                    )
 
-            imported = self._store.import_separados_manifest(str(target), analyzer_fn=_fast_analyzer)
+                def _on_prog(cur, tot, fname):
+                    self._emit_progress(True, cur, tot, f"Importando pasta separados ({cur}/{tot})", fname)
+
+                imported = self._store.import_separados_manifest(
+                    str(target),
+                    analyzer_fn=_fast_analyzer,
+                    progress_fn=_on_prog,
+                )
+            finally:
+                self._emit_progress(False)
+
             self._notify_ui("clips_updated", {
                 "clips": self._store.state["clips"],
                 "speakers": self._store.state["speakers"],
@@ -422,7 +491,7 @@ class SoundboardAPI:
             str(p) for p in sorted(target.rglob("*"))
             if p.is_file() and p.suffix.lower() in SUPPORTED_AUDIO_EXTS and not p.name.endswith("_completo.mp3")
         ]
-        res = self.import_audio_files(audio_files)
+        res = self.import_audio_files(audio_files, skip_speaker_id=skip_speaker_id, forced_category=forced_category)
         res["imported_count"] = len(res.get("imported", []))
         return res
 
@@ -431,57 +500,62 @@ class SoundboardAPI:
         out_name = f"replay_{time.strftime('%Y%m%d_%H%M%S')}.wav"
         out_path = str(self._store.clips_dir / out_name)
 
-        saved = self._audio.save_replay_wav(out_path, last_seconds=secs)
-        if not saved:
-            self._notify_ui("toast", {
-                "type": "warning",
-                "message": "Nenhum som recente tocado no seu fone/sistema nos últimos segundos.",
+        self._emit_progress(True, 1, 3, f"Capturando últimos {int(secs)}s da call...", out_name)
+        try:
+            saved = self._audio.save_replay_wav(out_path, last_seconds=secs)
+            if not saved:
+                self._notify_ui("toast", {
+                    "type": "warning",
+                    "message": "Nenhum som recente tocado no seu fone/sistema nos últimos segundos.",
+                })
+                return {"ok": False, "error": "Nenhum áudio recente tocado no fone/sistema nos últimos 15s"}
+
+            self._emit_progress(True, 2, 3, "Identificando vozes e transcrevendo com IA...", out_name)
+            res = self._ai.analyze_file(
+                saved,
+                speaker_names=self._get_speaker_names_map(),
+                use_llm=bool(self._store.state["settings"].get("use_local_llm", True)),
+            )
+            spk_id = res.get("speaker_id", "")
+            spk_ids = res.get("speaker_ids") or ([spk_id] if spk_id else [])
+            for sid in spk_ids:
+                self._store.ensure_speaker(sid)
+
+            clip = self._store.add_or_update_clip({
+                "title": res.get("title") or f"Replay {time.strftime('%H:%M:%S')}",
+                "file_path": saved,
+                "category": res.get("category") or "Call",
+                "speaker_id": spk_id,
+                "speaker_ids": spk_ids,
+                "segments": res.get("segments") or [],
+                "transcript": res.get("transcript") or "",
+                "acoustic_mood": res.get("acoustic_mood") or "Normal",
+                "emoji": res.get("emoji") or "⚡",
+                "color": res.get("color") or "#f59e0b",
+                "tags": res.get("tags") or ["replay"],
+                "duration": res.get("duration") or secs,
+                "created_at": time.time(),
             })
-            return {"ok": False, "error": "Nenhum áudio recente tocado no fone/sistema nos últimos 15s"}
 
-        res = self._ai.analyze_file(
-            saved,
-            speaker_names=self._get_speaker_names_map(),
-            use_llm=bool(self._store.state["settings"].get("use_local_llm", True)),
-        )
-        spk_id = res.get("speaker_id", "")
-        spk_ids = res.get("speaker_ids") or ([spk_id] if spk_id else [])
-        for sid in spk_ids:
-            self._store.ensure_speaker(sid)
+            if self._store.state["settings"].get("auto_split_speakers") and len(res.get("segments") or []) > 1:
+                split_res = self.split_clip_by_speakers(clip["id"])
+                if split_res.get("ok"):
+                    return {
+                        "ok": True,
+                        "clip": clip,
+                        "split_count": split_res.get("created_count", 0),
+                        "clips": self._store.state["clips"],
+                        "speakers": self._store.state["speakers"],
+                    }
 
-        clip = self._store.add_or_update_clip({
-            "title": res.get("title") or f"Replay {time.strftime('%H:%M:%S')}",
-            "file_path": saved,
-            "category": res.get("category") or "Call",
-            "speaker_id": spk_id,
-            "speaker_ids": spk_ids,
-            "segments": res.get("segments") or [],
-            "transcript": res.get("transcript") or "",
-            "acoustic_mood": res.get("acoustic_mood") or "Normal",
-            "emoji": res.get("emoji") or "⚡",
-            "color": res.get("color") or "#f59e0b",
-            "tags": res.get("tags") or ["replay"],
-            "duration": res.get("duration") or secs,
-        })
-
-        # If auto_split_speakers is enabled and multiple turns were found, split automatically
-        if self._store.state["settings"].get("auto_split_speakers") and len(res.get("segments") or []) > 1:
-            split_res = self.split_clip_by_speakers(clip["id"])
-            if split_res.get("ok"):
-                return {
-                    "ok": True,
-                    "clip": clip,
-                    "split_count": split_res.get("created_count", 0),
-                    "clips": self._store.state["clips"],
-                    "speakers": self._store.state["speakers"],
-                }
-
-        self._notify_ui("replay_captured", {
-            "clip": clip,
-            "clips": self._store.state["clips"],
-            "speakers": self._store.state["speakers"],
-        })
-        return {"ok": True, "clip": clip, "clips": self._store.state["clips"], "speakers": self._store.state["speakers"]}
+            self._notify_ui("replay_captured", {
+                "clip": clip,
+                "clips": self._store.state["clips"],
+                "speakers": self._store.state["speakers"],
+            })
+            return {"ok": True, "clip": clip, "clips": self._store.state["clips"], "speakers": self._store.state["speakers"]}
+        finally:
+            self._emit_progress(False)
 
     def toggle_mini_overlay(self) -> dict:
         self._is_mini_overlay = not self._is_mini_overlay
