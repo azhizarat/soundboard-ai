@@ -1,12 +1,16 @@
 import os
 import sys
 import copy
+import math
 import time
 import atexit
 import shutil
 import threading
+import uuid
+import zipfile
 from pathlib import Path
 
+import packs
 from store import SoundboardStore
 from ai_analyzer import AIAnalyzer
 from audio_engine import AudioEngine, compute_waveform_peaks
@@ -19,15 +23,44 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-SUPPORTED_AUDIO_EXTS = (".mp3", ".wav", ".ogg", ".flac", ".m4a", ".webm")
+SUPPORTED_AUDIO_EXTS = packs.AUDIO_EXTS
+# Fields a normal editor may change. Identity, audio location and analysis
+# artifacts are server-owned: a client must not be able to publish a draft or
+# repoint a clip at an arbitrary file.
+EDITABLE_CLIP_FIELDS = (
+    "title",
+    "emoji",
+    "color",
+    "category",
+    "speaker_id",
+    "speaker_ids",
+    "hotkey",
+    "transcript",
+    "trim_start",
+    "trim_end",
+    "volume",
+    "acoustic_mood",
+)
+
+
+def _unlink_quiet(path) -> None:
+    """Best-effort delete: temp cleanup must never raise."""
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _as_float(value, default: float, lo: float, hi: float) -> float:
     """Coerces a persisted setting to a clamped float, falling back on corrupt data."""
     try:
-        return max(lo, min(hi, float(value)))
+        num = float(value)
     except (TypeError, ValueError):
         return default
+    if not math.isfinite(num):
+        return default
+    return max(lo, min(hi, num))
+
 
 
 def _device_name(entries: list[dict], dev_id) -> str:
@@ -76,6 +109,8 @@ class SoundboardAPI:
         self._base_dir = Path(__file__).parent.resolve()
         resolved_data = Path(data_dir) if os.path.isabs(data_dir) else (self._base_dir / data_dir)
         self._store = SoundboardStore(data_dir=str(resolved_data))
+        # Replay drafts live in data/tmp and are throwaway: never survive a restart.
+        self._store.purge_pending_clips()
         if start_background_services:
             atexit.register(self._store.flush)
         self._ai = AIAnalyzer()
@@ -95,7 +130,7 @@ class SoundboardAPI:
             on_toggle_overlay=self.toggle_mini_overlay,
         )
         if start_background_services:
-            self._hotkeys.refresh(self._store.state["clips"], self._store.state["settings"])
+            self._hotkeys.refresh(self._public_clips(self._store.state["clips"]), self._store.state["settings"])
             if self._store.state["settings"].get("mic_passthrough"):
                 self._apply_mic_passthrough()
             # Pre-warm TitaNet and Faster-Whisper in background so first clip is instant
@@ -114,6 +149,18 @@ class SoundboardAPI:
 
     def _get_speaker_names_map(self) -> dict:
         return {k: v.get("name", k) for k, v in self._store.state["speakers"].items()}
+
+    @staticmethod
+    def _public_clips(clips: list[dict]) -> list[dict]:
+        """Drafts are internal: the UI and hotkeys never see them."""
+        return [c for c in clips if isinstance(c, dict) and not c.get("pending")]
+
+    def _reject_pending(self, clip_id: str, action: str = "") -> dict | None:
+        """Blocks destructive analysis on a replay draft (it is not saved yet)."""
+        clip = self._store.get_clip(clip_id)
+        if clip and clip.get("pending"):
+            return {"ok": False, "error": "Rascunhos de replay não podem ser alterados assim."}
+        return None
 
     def _auto_bind_devices(self):
         dev_info = self._audio.list_devices()
@@ -229,7 +276,7 @@ class SoundboardAPI:
             "settings": snap["settings"],
             "categories": snap["categories"],
             "speakers": snap["speakers"],
-            "clips": snap["clips"],
+            "clips": self._public_clips(snap["clips"]),
             "devices": devs,
             "discovered_separados": discovered_separados,
             "models_dir": str(self._ai.models_dir),
@@ -282,7 +329,7 @@ class SoundboardAPI:
         if any(k in updates for k in ("mic_passthrough", "mic_device_id", "cable_device_id", "mic_gain")):
             self._apply_mic_passthrough()
         if any(k in updates for k in ("stop_all_hotkey", "replay_hotkey", "overlay_hotkey")):
-            self._hotkeys.refresh(self._store.snapshot()["clips"], s)
+            self._hotkeys.refresh(self._public_clips(self._store.snapshot()["clips"]), s)
         return s
 
     def set_ducking(self, payload=None, amount_db=None, threshold_dbfs=None) -> dict:
@@ -438,9 +485,15 @@ class SoundboardAPI:
         return {"ok": True}
 
     def save_clip_edits(self, clip_data: dict) -> dict:
-        updated = self._store.add_or_update_clip(clip_data)
+        data = dict(clip_data or {})
+        # Whitelist: a draft must not be publishable (pending/file_path/duration/...).
+        payload = {"id": data.get("id")}
+        for key in EDITABLE_CLIP_FIELDS:
+            if key in data:
+                payload[key] = data[key]
+        updated = self._store.add_or_update_clip(payload)
         snap = self._store.snapshot()
-        self._hotkeys.refresh(snap["clips"], snap["settings"])
+        self._hotkeys.refresh(self._public_clips(snap["clips"]), snap["settings"])
         return {"ok": True, "clip": copy.deepcopy(updated), "speakers": snap["speakers"]}
 
     def toggle_favorite(self, clip_id: str) -> dict:
@@ -457,7 +510,7 @@ class SoundboardAPI:
         if file_path:
             self._audio.invalidate_cache(file_path)
         snap = self._store.snapshot()
-        self._hotkeys.refresh(snap["clips"], snap["settings"])
+        self._hotkeys.refresh(self._public_clips(snap["clips"]), snap["settings"])
         return {
             "ok": bool(ok),
             "clip": copy.deepcopy(clip) if ok and clip else None,
@@ -470,12 +523,12 @@ class SoundboardAPI:
         clip_id = str(payload.get("id") or "").strip()
         empty = self._store.snapshot()
         if not clip_id:
-            return {"ok": False, "error": "Clipe inválido.", "clips": empty["clips"], "speakers": empty["speakers"]}
+            return {"ok": False, "error": "Clipe inválido.", "clips": self._public_clips(empty["clips"]), "speakers": empty["speakers"]}
         if self._store.get_clip(clip_id):
             return {
                 "ok": False,
                 "error": "Este botão já existe.",
-                "clips": empty["clips"],
+                "clips": self._public_clips(empty["clips"]),
                 "speakers": empty["speakers"],
             }
 
@@ -491,7 +544,7 @@ class SoundboardAPI:
             return {
                 "ok": False,
                 "error": "Arquivo do áudio não encontrado.",
-                "clips": empty["clips"],
+                "clips": self._public_clips(empty["clips"]),
                 "speakers": empty["speakers"],
             }
 
@@ -506,7 +559,7 @@ class SoundboardAPI:
                     return {
                         "ok": False,
                         "error": "Este áudio já pertence a outro botão.",
-                        "clips": empty["clips"],
+                        "clips": self._public_clips(empty["clips"]),
                         "speakers": empty["speakers"],
                     }
             except Exception:
@@ -515,11 +568,11 @@ class SoundboardAPI:
         payload["file_path"] = str(resolved)
         saved = self._store.add_or_update_clip(payload)
         snap = self._store.snapshot()
-        self._hotkeys.refresh(snap["clips"], snap["settings"])
+        self._hotkeys.refresh(self._public_clips(snap["clips"]), snap["settings"])
         return {
             "ok": True,
             "clip": copy.deepcopy(saved),
-            "clips": snap["clips"],
+            "clips": self._public_clips(snap["clips"]),
             "speakers": snap["speakers"],
         }
 
@@ -542,10 +595,13 @@ class SoundboardAPI:
         return {
             "ok": ok,
             "speakers": snap["speakers"],
-            "clips": snap["clips"],
+            "clips": self._public_clips(snap["clips"]),
         }
 
     def enroll_speaker_from_clip(self, clip_id: str, spk_id: str, speaker_name: str = "") -> dict:
+        rejected = self._reject_pending(clip_id, "cadastrar voz")
+        if rejected:
+            return rejected
         clip = self._store.get_clip(clip_id)
         if not clip or not clip.get("file_path"):
             return {"ok": False, "error": "Áudio inválido"}
@@ -563,6 +619,9 @@ class SoundboardAPI:
         }
 
     def reanalyze_clip_ai(self, clip_id: str) -> dict:
+        rejected = self._reject_pending(clip_id, "reanalisar")
+        if rejected:
+            return rejected
         clip = self._store.get_clip(clip_id)
         if not clip or not clip.get("file_path") or not os.path.exists(clip["file_path"]):
             return {"ok": False, "error": "Arquivo de áudio não encontrado"}
@@ -608,6 +667,9 @@ class SoundboardAPI:
         import soundfile as sf
         from ai_analyzer import load_audio_mono_16k
 
+        rejected = self._reject_pending(clip_id, "separar falas")
+        if rejected:
+            return rejected
         clip = self._store.get_clip(clip_id)
         if not clip or not clip.get("file_path") or not os.path.exists(clip["file_path"]):
             return {"ok": False, "error": "Arquivo de áudio não encontrado"}
@@ -666,14 +728,14 @@ class SoundboardAPI:
 
             snap = self._store.snapshot()
             self._notify_ui("clips_updated", {
-                "clips": snap["clips"],
+                "clips": self._public_clips(snap["clips"]),
                 "speakers": snap["speakers"],
             })
             return {
                 "ok": True,
                 "created_count": len(created_clips),
                 "created_clips": copy.deepcopy(created_clips),
-                "clips": snap["clips"],
+                "clips": self._public_clips(snap["clips"]),
                 "speakers": snap["speakers"],
             }
         finally:
@@ -748,13 +810,13 @@ class SoundboardAPI:
 
         snap = self._store.snapshot()
         self._notify_ui("clips_updated", {
-            "clips": snap["clips"],
+            "clips": self._public_clips(snap["clips"]),
             "speakers": snap["speakers"],
         })
         return {
             "ok": True,
             "imported": copy.deepcopy(imported),
-            "clips": snap["clips"],
+            "clips": self._public_clips(snap["clips"]),
             "speakers": snap["speakers"],
         }
 
@@ -808,13 +870,13 @@ class SoundboardAPI:
 
             snap = self._store.snapshot()
             self._notify_ui("clips_updated", {
-                "clips": snap["clips"],
+                "clips": self._public_clips(snap["clips"]),
                 "speakers": snap["speakers"],
             })
             return {
                 "ok": True,
                 "imported_count": len(imported),
-                "clips": snap["clips"],
+                "clips": self._public_clips(snap["clips"]),
                 "speakers": snap["speakers"],
             }
 
@@ -826,33 +888,31 @@ class SoundboardAPI:
         res["imported_count"] = len(res.get("imported", []))
         return res
 
-    def capture_replay_clip(self, last_seconds: float = None) -> dict:
+    def _capture_replay_analysis(self, out_dir: Path, last_seconds: float = None) -> dict:
+        """Captures the replay buffer, runs AI and returns a clip payload (not persisted)."""
         secs = float(last_seconds or self._store.state["settings"].get("replay_seconds", 15))
         out_name = f"replay_{time.strftime('%Y%m%d_%H%M%S')}.wav"
-        out_path = str(self._store.clips_dir / out_name)
+        out_path = str(Path(out_dir) / out_name)
 
         self._emit_progress(True, 1, 3, f"Capturando últimos {int(secs)}s da call...", out_name)
-        try:
-            saved = self._audio.save_replay_wav(out_path, last_seconds=secs)
-            if not saved:
-                self._notify_ui("toast", {
-                    "type": "warning",
-                    "message": "Nenhum som recente tocado no seu fone/sistema nos últimos segundos.",
-                })
-                return {"ok": False, "error": "Nenhum áudio recente tocado no fone/sistema nos últimos 15s"}
+        saved = self._audio.save_replay_wav(out_path, last_seconds=secs)
+        if not saved:
+            return {"ok": False, "error": "Nenhum áudio recente tocado no fone/sistema nos últimos 15s"}
 
-            self._emit_progress(True, 2, 3, "Identificando vozes e transcrevendo com IA...", out_name)
-            res = self._ai.analyze_file(
-                saved,
-                speaker_names=self._get_speaker_names_map(),
-                use_llm=bool(self._store.state["settings"].get("use_local_llm", True)),
-            )
-            spk_id = res.get("speaker_id", "")
-            spk_ids = res.get("speaker_ids") or ([spk_id] if spk_id else [])
-            for sid in spk_ids:
-                self._store.ensure_speaker(sid)
+        self._emit_progress(True, 2, 3, "Identificando vozes e transcrevendo com IA...", out_name)
+        res = self._ai.analyze_file(
+            saved,
+            speaker_names=self._get_speaker_names_map(),
+            use_llm=bool(self._store.state["settings"].get("use_local_llm", True)),
+        )
+        spk_id = res.get("speaker_id", "")
+        spk_ids = res.get("speaker_ids") or ([spk_id] if spk_id else [])
+        for sid in spk_ids:
+            self._store.ensure_speaker(sid)
 
-            clip = self._store.add_or_update_clip({
+        return {
+            "ok": True,
+            "clip": {
                 "title": res.get("title") or f"Replay {time.strftime('%H:%M:%S')}",
                 "file_path": saved,
                 "category": res.get("category") or "Call",
@@ -866,29 +926,417 @@ class SoundboardAPI:
                 "tags": res.get("tags") or ["replay"],
                 "duration": res.get("duration") or secs,
                 "created_at": time.time(),
-            })
+            },
+        }
 
-            if self._store.state["settings"].get("auto_split_speakers") and len(res.get("segments") or []) > 1:
+    def capture_replay_clip(self, last_seconds: float = None) -> dict:
+        """Alt+F10 path: saves the replay straight into the library."""
+        try:
+            captured = self._capture_replay_analysis(self._store.clips_dir, last_seconds)
+            if not captured.get("ok"):
+                self._notify_ui("toast", {"type": "warning", "message": captured["error"]})
+                return captured
+            clip = self._store.add_or_update_clip(captured["clip"])
+            split_count = 0
+            settings = self._store.state["settings"]
+            if settings.get("auto_split_speakers") and len(clip.get("segments") or []) > 1:
                 split_res = self.split_clip_by_speakers(clip["id"])
                 if split_res.get("ok"):
-                    snap = self._store.snapshot()
-                    return {
-                        "ok": True,
-                        "clip": copy.deepcopy(clip),
-                        "split_count": split_res.get("created_count", 0),
-                        "clips": snap["clips"],
-                        "speakers": snap["speakers"],
-                    }
-
+                    split_count = int(split_res.get("created_count") or 0)
             snap = self._store.snapshot()
+            self._hotkeys.refresh(self._public_clips(snap["clips"]), snap["settings"])
             self._notify_ui("replay_captured", {
                 "clip": copy.deepcopy(clip),
-                "clips": snap["clips"],
+                "clips": self._public_clips(snap["clips"]),
                 "speakers": snap["speakers"],
             })
-            return {"ok": True, "clip": copy.deepcopy(clip), "clips": snap["clips"], "speakers": snap["speakers"]}
+            result = {
+                "ok": True,
+                "clip": copy.deepcopy(clip),
+                "clips": self._public_clips(snap["clips"]),
+                "speakers": snap["speakers"],
+            }
+            if split_count:
+                result["split_count"] = split_count
+            return result
         finally:
             self._emit_progress(False)
+
+    def capture_replay_draft(self, last_seconds: float = None) -> dict:
+        """Captures a replay into data/tmp and keeps it out of the library until saved."""
+        try:
+            captured = self._capture_replay_analysis(self._store.tmp_dir, last_seconds)
+            if not captured.get("ok"):
+                return captured
+            payload = dict(captured["clip"])
+            payload["pending"] = True
+            clip = self._store.add_or_update_clip(payload)
+            snap = self._store.snapshot()
+            return {
+                "ok": True,
+                "clip": copy.deepcopy(clip),
+                "clips": self._public_clips(snap["clips"]),
+                "speakers": snap["speakers"],
+            }
+        finally:
+            self._emit_progress(False)
+
+    def commit_replay_draft(self, clip_id: str) -> dict:
+        clip = self._store.get_clip(clip_id)
+        snap = self._store.snapshot()
+        base = {
+            "ok": False,
+            "clips": self._public_clips(snap["clips"]),
+            "speakers": snap["speakers"],
+        }
+        if not clip or not clip.get("pending"):
+            return {**base, "error": "Este rascunho não existe mais."}
+
+        src = Path(str(clip.get("file_path") or ""))
+        try:
+            src_ok = src.is_file() and src.resolve().is_relative_to(self._store.tmp_dir.resolve())
+        except Exception:
+            src_ok = False
+        if not src_ok:
+            return {**base, "error": "Arquivo do rascunho não encontrado."}
+
+        # The id comes from a client payload: never let it shape the path.
+        safe_id = "".join(ch for ch in str(clip_id) if ch.isalnum() or ch in "-_") or uuid.uuid4().hex[:10]
+        dst = self._store.clips_dir / f"replay_{safe_id}{src.suffix or '.wav'}"
+        try:
+            shutil.move(str(src), str(dst))
+        except OSError as exc:
+            return {**base, "error": f"Falha ao salvar o replay: {exc}"}
+
+        try:
+            saved = self._store.add_or_update_clip({
+                "id": clip_id,
+                "file_path": str(dst),
+                "pending": False,
+                "created_at": time.time(),
+            })
+            self._audio.invalidate_cache(str(src))
+
+            split_count = 0
+            settings = self._store.state["settings"]
+            if settings.get("auto_split_speakers") and len(saved.get("segments") or []) > 1:
+                split_res = self.split_clip_by_speakers(saved["id"])
+                if split_res.get("ok"):
+                    split_count = int(split_res.get("created_count") or 0)
+        except Exception:
+            # Atomic commit: put the audio back in tmp and keep the clip a draft.
+            self._rollback_failed_commit(clip_id, src, dst)
+            snap = self._store.snapshot()
+            return {
+                "ok": False,
+                "error": "Falha ao salvar o replay. Tente de novo.",
+                "clips": self._public_clips(snap["clips"]),
+                "speakers": snap["speakers"],
+            }
+        snap = self._store.snapshot()
+        self._hotkeys.refresh(self._public_clips(snap["clips"]), snap["settings"])
+        return {
+            "ok": True,
+            "clip": copy.deepcopy(self._store.get_clip(clip_id) or saved),
+            "clips": self._public_clips(snap["clips"]),
+            "speakers": snap["speakers"],
+            "split_count": split_count,
+        }
+
+    def _rollback_failed_commit(self, clip_id: str, src: Path, dst: Path) -> None:
+        """Best effort: audio back to tmp, clip pending again. Never raises."""
+        try:
+            if dst.exists() and not src.exists():
+                shutil.move(str(dst), str(src))
+        except OSError:
+            pass
+        try:
+            clip = self._store.get_clip(clip_id)
+            if clip is not None and not clip.get("pending"):
+                self._store.add_or_update_clip({
+                    "id": clip_id,
+                    "file_path": str(src),
+                    "pending": True,
+                })
+        except Exception:
+            pass
+
+    def discard_replay_draft(self, clip_id: str) -> dict:
+        clip = self._store.get_clip(clip_id)
+        ok = bool(clip and clip.get("pending"))
+        if ok:
+            self._store.delete_clip(clip_id, delete_file=False)
+            self._store.delete_file_inside(self._store.tmp_dir, clip.get("file_path"))
+            self._audio.invalidate_cache(clip.get("file_path") or "")
+        snap = self._store.snapshot()
+        return {
+            "ok": ok,
+            "clips": self._public_clips(snap["clips"]),
+            "speakers": snap["speakers"],
+        }
+
+    def _ensure_imported_speaker(self, name: str, color: str = "") -> str:
+        """Maps a pack speaker to a local one by name, creating it when missing."""
+        clean = (name or "").strip()
+        if not clean:
+            return ""
+        speakers = self._store.snapshot()["speakers"]
+        for spk in speakers.values():
+            if str(spk.get("name") or "").strip().casefold() == clean.casefold():
+                return spk["id"]
+        idx = len(speakers)
+        spk_id = f"interlocutor_{idx + 1}"
+        while spk_id in speakers:
+            idx += 1
+            spk_id = f"interlocutor_{idx + 1}"
+        self._store.ensure_speaker(spk_id, default_name=clean)
+        if color:
+            self._store.update_speaker(spk_id, name=clean, color=color)
+        return spk_id
+
+    def export_pack(self, clip_ids: list[str] = None, path: str = None) -> dict:
+        snap = self._store.snapshot()
+        clips = self._public_clips(snap["clips"])
+        if clip_ids is not None:
+            wanted = {str(i) for i in clip_ids}
+            clips = [c for c in clips if c["id"] in wanted]
+        if not clips:
+            return {"ok": False, "error": "Nenhum áudio para exportar.", "count": 0, "skipped": 0}
+
+        if not path and self._window is not None:
+            try:
+                import webview
+                chosen = self._window.create_file_dialog(
+                    webview.SAVE_DIALOG,
+                    save_filename=f"soundboard-pack-{time.strftime('%Y%m%d-%H%M')}.zip",
+                    file_types=("Pacote do Soundboard (*.zip)",),
+                )
+                path = chosen if isinstance(chosen, str) else (chosen[0] if chosen else None)
+            except Exception:
+                path = None
+        if not path:
+            return {"ok": False, "error": "Exportação cancelada.", "count": 0, "skipped": 0}
+
+        try:
+            out = Path(path)
+            if out.suffix.lower() != ".zip":
+                out = out.with_name(out.name + ".zip")
+            tmp = out.with_suffix(out.suffix + ".tmp")
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "error": "Falha ao exportar: caminho inválido.",
+                "count": 0,
+                "skipped": 0,
+            }
+        try:
+            res = packs.write_pack(tmp, clips, snap["speakers"])
+            os.replace(tmp, out)
+        except packs.PackError as exc:
+            _unlink_quiet(tmp)
+            return {"ok": False, "error": str(exc), "count": 0, "skipped": 0}
+        except Exception as exc:
+            _unlink_quiet(tmp)
+            return {"ok": False, "error": f"Falha ao exportar: {exc}", "count": 0, "skipped": 0}
+        return {"ok": True, "path": str(out), "count": res["count"], "skipped": res["skipped"]}
+
+    def import_pack(self, path: str = None) -> dict:
+        if not path and self._window is not None:
+            try:
+                import webview
+                chosen = self._window.create_file_dialog(
+                    webview.OPEN_DIALOG,
+                    allow_multiple=False,
+                    file_types=("Pacote do Soundboard (*.zip)", "Todos os arquivos (*.*)"),
+                )
+                path = chosen if isinstance(chosen, str) else (chosen[0] if chosen else None)
+            except Exception:
+                path = None
+        if not path:
+            snap = self._store.snapshot()
+            return {
+                "ok": False,
+                "error": "Importação cancelada.",
+                "imported": [],
+                "skipped": 0,
+                "warnings": [],
+                "clips": self._public_clips(snap["clips"]),
+                "speakers": snap["speakers"],
+            }
+
+        try:
+            pack = packs.validate_pack(path)
+        except packs.PackError as exc:
+            snap = self._store.snapshot()
+            return {
+                "ok": False,
+                "error": str(exc),
+                "imported": [],
+                "skipped": 0,
+                "warnings": [],
+                "clips": self._public_clips(snap["clips"]),
+                "speakers": snap["speakers"],
+            }
+
+        import soundfile as sf
+
+        manifest = pack["manifest"]
+        entries = manifest["clips"]
+        speakers_meta = {
+            str(s.get("name") or "").casefold(): s
+            for s in (manifest.get("speakers") or [])
+            if isinstance(s, dict)
+        }
+        existing = self._store.snapshot()
+        used_hotkeys = {
+            str(c.get("hotkey") or "").lower()
+            for c in self._public_clips(existing["clips"])
+            if c.get("hotkey")
+        }
+        known_hashes = {}
+        for clip in self._public_clips(existing["clips"]):
+            fp = str(clip.get("file_path") or "")
+            try:
+                known_hashes[packs.sha256_file(fp)] = clip["id"]
+            except OSError:
+                continue
+
+        imported, warnings = [], []
+        skipped = 0
+        total = len(entries)
+        remaining = packs.MAX_UNCOMPRESSED_BYTES
+        copied_names: set[str] = set()
+        try:
+            with zipfile.ZipFile(path) as archive:
+                for idx, entry in enumerate(entries, 1):
+                    self._emit_progress(True, idx, total, f"Importando pacote ({idx}/{total})", entry.get("title") or "")
+                    name = str(entry.get("file") or "")
+                    label = entry.get("title") or name
+                    if name in copied_names:
+                        skipped += 1
+                        warnings.append(f"{label}: áudio repetido no pacote.")
+                        continue
+                    ext = Path(name).suffix.lower()
+                    if ext not in packs.AUDIO_EXTS:
+                        skipped += 1
+                        warnings.append(f"{label}: formato não suportado.")
+                        continue
+
+                    new_id = uuid.uuid4().hex[:10]
+                    final = self._store.clips_dir / f"{new_id}{ext}"
+                    while final.exists():
+                        new_id = uuid.uuid4().hex[:10]
+                        final = self._store.clips_dir / f"{new_id}{ext}"
+                    part = self._store.clips_dir / f"{new_id}{ext}.part"
+                    try:
+                        try:
+                            digest, size = packs.copy_entry(archive, name, part, remaining=remaining)
+                        except packs.PackError as exc:
+                            skipped += 1
+                            warnings.append(f"{label}: {exc}")
+                            continue
+                        copied_names.add(name)
+                        remaining -= size
+
+                        if digest in known_hashes:
+                            skipped += 1
+                            warnings.append(f"{label}: já existe na biblioteca.")
+                            continue
+
+                        os.replace(part, final)
+                        known_hashes[digest] = new_id
+
+                        try:
+                            duration = float(sf.info(str(final)).duration or 0.0)
+                        except Exception:
+                            duration = _as_float(entry.get("duration"), 0.0, 0.0, 24 * 3600.0)
+                        duration = max(0.2, duration or _as_float(entry.get("duration"), 0.2, 0.2, 24 * 3600.0))
+
+                        spk_ids = []
+                        raw_spk_names = entry.get("speaker_names")
+                        for spk_name in raw_spk_names if isinstance(raw_spk_names, list) else []:
+                            meta = speakers_meta.get(str(spk_name).strip().casefold(), {})
+                            sid = self._ensure_imported_speaker(str(spk_name), str(meta.get("color") or ""))
+                            if sid and sid not in spk_ids:
+                                spk_ids.append(sid)
+
+                        hotkey = str(entry.get("hotkey") or "").strip()
+                        if hotkey and hotkey.lower() in used_hotkeys:
+                            hotkey = ""
+                            warnings.append(f"{label}: atalho já em uso, importado sem atalho.")
+                        if hotkey:
+                            used_hotkeys.add(hotkey.lower())
+
+                        # Keep a positive, audible window inside the real duration.
+                        trim_start = _as_float(entry.get("trim_start"), 0.0, 0.0, duration)
+                        trim_start = min(trim_start, max(0.0, duration - 0.2))
+                        trim_end = _as_float(entry.get("trim_end"), 0.0, 0.0, duration)
+                        if trim_end <= trim_start:
+                            trim_end = duration
+                        trim_end = min(duration, max(trim_end, trim_start + 0.05))
+                        volume = _as_float(entry.get("volume"), 1.0, 0.0, 3.0)
+                        raw_tags = entry.get("tags")
+
+                        try:
+                            clip = self._store.add_or_update_clip({
+                                "id": new_id,
+                                "title": str(entry.get("title") or "Áudio importado")[:60],
+                                "file_path": str(final),
+                                "category": str(entry.get("category") or "Call"),
+                                "speaker_id": spk_ids[0] if spk_ids else "",
+                                "speaker_ids": spk_ids,
+                                "segments": [],
+                                "transcript": str(entry.get("transcript") or ""),
+                                "acoustic_mood": str(entry.get("acoustic_mood") or "Normal"),
+                                "emoji": str(entry.get("emoji") or "🔊")[:4],
+                                "color": str(entry.get("color") or "#3b82f6"),
+                                "tags": [str(t) for t in (raw_tags if isinstance(raw_tags, list) else [])][:32],
+                                "hotkey": hotkey,
+                                "trim_start": trim_start,
+                                "trim_end": trim_end,
+                                "volume": volume,
+                                "favorite": bool(entry.get("favorite")),
+                                "duration": duration,
+                                "created_at": time.time(),
+                                "pending": False,
+                            })
+                        except Exception:
+                            # Never leave a file the library does not reference.
+                            _unlink_quiet(final)
+                            raise
+                        imported.append(clip)
+                    finally:
+                        # The part file is gone after os.replace; on any failure it is
+                        # removed here so a bad pack never leaves orphans behind.
+                        _unlink_quiet(part)
+        except Exception as exc:
+            snap = self._store.snapshot()
+            return {
+                "ok": False,
+                "error": f"Falha ao importar: {exc}",
+                "imported": copy.deepcopy(imported),
+                "skipped": skipped,
+                "warnings": warnings,
+                "clips": self._public_clips(snap["clips"]),
+                "speakers": snap["speakers"],
+            }
+        finally:
+            self._emit_progress(False)
+
+        snap = self._store.snapshot()
+        self._hotkeys.refresh(self._public_clips(snap["clips"]), snap["settings"])
+        self._notify_ui("clips_updated", {
+            "clips": self._public_clips(snap["clips"]),
+            "speakers": snap["speakers"],
+        })
+        return {
+            "ok": True,
+            "imported": copy.deepcopy(imported),
+            "skipped": skipped,
+            "warnings": warnings,
+            "clips": self._public_clips(snap["clips"]),
+            "speakers": snap["speakers"],
+        }
 
     def toggle_mini_overlay(self) -> dict:
         self._is_mini_overlay = not self._is_mini_overlay

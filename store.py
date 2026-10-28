@@ -51,6 +51,7 @@ class SoundboardStore:
         self.data_dir = Path(data_dir).resolve()
         self.clips_dir = self.data_dir / "clips"
         self.models_dir = self.data_dir / "models"
+        self.tmp_dir = self.data_dir / "tmp"
         self.db_path = self.data_dir / "soundboard.json"
         self._lock = threading.RLock()
         self._save_timer = None
@@ -58,6 +59,7 @@ class SoundboardStore:
 
         self.clips_dir.mkdir(parents=True, exist_ok=True)
         self.models_dir.mkdir(parents=True, exist_ok=True)
+        self.tmp_dir.mkdir(parents=True, exist_ok=True)
 
         self.state = {
             "settings": dict(DEFAULT_SETTINGS),
@@ -267,6 +269,7 @@ class SoundboardStore:
                 "trim_end": float(clip_data.get("trim_end", 0.0)),
                 "duration": float(clip_data.get("duration", 0.0)),
                 "favorite": bool(clip_data.get("favorite", False)),
+                "pending": bool(clip_data.get("pending", False)),
                 "play_count": int(clip_data.get("play_count", 0)),
                 "created_at": clip_data.get("created_at") or time.time(),
             }
@@ -290,6 +293,58 @@ class SoundboardStore:
                     return True
             return False
 
+    def delete_file_inside(self, root: Path, raw_path: str) -> bool:
+        """Deletes a file only when it resolves under ``root``."""
+        raw = str(raw_path or "").strip()
+        if not raw:
+            return False
+        try:
+            resolved = Path(raw).resolve()
+            base = root.resolve()
+        except Exception:
+            return False
+        if not resolved.is_relative_to(base) or resolved == base or not resolved.is_file():
+            return False
+        try:
+            resolved.unlink()
+            return True
+        except OSError:
+            return False
+
+    def _sweep_temp_files(self):
+        """Removes leftovers from a crash: tmp drafts and half-imported .part files."""
+        try:
+            for entry in self.tmp_dir.iterdir():
+                if not entry.is_file():
+                    continue
+                try:
+                    entry.unlink()
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        try:
+            for entry in self.clips_dir.glob("*.part"):
+                if not entry.is_file():
+                    continue
+                try:
+                    entry.unlink()
+                except OSError:
+                    continue
+        except OSError:
+            pass
+
+    def purge_pending_clips(self) -> int:
+        """Drops replay drafts (they never survive a restart) and sweeps temp leftovers."""
+        with self._lock:
+            pending = [c for c in self.state["clips"] if c.get("pending")]
+            if pending:
+                self.state["clips"] = [c for c in self.state["clips"] if not c.get("pending")]
+                for clip in pending:
+                    self.delete_file_inside(self.tmp_dir, clip.get("file_path"))
+                self.save()
+            self._sweep_temp_files()
+            return len(pending)
     def increment_play_count(self, clip_id: str) -> dict | None:
         with self._lock:
             c = self.get_clip(clip_id)
