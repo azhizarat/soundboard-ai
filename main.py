@@ -7,9 +7,12 @@ import atexit
 import shutil
 import threading
 import uuid
+import webbrowser
 import zipfile
 from pathlib import Path
 
+import config
+import doctor
 import packs
 from store import SoundboardStore
 from ai_analyzer import AIAnalyzer
@@ -24,6 +27,8 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 SUPPORTED_AUDIO_EXTS = packs.AUDIO_EXTS
+# Formats that only work when FFmpeg can convert them to PCM.
+CONVERT_ONLY_EXTS = {".m4a", ".webm", ".aac", ".wma", ".opus"}
 # Fields a normal editor may change. Identity, audio location and analysis
 # artifacts are server-owned: a client must not be able to publish a draft or
 # repoint a clip at an arbitrary file.
@@ -103,23 +108,29 @@ def _resolve_device(
 
 
 class SoundboardAPI:
-    def __init__(self, data_dir: str = "data", start_background_services: bool = True):
+    def __init__(self, data_dir: str = None, start_background_services: bool = True):
         # All internal state attributes MUST start with '_' so pywebview does not
         # recursively inspect/serialize them (especially self._window.native!).
-        self._base_dir = Path(__file__).parent.resolve()
-        resolved_data = Path(data_dir) if os.path.isabs(data_dir) else (self._base_dir / data_dir)
-        self._store = SoundboardStore(data_dir=str(resolved_data))
+        self._config = config.load_config(data_dir)
+        self._store = SoundboardStore(data_dir=str(self._config.data_dir))
         # Replay drafts live in data/tmp and are throwaway: never survive a restart.
         self._store.purge_pending_clips()
         if start_background_services:
             atexit.register(self._store.flush)
-        self._ai = AIAnalyzer()
+        self._ai = AIAnalyzer(
+            str(self._config.models_dir),
+            ffmpeg_path=self._config.ffmpeg_path,
+            ollama_url=self._config.ollama_url,
+            ollama_model=self._config.ollama_model,
+        )
         self._audio = AudioEngine(
             replay_seconds=max(60.0, float(self._store.state["settings"].get("replay_seconds", 15))),
             start_loopback=start_background_services,
+            ffmpeg_path=self._config.ffmpeg_path,
         )
         self._window = None
         self._is_mini_overlay = False
+        self._cable_warned = False
 
         self._auto_bind_devices()
 
@@ -226,8 +237,23 @@ class SoundboardAPI:
     def _apply_mic_passthrough(self):
         self._apply_ducking()
         s = self._store.state["settings"]
+        enabled = bool(s.get("mic_passthrough", False))
+        if enabled:
+            # A missing cable is not fatal: silence the route and warn once.
+            try:
+                cable_ok = self._capabilities().get("cable_routing", True)
+            except Exception:
+                cable_ok = True
+            if not cable_ok:
+                enabled = False
+                if not self._cable_warned:
+                    self._cable_warned = True
+                    self._notify_ui("toast", {
+                        "type": "warning",
+                        "message": "VB-Cable não encontrado: encaminhamento do microfone desativado.",
+                    })
         self._audio.set_mic_passthrough(
-            enabled=bool(s.get("mic_passthrough", False)),
+            enabled=enabled,
             mic_id=s.get("mic_device_id"),
             cable_id=s.get("cable_device_id"),
             gain=_as_float(s.get("mic_gain", 1.0), 1.0, 0.0, 3.0),
@@ -259,7 +285,7 @@ class SoundboardAPI:
     def get_initial_state(self) -> dict:
         devs = self._audio.list_devices()
         discovered_separados = []
-        videos_root = Path(r"C:\Users\Usuario\Videos")
+        videos_root = self._config.separados_root
         if videos_root.exists():
             try:
                 for sub in sorted(videos_root.iterdir()):
@@ -272,6 +298,7 @@ class SoundboardAPI:
                 pass
 
         snap = self._store.snapshot()
+        env = doctor.snapshot(self._config)
         return {
             "settings": snap["settings"],
             "categories": snap["categories"],
@@ -279,11 +306,89 @@ class SoundboardAPI:
             "clips": self._public_clips(snap["clips"]),
             "devices": devs,
             "discovered_separados": discovered_separados,
-            "models_dir": str(self._ai.models_dir),
+            "models_dir": str(self._config.models_dir),
             "has_titanet": self._ai.emb_model_path.exists(),
             "has_ref_voices": self._ai.ref_voices_path.exists(),
             "is_mini_overlay": self._is_mini_overlay,
+            "environment": env,
+            "config": config.config_dict(self._config),
         }
+
+    def get_environment_status(self, refresh=False) -> dict:
+        return doctor.snapshot(self._config, refresh=bool(refresh))
+
+    def refresh_environment(self) -> dict:
+        self._cable_warned = False
+        doctor.invalidate_cache()
+        return doctor.snapshot(self._config, refresh=True)
+
+    def save_app_config(self, updates: dict) -> dict:
+        try:
+            self._config = config.save_config(self._config, updates or {})
+        except Exception as exc:
+            return {"ok": False, "error": f"Não foi possível salvar a configuração: {exc}"}
+        self._apply_config()
+        doctor.invalidate_cache()
+        environment = doctor.snapshot(self._config, refresh=True)
+        self._notify_ui("environment_updated", environment)
+        return {
+            "ok": True,
+            "config": config.config_dict(self._config),
+            "environment": environment,
+        }
+
+    def _apply_config(self) -> None:
+        """Rebuilds everything that depends on config paths without restarting."""
+        self._cable_warned = False
+        self._ai = AIAnalyzer(
+            str(self._config.models_dir),
+            ffmpeg_path=self._config.ffmpeg_path,
+            ollama_url=self._config.ollama_url,
+            ollama_model=self._config.ollama_model,
+        )
+        self._audio.ffmpeg_path = self._config.ffmpeg_path
+        # Re-applying keeps the route in sync with the new devices/config; only
+        # touch the mic stream when the user actually enabled it.
+        if self._store.state["settings"].get("mic_passthrough"):
+            self._apply_mic_passthrough()
+
+    def pick_directory(self, kind: str) -> dict:
+        if kind not in ("models_dir", "separados_root"):
+            return {"ok": False, "error": "Pasta desconhecida."}
+        if self._window is None:
+            return {"ok": False, "error": "Janela indisponível."}
+        try:
+            import webview
+            chosen = self._window.create_file_dialog(webview.FOLDER_DIALOG)
+            path = chosen if isinstance(chosen, str) else (chosen[0] if chosen else None)
+        except Exception as exc:
+            return {"ok": False, "error": f"Não foi possível abrir o seletor: {exc}"}
+        if not path:
+            return {"ok": False, "error": "Seleção cancelada."}
+        return self.save_app_config({kind: path})
+
+    def open_help_url(self, url: str) -> dict:
+        safe = doctor.safe_help_url(url)
+        if not safe:
+            return {"ok": False, "error": "Link não permitido."}
+        try:
+            webbrowser.open(safe)
+        except Exception as exc:
+            return {"ok": False, "error": f"Não foi possível abrir o link: {exc}"}
+        return {"ok": True}
+
+    def _capabilities(self) -> dict:
+        return doctor.capabilities(doctor.run_checks(self._config))
+
+    def _capability_error(self, name: str) -> dict | None:
+        if self._capabilities().get(name):
+            return None
+        messages = {
+            "ai_analysis": "Análise de IA indisponível: coloque os modelos em data/models ou abra ⚙️ Ambiente.",
+            "audio_convert": "Conversão de áudio indisponível: instale o FFmpeg para importar este formato.",
+            "cable_routing": "VB-Cable não encontrado: sem rota para o cabo virtual.",
+        }
+        return {"ok": False, "error": messages.get(name, "Recurso indisponível.")}
 
     def refresh_devices(self) -> dict:
         self._auto_bind_devices()
@@ -599,6 +704,9 @@ class SoundboardAPI:
         }
 
     def enroll_speaker_from_clip(self, clip_id: str, spk_id: str, speaker_name: str = "") -> dict:
+        blocked = self._capability_error("ai_analysis")
+        if blocked:
+            return blocked
         rejected = self._reject_pending(clip_id, "cadastrar voz")
         if rejected:
             return rejected
@@ -619,6 +727,9 @@ class SoundboardAPI:
         }
 
     def reanalyze_clip_ai(self, clip_id: str) -> dict:
+        blocked = self._capability_error("ai_analysis")
+        if blocked:
+            return blocked
         rejected = self._reject_pending(clip_id, "reanalisar")
         if rejected:
             return rejected
@@ -664,6 +775,9 @@ class SoundboardAPI:
             self._emit_progress(False)
 
     def split_clip_by_speakers(self, clip_id: str) -> dict:
+        blocked = self._capability_error("ai_analysis")
+        if blocked:
+            return blocked
         import soundfile as sf
         from ai_analyzer import load_audio_mono_16k
 
@@ -763,6 +877,8 @@ class SoundboardAPI:
             return {"ok": False, "imported": []}
 
         imported = []
+        blocked_names = []
+        caps = self._capabilities()
         use_llm = bool(self._store.state["settings"].get("use_local_llm", True))
         total_files = len(file_paths)
         mode_lbl = "Importando Vinhetas / Sons" if skip_speaker_id else "Importando e analisando áudios com IA"
@@ -771,6 +887,9 @@ class SoundboardAPI:
             for idx, src in enumerate(file_paths, 1):
                 src_path = Path(src)
                 if not src_path.exists() or not src_path.is_file():
+                    continue
+                if src_path.suffix.lower() in CONVERT_ONLY_EXTS and not caps.get("audio_convert", True):
+                    blocked_names.append(src_path.name)
                     continue
                 self._emit_progress(True, idx, total_files, f"{mode_lbl} ({idx}/{total_files})", src_path.name)
                 dst_name = f"{int(time.time() * 1000) % 1000000}_{src_path.name}"
@@ -813,12 +932,25 @@ class SoundboardAPI:
             "clips": self._public_clips(snap["clips"]),
             "speakers": snap["speakers"],
         })
-        return {
+        if blocked_names and not imported:
+            names = ", ".join(blocked_names[:5])
+            return {
+                "ok": False,
+                "error": f"Instale o FFmpeg para importar este formato: {names}",
+                "imported": [],
+                "clips": self._public_clips(snap["clips"]),
+                "speakers": snap["speakers"],
+            }
+        result = {
             "ok": True,
             "imported": copy.deepcopy(imported),
             "clips": self._public_clips(snap["clips"]),
             "speakers": snap["speakers"],
         }
+        if blocked_names:
+            names = ", ".join(blocked_names[:5])
+            result["warnings"] = [f"Instale o FFmpeg para importar este formato: {names}"]
+        return result
 
     def import_folder_or_separados(
         self,
@@ -1389,7 +1521,7 @@ class SoundboardAPI:
 def main():
     import webview
 
-    api = SoundboardAPI(data_dir="data", start_background_services=True)
+    api = SoundboardAPI(start_background_services=True)
     ui_path = Path(__file__).parent.resolve() / "ui" / "index.html"
 
     window = webview.create_window(

@@ -5,13 +5,25 @@ import time
 import socket
 import subprocess
 import tempfile
+import urllib.parse
 import urllib.request
 from pathlib import Path
 import numpy as np
 
 _OLLAMA_CACHE = {"checked_at": 0.0, "available": False}
 
-VIDEOS_MODELS_DIR = Path(r"C:\Users\Usuario\Videos\.modelos_voz")
+# Runtime overrides injected from AppConfig (see configure_runtime).
+_RUNTIME = {"ffmpeg": "ffmpeg", "ollama_url": "http://127.0.0.1:11434", "ollama_model": "qwen2.5:1.5b"}
+
+
+def configure_runtime(ffmpeg_path: str = None, ollama_url: str = None, ollama_model: str = None) -> None:
+    """Overrides only the runtime values that were provided."""
+    if ffmpeg_path:
+        _RUNTIME["ffmpeg"] = str(ffmpeg_path)
+    if ollama_url:
+        _RUNTIME["ollama_url"] = str(ollama_url).rstrip("/")
+    if ollama_model:
+        _RUNTIME["ollama_model"] = str(ollama_model)
 
 CATEGORY_STYLE = {
     "Rage": {"emoji": "🔥", "color": "#ef4444"},
@@ -190,13 +202,27 @@ def _extract_punchy_title(transcript: str, mood: str, speaker_name: str = "") ->
     return title[:30]
 
 
+def _ollama_host_port() -> tuple[str, int]:
+    """Host/port of the configured Ollama URL, falling back to 127.0.0.1:11434."""
+    host = ""
+    port = 11434
+    try:
+        parts = urllib.parse.urlsplit(_RUNTIME["ollama_url"])
+        host = parts.hostname or ""
+        port = int(parts.port or 11434)
+    except (ValueError, TypeError):
+        host, port = "", 11434
+    return (host or "127.0.0.1"), port
+
+
 def _query_local_ollama(prompt: str, timeout: float = 2.0) -> dict | None:
-    """Optional zero-dependency call to local Ollama if running on port 11434."""
+    """Optional zero-dependency call to a local Ollama endpoint."""
+    host, port = _ollama_host_port()
     now = time.time()
     if now - _OLLAMA_CACHE["checked_at"] > 60.0:
         _OLLAMA_CACHE["checked_at"] = now
         try:
-            with socket.create_connection(("127.0.0.1", 11434), timeout=0.12):
+            with socket.create_connection((host, port), timeout=0.12):
                 _OLLAMA_CACHE["available"] = True
         except OSError:
             _OLLAMA_CACHE["available"] = False
@@ -206,13 +232,13 @@ def _query_local_ollama(prompt: str, timeout: float = 2.0) -> dict | None:
 
     try:
         payload = json.dumps({
-            "model": "qwen2.5:1.5b",
+            "model": _RUNTIME["ollama_model"],
             "prompt": prompt,
             "stream": False,
             "format": "json",
         }).encode("utf-8")
         req = urllib.request.Request(
-            "http://127.0.0.1:11434/api/generate",
+            f"{_RUNTIME['ollama_url']}/api/generate",
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -314,7 +340,7 @@ def load_audio_mono_16k(file_path: str) -> tuple[np.ndarray, float]:
         fd, tmp_wav = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
         subprocess.run(
-            ["ffmpeg", "-y", "-i", file_path, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", tmp_wav, "-loglevel", "error"],
+            [_RUNTIME["ffmpeg"], "-y", "-i", file_path, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", tmp_wav, "-loglevel", "error"],
             check=True,
         )
         data, sr = sf.read(tmp_wav, dtype="float32")
@@ -377,11 +403,16 @@ def merge_diarized_segments(
 
 
 class AIAnalyzer:
-    def __init__(self, models_dir: str = None):
-        if models_dir and Path(models_dir).exists():
-            self.models_dir = Path(models_dir)
-        elif VIDEOS_MODELS_DIR.exists():
-            self.models_dir = VIDEOS_MODELS_DIR
+    def __init__(self, models_dir: str = None, ffmpeg_path: str = None, ollama_url: str = None, ollama_model: str = None):
+        configure_runtime(
+            ffmpeg_path=ffmpeg_path,
+            ollama_url=ollama_url,
+            ollama_model=ollama_model,
+        )
+        if models_dir:
+            # An explicit folder is authoritative even when it does not exist yet:
+            # reporting the missing folder is the doctor's job, not ours.
+            self.models_dir = Path(models_dir).resolve()
         else:
             self.models_dir = Path("data/models").resolve()
             self.models_dir.mkdir(parents=True, exist_ok=True)

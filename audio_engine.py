@@ -244,7 +244,8 @@ class AudioEngine:
     DUCK_AMOUNT_RANGE = (-24.0, 0.0)
     DUCK_THRESHOLD_RANGE = (-60.0, -10.0)
 
-    def __init__(self, replay_seconds: float = 15.0, start_loopback: bool = True):
+    def __init__(self, replay_seconds: float = 15.0, start_loopback: bool = True, ffmpeg_path: str = "ffmpeg"):
+        self.ffmpeg_path = ffmpeg_path or "ffmpeg"
         self.replay_buffer = ReplayRingBuffer(max_seconds=replay_seconds, sr=self.TARGET_SR, channels=2)
         self._cache: OrderedDict[str, dict] = OrderedDict()
         self._cache_bytes = 0
@@ -372,7 +373,7 @@ class AudioEngine:
             os.close(fd)
             subprocess.run(
                 [
-                    "ffmpeg", "-y", "-i", file_path, "-vn",
+                    self.ffmpeg_path, "-y", "-i", file_path, "-vn",
                     "-ac", "2", "-ar", str(self.TARGET_SR),
                     "-c:a", "pcm_s16le", tmp_wav, "-loglevel", "error",
                 ],
