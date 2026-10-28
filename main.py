@@ -623,13 +623,46 @@ class SoundboardAPI:
 
     def toggle_mini_overlay(self) -> dict:
         self._is_mini_overlay = not self._is_mini_overlay
-        if self._window is not None:
+        if self._window is not None and sys.platform == "win32":
             try:
-                self._window.on_top = self._is_mini_overlay
-                if self._is_mini_overlay:
-                    self._window.resize(410, 580)
-                else:
-                    self._window.resize(1280, 820)
+                import ctypes
+                from ctypes import wintypes
+
+                user32 = ctypes.windll.user32
+                user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+                user32.FindWindowW.restype = wintypes.HWND
+                user32.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
+                user32.ShowWindowAsync.restype = wintypes.BOOL
+                user32.SetWindowPos.argtypes = [
+                    wintypes.HWND,
+                    wintypes.HWND,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_uint,
+                ]
+                user32.SetWindowPos.restype = wintypes.BOOL
+
+                hwnd = user32.FindWindowW(None, "Soundboard AI — VB-Audio Cable Studio")
+                if hwnd:
+                    # Restore if maximized (SW_RESTORE = 9) asynchronously on the UI thread
+                    user32.ShowWindowAsync(hwnd, 9)
+                    dpi = user32.GetDpiForWindow(hwnd) if hasattr(user32, "GetDpiForWindow") else 96
+                    scale = (dpi / 96.0) if dpi and dpi > 0 else 1.0
+                    target_w = int((420 if self._is_mini_overlay else 1280) * scale)
+                    target_h = int((600 if self._is_mini_overlay else 820) * scale)
+                    hwnd_insert_after = wintypes.HWND(-1 if self._is_mini_overlay else -2)
+                    # SWP_NOMOVE (0x0002) | SWP_NOACTIVATE (0x0010) | SWP_ASYNCWINDOWPOS (0x4000)
+                    user32.SetWindowPos(
+                        hwnd,
+                        hwnd_insert_after,
+                        0,
+                        0,
+                        target_w,
+                        target_h,
+                        0x0002 | 0x0010 | 0x4000,
+                    )
             except Exception:
                 pass
         self._notify_ui("overlay_toggled", {"is_mini_overlay": self._is_mini_overlay})

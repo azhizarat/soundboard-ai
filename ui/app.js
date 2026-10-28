@@ -26,48 +26,6 @@ function formatPlayTime(sec) {
   return `${mins}:${rem}`;
 }
 
-
-const ICONS = {"play":"<path d=\"m8 5 11 7-11 7Z\"/>","stop":"<rect x=\"5\" y=\"5\" width=\"14\" height=\"14\" rx=\"2\"/>","headphones":"<path d=\"M3 14v-3a9 9 0 0 1 18 0v3\"/><rect x=\"3\" y=\"12\" width=\"4\" height=\"8\" rx=\"2\"/><rect x=\"17\" y=\"12\" width=\"4\" height=\"8\" rx=\"2\"/>","sliders":"<path d=\"M4 7h9m4 0h3M4 17h3m4 0h9\"/><circle cx=\"15\" cy=\"7\" r=\"2\"/><circle cx=\"9\" cy=\"17\" r=\"2\"/>","search":"<circle cx=\"10.5\" cy=\"10.5\" r=\"6.5\"/><path d=\"m16 16 5 5\"/>","plus":"<path d=\"M12 5v14M5 12h14\"/>","close":"<path d=\"m6 6 12 12M6 18 18 6\"/>","grid":"<rect x=\"3\" y=\"3\" width=\"7\" height=\"7\" rx=\"1\"/><rect x=\"14\" y=\"3\" width=\"7\" height=\"7\" rx=\"1\"/><rect x=\"3\" y=\"14\" width=\"7\" height=\"7\" rx=\"1\"/><rect x=\"14\" y=\"14\" width=\"7\" height=\"7\" rx=\"1\"/>","star":"<path d=\"m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z\"/>","edit":"<path d=\"m14 5 5 5M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15Z\"/>","trash":"<path d=\"M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7\"/>","music":"<path d=\"M9 18V5l12-2v13M9 9l12-2\"/><ellipse cx=\"6\" cy=\"18\" rx=\"3\" ry=\"3\"/><ellipse cx=\"18\" cy=\"16\" rx=\"3\" ry=\"3\"/>","mic":"<rect x=\"9\" y=\"2\" width=\"6\" height=\"13\" rx=\"3\"/><path d=\"M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8\"/>","users":"<circle cx=\"9\" cy=\"8\" r=\"3\"/><path d=\"M3 21v-3a6 6 0 0 1 12 0v3M17 5a3 3 0 0 1 0 6m1 4a5 5 0 0 1 3 5\"/>","folder":"<path d=\"M3 7V4h6l2 3h10v13H3Z\"/>","capture":"<path d=\"M4 8V4h4m8 0h4v4M4 16v4h4m8 0h4v-4\"/><circle cx=\"12\" cy=\"12\" r=\"4\"/>","window":"<rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"2\"/><path d=\"M13 12h8v8h-8Z\"/>","spark":"<path d=\"m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z\"/>","chevron":"<path d=\"m6 9 6 6 6-6\"/>","volume":"<path d=\"M4 9h4l5-5v16l-5-5H4ZM17 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14\"/>","tag":"<path d=\"M3 3h8l10 10-8 8L3 11Z\"/><circle cx=\"7.5\" cy=\"7.5\" r=\"1\"/>"};
-function icon(name) {
-  return '<svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[name] || ICONS.grid) + '</svg>';
-}
-function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
-}
-function safeColor(value) { return /^#[0-9a-f]{6}$/i.test(value || "") ? value : "#8fb5ff"; }
-function restoreFocus(key) {
-  if (!key) return;
-  const target = [...document.querySelectorAll("[data-focus-key]")].find(el => el.dataset.focusKey === key);
-  (target || document.getElementById("searchInput"))?.focus({preventScroll:true});
-}
-function rememberFocus() { return document.activeElement?.dataset.focusKey; }
-let lastDialogFocus = null;
-function openModal(id, field) {
-  const dialog = document.getElementById(id);
-  if (dialog.classList.contains("hidden")) {
-    lastDialogFocus = { element:document.activeElement, key:rememberFocus() };
-  }
-  dialog.classList.remove("hidden");
-  document.getElementById("app").inert = true;
-  document.getElementById(field)?.focus();
-}
-function closeModal(id) {
-  document.getElementById(id).classList.add("hidden");
-  document.getElementById("app").inert = false;
-  if (lastDialogFocus?.key) restoreFocus(lastDialogFocus.key);
-  else if (lastDialogFocus?.element?.isConnected) lastDialogFocus.element.focus();
-  else document.getElementById("searchInput").focus();
-}
-const previewApi = new Proxy({}, {
-  get: () => async () => {
-    showToast("Esta prévia não altera o catálogo. Abra o aplicativo local para usar áudio, IA e salvar alterações.");
-    return {ok:false};
-  }
-});
-let initialized = false;
-let filterSignature = "";
-let gridLimit = 48;
-
 function formatRelativeTime(createdAtSec) {
   if (!createdAtSec) return "";
   const nowSec = Date.now() / 1000;
@@ -101,7 +59,7 @@ function showToast(message, color = "#3b82f6") {
 }
 
 function api() {
-  return window.pywebview?.api || (window.soundboardPreview ? previewApi : null);
+  return window.pywebview && window.pywebview.api ? window.pywebview.api : null;
 }
 
 async function initApp() {
@@ -109,21 +67,7 @@ async function initApp() {
     setTimeout(initApp, 80);
     return;
   }
-  if (initialized) return;
-  initialized = true;
-  let initial;
-  try {
-    initial = window.pywebview?.api ? await window.pywebview.api.get_initial_state() : window.soundboardPreview;
-  } catch (error) {
-    initialized = false;
-    const notice = document.getElementById("connectionNotice");
-    notice.textContent = "Não foi possível carregar o aplicativo. Feche e abra o Soundboard novamente.";
-    notice.classList.remove("hidden");
-    return;
-  }
-  const notice = document.getElementById("connectionNotice");
-  notice.classList.toggle("hidden", !window.soundboardPreview);
-  if (window.soundboardPreview) notice.textContent = "Prévia do catálogo local · busca, filtros e editor disponíveis. Reprodução, IA e gravação de alterações exigem o aplicativo Python.";
+  const initial = await api().get_initial_state();
   state.settings = initial.settings || {};
   state.categories = initial.categories || [];
   state.speakers = initial.speakers || {};
@@ -136,17 +80,6 @@ async function initApp() {
   renderSidebar();
   renderGrid();
   bindEvents();
-  if (window.soundboardPreview) {
-    ["btnReplayClip","btnStopAll","btnImportFiles","btnImportVinheta","btnImportFolder",
-     "btnSaveClip","btnPreviewMonitor","btnReanalyzeAI","btnSplitSpeakers","btnEnrollVoice",
-     "btnDeleteClip","btnDeleteSpeakerModal","btnSaveSpeaker"].forEach(id => {
-      const el = document.getElementById(id);
-      el.disabled = true;
-      el.title = "Disponível no aplicativo local";
-    });
-    document.querySelectorAll("#routingPanel input,#routingPanel select,#replaySecondsInput").forEach(el => el.disabled = true);
-    document.getElementById("btnMiniOverlay").onclick = () => document.body.classList.toggle("mini-overlay");
-  }
 }
 
 function renderDevices() {
@@ -161,29 +94,22 @@ function renderDevices() {
   outputs.forEach((d) => {
     const opt1 = document.createElement("option");
     opt1.value = d.id;
-    opt1.textContent = d.name;
+    opt1.textContent = `${d.is_cable ? "🔌 " : ""}${d.name}`;
     if (state.settings.cable_device_id === d.id) opt1.selected = true;
     cableSel.appendChild(opt1);
 
     const opt2 = document.createElement("option");
     opt2.value = d.id;
-    opt2.textContent = d.name;
+    opt2.textContent = `${d.is_default ? "🎧 " : ""}${d.name}`;
     if (state.settings.monitor_device_id === d.id) opt2.selected = true;
     monSel.appendChild(opt2);
   });
 
-  if (!outputs.length) {
-    [cableSel, monSel].forEach(select => {
-      const option = document.createElement("option");
-      option.textContent = window.soundboardPreview ? "Dispositivo do aplicativo local" : "Nenhuma saída disponível";
-      select.appendChild(option);
-    });
-  }
   if (state.devices.detected_cable_id !== null && state.devices.detected_cable_id !== undefined) {
-    badge.textContent = "VB-Cable detectado";
+    badge.textContent = "VB-Cable Ativo";
     badge.className = "status-pill status-ok";
   } else {
-    badge.textContent = window.soundboardPreview ? "Disponível no aplicativo" : "VB-Cable não detectado";
+    badge.textContent = "VB-Cable Não Detectado (Usando Saída Selecionada)";
     badge.className = "status-pill status-warn";
   }
 
@@ -222,7 +148,7 @@ function renderQuickImportBar() {
   state.discoveredSeparados.forEach((item) => {
     const btn = document.createElement("button");
     btn.className = "quick-chip-btn";
-    btn.textContent = `Importar ${item.label}`;
+    btn.textContent = `📥 Importar ${item.label}`;
     btn.onclick = async () => {
       showToast(`Importando e classificando ${item.label} com IA...`, "#8b5cf6");
       const res = await api().import_folder_or_separados(item.path);
@@ -238,75 +164,123 @@ function renderQuickImportBar() {
   });
 }
 
-
 function renderSidebar() {
-  const focus = rememberFocus();
   const catList = document.getElementById("categoryList");
-  catList.replaceChildren();
+  catList.innerHTML = "";
+
   const allItems = [
-    {id:"Todos",name:"Todos os áudios",count:state.clips.length},
-    {id:"Favoritos",name:"Favoritos",count:state.clips.filter(c=>c.favorite).length},
-    ...state.categories.map(cat=>({...cat,count:state.clips.filter(c=>c.category===cat.id).length}))
+    { id: "Todos", name: "Todos os Áudios", emoji: "🎛️", count: state.clips.length },
+    { id: "Favoritos", name: "Favoritos", emoji: "⭐", count: state.clips.filter((c) => c.favorite).length },
+    ...state.categories.map((cat) => ({
+      ...cat,
+      count: state.clips.filter((c) => c.category === cat.id).length,
+    })),
   ];
-  const names = {Rage:"Rage / surto",Risada:"Risadas",Meme:"Memes / pérolas",Call:"Falas / call",Vinhetas:"Vinhetas",Efeito:"Efeitos sonoros",Clássico:"Clássicos"};
-  allItems.forEach(item => {
-    const active = item.id==="Favoritos" ? state.favoritesOnly : !state.favoritesOnly && item.id===state.activeCategory;
-    const row = document.createElement("div");
-    row.className = "nav-item" + (active?" active":"");
-    const button = document.createElement("button");
-    button.className = "nav-choice";
-    button.dataset.focusKey = "category:"+item.id;
-    button.setAttribute("aria-pressed",String(active));
-    const name = names[item.id] || item.name || item.id;
-    const glyph = item.id==="Favoritos"?"star":item.id==="Todos"?"grid":item.id==="Vinhetas"?"music":item.id==="Call"?"mic":"tag";
-    button.innerHTML = '<span class="nav-item-left">'+icon(glyph)+'<span>'+escapeHtml(name)+'</span></span><span class="count-pill">'+item.count+'</span>';
-    button.onclick = () => {
-      state.favoritesOnly = item.id==="Favoritos";
-      state.activeCategory = state.favoritesOnly ? "Todos" : item.id;
-      renderSidebar();renderGrid();
+
+  allItems.forEach((item) => {
+    const div = document.createElement("div");
+    const isActive =
+      (item.id === "Favoritos" && state.favoritesOnly) ||
+      (!state.favoritesOnly && item.id === state.activeCategory);
+    div.className = `nav-item ${isActive ? "active" : ""}`;
+    div.innerHTML = `
+      <div class="nav-item-left">
+        <span>${item.emoji}</span>
+        <span>${item.name}</span>
+      </div>
+      <span class="count-pill">${item.count}</span>
+    `;
+    div.onclick = () => {
+      if (item.id === "Favoritos") {
+        state.favoritesOnly = true;
+        state.activeCategory = "Todos";
+      } else {
+        state.favoritesOnly = false;
+        state.activeCategory = item.id;
+      }
+      renderSidebar();
+      renderGrid();
     };
-    row.append(button);catList.append(row);
+    catList.appendChild(div);
   });
-  const speakerList = document.getElementById("speakerList");
-  speakerList.replaceChildren();
-  const idsOf = c=>c.speaker_ids?.length ? c.speaker_ids : c.speaker_id ? [c.speaker_id] : [];
-  const speakers = [
-    {id:"Todos",name:"Todas as vozes",count:state.clips.length,system:true},
-    {id:"__none__",name:"Sem pessoa",count:state.clips.filter(c=>!idsOf(c).length).length,system:true},
-    ...Object.values(state.speakers).map(s=>({...s,count:state.clips.filter(c=>idsOf(c).includes(s.id)).length}))
-  ];
-  speakers.forEach(spk=>{
-    const row = document.createElement("div");
-    row.className = "nav-item"+(state.activeSpeaker===spk.id?" active":"");
-    const button = document.createElement("button");
-    button.className = "nav-choice";button.dataset.focusKey = "speaker:"+spk.id;
-    button.setAttribute("aria-pressed",String(state.activeSpeaker===spk.id));
-    button.innerHTML = '<span class="nav-item-left">'+(spk.system?icon(spk.id==="Todos"?"users":"music"):'<span class="speaker-dot" style="--speaker-color:'+safeColor(spk.color)+'"></span>')+'<span>'+escapeHtml(spk.name)+'</span></span><span class="count-pill">'+spk.count+'</span>';
-    button.onclick = ()=>{state.activeSpeaker=spk.id;renderSidebar();renderGrid();};
-    row.append(button);
-    if (!spk.system) {
-      const actions = document.createElement("div");actions.className="nav-item-right";
-      const edit=document.createElement("button");edit.className="btn-rename-spk";
-      edit.innerHTML=icon("edit");edit.title="Editar "+spk.name;edit.setAttribute("aria-label",edit.title);
-      edit.dataset.focusKey="edit-speaker:"+spk.id;edit.onclick=()=>openSpeakerModal(spk);
-      const remove=document.createElement("button");remove.className="btn-delete-spk";
-      remove.innerHTML=icon("trash");remove.title="Excluir "+spk.name;remove.setAttribute("aria-label",remove.title);
-      remove.disabled=Boolean(window.soundboardPreview);
-      remove.onclick=async()=>{
-        if (!window.confirm('Excluir "'+spk.name+'"? Os áudios serão mantidos.')) return;
-        const res=await api().delete_speaker(spk.id);
-        if(res?.ok){
-          state.speakers=res.speakers||{};state.clips=res.clips||state.clips;
-          if(state.activeSpeaker===spk.id)state.activeSpeaker="Todos";
-          renderSidebar();renderGrid();document.getElementById("searchInput").focus();
-          showToast("Pessoa removida. Os áudios foram mantidos.");
+
+  // Speakers
+  const spkList = document.getElementById("speakerList");
+  spkList.innerHTML = "";
+
+  const allSpkDiv = document.createElement("div");
+  allSpkDiv.className = `nav-item ${state.activeSpeaker === "Todos" ? "active" : ""}`;
+  allSpkDiv.innerHTML = `
+    <div class="nav-item-left"><span>👥</span><span>Todos</span></div>
+    <span class="count-pill">${state.clips.length}</span>
+  `;
+  allSpkDiv.onclick = () => {
+    state.activeSpeaker = "Todos";
+    renderSidebar();
+    renderGrid();
+  };
+  spkList.appendChild(allSpkDiv);
+
+  const noSpkCount = state.clips.filter((c) => {
+    const spks = c.speaker_ids && c.speaker_ids.length ? c.speaker_ids : c.speaker_id ? [c.speaker_id] : [];
+    return spks.length === 0;
+  }).length;
+  const noSpkDiv = document.createElement("div");
+  noSpkDiv.className = `nav-item ${state.activeSpeaker === "__none__" ? "active" : ""}`;
+  noSpkDiv.innerHTML = `
+    <div class="nav-item-left"><span>🎵</span><span>Sem Pessoa / Vinhetas</span></div>
+    <span class="count-pill">${noSpkCount}</span>
+  `;
+  noSpkDiv.onclick = () => {
+    state.activeSpeaker = "__none__";
+    renderSidebar();
+    renderGrid();
+  };
+  spkList.appendChild(noSpkDiv);
+
+  Object.values(state.speakers).forEach((spk) => {
+    const count = state.clips.filter((c) => {
+      const spks = c.speaker_ids && c.speaker_ids.length ? c.speaker_ids : c.speaker_id ? [c.speaker_id] : [];
+      return spks.includes(spk.id);
+    }).length;
+    const div = document.createElement("div");
+    div.className = `nav-item ${state.activeSpeaker === spk.id ? "active" : ""}`;
+    div.innerHTML = `
+      <div class="nav-item-left">
+        <span style="color:${spk.color || "#3b82f6"}">●</span>
+        <span>${spk.name}</span>
+      </div>
+      <div class="nav-item-right">
+        <span class="count-pill">${count}</span>
+        <button class="btn-rename-spk" title="Renomear este amigo">✏️</button>
+        <button class="btn-delete-spk" title="Excluir esta pessoa (mantém os áudios sem pessoa)">🗑️</button>
+      </div>
+    `;
+    div.onclick = async (e) => {
+      if (e.target.classList.contains("btn-rename-spk")) {
+        e.stopPropagation();
+        openSpeakerModal(spk);
+        return;
+      }
+      if (e.target.classList.contains("btn-delete-spk")) {
+        e.stopPropagation();
+        const res = await api().delete_speaker(spk.id);
+        if (res && res.ok) {
+          state.speakers = res.speakers || {};
+          state.clips = res.clips || state.clips;
+          if (state.activeSpeaker === spk.id) state.activeSpeaker = "Todos";
+          renderSidebar();
+          renderGrid();
+          showToast(`🗑️ "${spk.name}" removido da lista de pessoas.`);
         }
-      };
-      actions.append(edit,remove);row.append(actions);
-    }
-    speakerList.append(row);
+        return;
+      }
+      state.activeSpeaker = spk.id;
+      renderSidebar();
+      renderGrid();
+    };
+    spkList.appendChild(div);
   });
-  restoreFocus(focus);
 }
 
 function getFilteredClips() {
@@ -353,87 +327,119 @@ function getFilteredClips() {
   return filtered;
 }
 
-
-function resetFilters() {
-  state.activeCategory="Todos";state.activeSpeaker="Todos";state.favoritesOnly=false;state.searchQuery="";
-  document.getElementById("searchInput").value="";
-  document.getElementById("btnClearSearch").classList.add("hidden");
-  renderSidebar();renderGrid();document.getElementById("searchInput").focus();
-}
 function renderGrid() {
-  const focus=rememberFocus();
-  const grid=document.getElementById("soundGrid");
-  const filtered=getFilteredClips();
-  const signature=JSON.stringify([state.activeCategory,state.activeSpeaker,state.favoritesOnly,state.searchQuery,state.sortBy]);
-  if(signature!==filterSignature){filterSignature=signature;gridLimit=48;}
-  const hasFilter=state.activeCategory!=="Todos"||state.activeSpeaker!=="Todos"||state.favoritesOnly||Boolean(state.searchQuery);
-  const title=state.favoritesOnly?"Favoritos":state.activeCategory==="Todos"?"Todos os áudios":(state.categories.find(c=>c.id===state.activeCategory)?.name||state.activeCategory);
-  document.getElementById("libraryTitle").textContent=title;
-  document.getElementById("libraryDescription").textContent=state.activeSpeaker==="Todos"?
-    "Dispare na call. Ouça no fone. Guarde o que vale repetir.":
-    "Filtrando por "+(state.activeSpeaker==="__none__"?"áudios sem pessoa":state.speakers[state.activeSpeaker]?.name||"voz selecionada");
-  document.getElementById("btnResetFilters").classList.toggle("hidden",!hasFilter);
-  document.getElementById("clipCountBadge").textContent=filtered.length+" "+(filtered.length===1?"áudio":"áudios")+(hasFilter?" de "+state.clips.length:" na biblioteca");
-  document.getElementById("loadMoreRow").classList.toggle("hidden",filtered.length<=gridLimit);
-  const playing=Object.keys(state.playingClips);
-  document.getElementById("playStatusDot").classList.toggle("active",playing.length>0);
-  updateNowPlayingBar(state.activePlayback);
+  const grid = document.getElementById("soundGrid");
+  const filtered = getFilteredClips();
+  document.getElementById("clipCountBadge").textContent = `${filtered.length} áudios`;
   grid.classList.toggle("density-compact", state.gridDensity === "compact");
   grid.classList.toggle("density-large", state.gridDensity === "large");
-  grid.replaceChildren();
-  if(!filtered.length){
-    const empty=document.createElement("div");empty.className="empty-state";
-    empty.innerHTML=icon(hasFilter?"search":"music")+'<h3>'+(hasFilter?"Nenhum áudio encontrado":"Seu próximo momento começa aqui")+'</h3><p>'+(hasFilter?"Tente outra palavra, categoria ou pessoa. A busca também encontra trechos da transcrição.":"Importe áudios, adicione uma vinheta ou use Clipar call para guardar uma fala recente.")+'</p>';
-    const action=document.createElement("button");action.className="btn btn-secondary";
-    action.textContent=hasFilter?"Limpar filtros":"Importar áudios";
-    action.onclick=hasFilter?resetFilters:()=>document.getElementById("btnImportFiles").click();
-    action.disabled=!hasFilter&&Boolean(window.soundboardPreview);
-    empty.append(action);grid.append(empty);restoreFocus(focus);return;
+  updateNowPlayingBar(state.activePlayback);
+  grid.innerHTML = "";
+
+  if (filtered.length === 0) {
+    grid.innerHTML = `
+      <div class="empty-state">
+        <h3>Nenhum áudio nesta visualização</h3>
+        <p>Use os botões acima para importar uma pasta <b>separados</b>, adicionar áudios (.mp3/.wav) ou clicar em <b>⚡ Clipar Call (15s)</b>.</p>
+      </div>
+    `;
+    return;
   }
-  filtered.slice(0,gridLimit).forEach(clip=>{
-    const ids=clip.speaker_ids?.length?clip.speaker_ids:clip.speaker_id?[clip.speaker_id]:[];
-    const voices=ids.map(id=>state.speakers[id]?.name).filter(Boolean).join(", ")||"Sem pessoa";
-    const effDur=Math.max(.1,(clip.trim_end&&clip.trim_end>clip.trim_start?clip.trim_end:clip.duration||0)-(clip.trim_start||0)).toFixed(1);
-    const isPlaying=Boolean(state.playingClips[clip.id]);
-    const card=document.createElement("article");
-    card.className="sound-card"+(isPlaying?" playing":"");
-    card.style.setProperty("--card-color",safeColor(clip.color));
-    card.innerHTML=
-      '<div class="card-top"><span class="card-category"><span class="card-color-dot"></span><span class="od-truncate">'+escapeHtml(clip.category||"Áudio")+'</span></span>'+
-      '<button class="card-icon-btn btn-fav '+(clip.favorite?"fav-active":"")+'" aria-label="'+(clip.favorite?"Remover dos favoritos":"Favoritar")+'" aria-pressed="'+Boolean(clip.favorite)+'">'+icon("star")+'</button></div>'+
-      '<button class="card-play" aria-label="Reproduzir '+escapeHtml(clip.title)+' na call">'+
-      '<span class="card-title-row"><span class="card-emoji" aria-hidden="true">'+escapeHtml(clip.emoji||"🔊")+'</span><span class="card-title od-clamp-2 od-lines-2">'+escapeHtml(clip.title)+'</span><span class="play-glyph">'+icon("play")+'</span></span>'+
-      '<span class="card-transcript od-truncate">'+escapeHtml(clip.transcript||clip.acoustic_mood||"Áudio local")+'</span>'+
-      '<span class="card-footer"><span class="spk-badge od-clamp-2">'+escapeHtml(voices)+'</span><span class="card-duration">'+effDur+'s</span></span></button>'+
-      '<div class="card-bottom"><span class="playing-label"><span class="eq-bars'+(state.activePlayback?.clip_id===clip.id&&state.activePlayback?.paused?" paused":"")+'" aria-hidden="true"><span></span><span></span><span></span><span></span></span>'+(state.activePlayback?.clip_id===clip.id&&state.activePlayback?.paused?"Pausado":"Tocando")+'</span><span class="card-time">'+(clip.hotkey?'<kbd class="hotkey-badge">'+escapeHtml(clip.hotkey)+'</kbd>':isClipNew(clip)?'<span class="new-badge">Novo</span>':'<span class="time-badge">'+escapeHtml(formatRelativeTime(clip.created_at))+'</span>')+'</span>'+
-      '<div class="card-actions"><button class="card-icon-btn btn-preview" aria-label="Ouvir '+escapeHtml(clip.title)+' somente no fone" title="Ouvir só no fone">'+icon("headphones")+'<span class="preview-label">Fone</span></button><button class="card-icon-btn btn-edit" aria-label="Editar '+escapeHtml(clip.title)+'" title="Editar áudio e ver transcrição completa">'+icon("edit")+'</button></div></div><div class="play-progress" aria-hidden="true"></div>';
-    const play=card.querySelector(".card-play");
-    play.dataset.focusKey="play:"+clip.id;
-    play.onclick=()=>api().play_clip(clip.id,false);
-    card.querySelector(".btn-preview").onclick=()=>api().play_clip(clip.id,true);
-    const edit=card.querySelector(".btn-edit");
-    edit.dataset.focusKey="edit:"+clip.id;edit.onclick=()=>openEditModal(clip);
-    const fav=card.querySelector(".btn-fav");
-    fav.dataset.focusKey="favorite:"+clip.id;
-    fav.onclick=async()=>{
-      const res=await api().toggle_favorite(clip.id);
-      if(res?.ok){const idx=state.clips.findIndex(x=>x.id===clip.id);if(idx>=0)state.clips[idx]=res.clip;renderSidebar();renderGrid();restoreFocus(fav.dataset.focusKey);}
+
+  filtered.forEach((clip) => {
+    const clipSpkIds =
+      clip.speaker_ids && clip.speaker_ids.length
+        ? clip.speaker_ids
+        : clip.speaker_id
+        ? [clip.speaker_id]
+        : [];
+    const spkBadgesHtml = clipSpkIds
+      .map((sid) => state.speakers[sid])
+      .filter(Boolean)
+      .map(
+        (spk) =>
+          `<span class="spk-badge" style="background:${spk.color}33;color:${spk.color};border:1px solid ${spk.color}66">${spk.name}</span>`
+      )
+      .join("");
+
+    const card = document.createElement("div");
+    const isPlaying = Boolean(state.playingClips[clip.id]);
+    const isNew = isClipNew(clip);
+    card.className = `sound-card ${isPlaying ? "playing" : ""} ${isNew ? "is-new-card" : ""}`;
+    card.style.setProperty("--card-color", clip.color || "#3b82f6");
+
+    const effDur = Math.max(
+      0.1,
+      (clip.trim_end && clip.trim_end > clip.trim_start ? clip.trim_end : clip.duration || 0) -
+        (clip.trim_start || 0)
+    ).toFixed(1);
+    const timeStr = formatRelativeTime(clip.created_at);
+
+    card.innerHTML = `
+      <div class="card-top">
+        <div class="badge-row">
+          <span class="card-emoji">${clip.emoji || "🔊"}</span>
+          ${isPlaying ? `<span class="eq-bars ${state.activePlayback?.clip_id === clip.id && state.activePlayback?.paused ? "paused" : ""}"><span></span><span></span><span></span><span></span></span>` : isNew ? `<span class="new-badge">✨ NOVO!</span>` : ""}
+        </div>
+        <div class="card-actions">
+          <button class="card-icon-btn btn-preview" title="Ouvir somente no meu fone (sem mandar pro VB-Cable)">🎧</button>
+          <button class="card-icon-btn btn-fav ${clip.favorite ? "fav-active" : ""}" title="Favoritar">★</button>
+          <button class="card-icon-btn btn-edit" title="Editar nome, corte, atalho ou IA">⚙️</button>
+        </div>
+      </div>
+      <div class="card-title" title="${clip.title}">${clip.title}</div>
+      <div class="card-transcript" title="${clip.transcript || ""}">${
+        clip.transcript ? `"${clip.transcript}"` : clip.category
+      }</div>
+      <div class="card-footer">
+        <div class="badge-row">
+          ${spkBadgesHtml}
+          <span class="mood-badge">${clip.acoustic_mood || "Normal"}</span>
+        </div>
+        <div class="badge-row">
+          ${timeStr ? `<span class="time-badge" title="Horário em que o áudio subiu">${timeStr}</span>` : ""}
+          ${clip.hotkey ? `<span class="hotkey-badge">${clip.hotkey}</span>` : ""}
+          <span>${effDur}s</span>
+        </div>
+      </div>
+      <div class="play-progress" id="prog_${clip.id}"></div>
+    `;
+
+    card.onclick = (e) => {
+      if (e.target.closest(".btn-preview")) {
+        e.stopPropagation();
+        api().play_clip(clip.id, true);
+        return;
+      }
+      if (e.target.closest(".btn-fav")) {
+        e.stopPropagation();
+        api()
+          .toggle_favorite(clip.id)
+          .then((res) => {
+            if (res && res.ok) {
+              const idx = state.clips.findIndex((x) => x.id === clip.id);
+              if (idx >= 0) state.clips[idx] = res.clip;
+              renderSidebar();
+              renderGrid();
+            }
+          });
+        return;
+      }
+      if (e.target.closest(".btn-edit")) {
+        e.stopPropagation();
+        openEditModal(clip);
+        return;
+      }
+      api().play_clip(clip.id, false);
     };
-    card.oncontextmenu=e=>{e.preventDefault();openEditModal(clip);};
-    const prog=card.querySelector(".play-progress");prog.id="prog_"+clip.id;
-    if(isPlaying){
-      const playback=state.playingClips[clip.id];
-      const elapsed=Math.max(0,(Date.now()-playback.startedAt)/1000);
-      const duration=Number(playback.duration)||Number(effDur);
-      prog.style.width=Math.min(100,elapsed/duration*100)+"%";
-      requestAnimationFrame(()=>{
-        prog.style.transition="width "+Math.max(0,duration-elapsed)+"s linear";
-        requestAnimationFrame(()=>prog.style.width="100%");
-      });
-    }
-    grid.append(card);
+
+    card.oncontextmenu = (e) => {
+      e.preventDefault();
+      openEditModal(clip);
+    };
+
+    grid.appendChild(card);
   });
-  restoreFocus(focus);
 }
 
 function openEditModal(clip) {
@@ -490,16 +496,19 @@ function openEditModal(clip) {
   state.waveformPeaks = [];
   drawWaveformCanvas();
   if (api()?.get_clip_waveform) {
-    api().get_clip_waveform(clip.id, 160).then((res) => {
-      if (res && res.ok && document.getElementById("editClipId").value === clip.id) {
-        state.waveformPeaks = res.peaks || [];
-        if (res.duration > 0) state.waveformDuration = res.duration;
-        drawWaveformCanvas();
-      }
-    }).catch(() => {});
+    api()
+      .get_clip_waveform(clip.id, 160)
+      .then((res) => {
+        if (res && res.ok && document.getElementById("editClipId").value === clip.id) {
+          state.waveformPeaks = res.peaks || [];
+          if (res.duration > 0) state.waveformDuration = res.duration;
+          drawWaveformCanvas();
+        }
+      })
+      .catch(() => {});
   }
 
-  openModal("editModal","editTitle");
+  document.getElementById("editModal").classList.remove("hidden");
 }
 
 function drawWaveformCanvas() {
@@ -516,13 +525,13 @@ function drawWaveformCanvas() {
   const startX = Math.max(0, Math.min(w, (st / maxDur) * w));
   const endX = Math.max(startX + 2, Math.min(w, (en / maxDur) * w));
 
-  // Background active zone highlight
-  ctx.fillStyle = "rgba(59, 130, 246, 0.10)";
+  ctx.fillStyle = "rgba(59, 130, 246, 0.12)";
   ctx.fillRect(startX, 0, endX - startX, h);
 
-  const peaks = state.waveformPeaks && state.waveformPeaks.length
-    ? state.waveformPeaks
-    : Array.from({ length: 96 }, (_, i) => 0.18 + 0.55 * Math.abs(Math.sin(i * 0.23)));
+  const peaks =
+    state.waveformPeaks && state.waveformPeaks.length
+      ? state.waveformPeaks
+      : Array.from({ length: 96 }, (_, i) => 0.18 + 0.55 * Math.abs(Math.sin(i * 0.23)));
 
   const n = peaks.length;
   const barGap = 1.5;
@@ -533,22 +542,20 @@ function drawWaveformCanvas() {
     const x = i * (barW + barGap);
     const inTrim = x + barW >= startX && x <= endX;
     const amp = Math.max(0.06, Math.min(1, Number(peaks[i]) || 0.08));
-    const bh = Math.max(3, amp * (h - 14));
-    ctx.fillStyle = inTrim ? "#8fb5ff" : "#343c4a";
+    const bh = Math.max(3, amp * (h - 10));
+    ctx.fillStyle = inTrim ? "#3b82f6" : "#293552";
     ctx.beginPath();
     ctx.roundRect(x, midY - bh / 2, barW, bh, 1.5);
     ctx.fill();
   }
 
-  // Dimmed overlays outside [startX, endX]
-  ctx.fillStyle = "rgba(10, 12, 16, 0.58)";
+  ctx.fillStyle = "rgba(11, 15, 25, 0.58)";
   if (startX > 0) ctx.fillRect(0, 0, startX, h);
   if (endX < w) ctx.fillRect(endX, 0, w - endX, h);
 
-  // Trim handles
-  ctx.fillStyle = "#8bdfb7";
+  ctx.fillStyle = "#10b981";
   ctx.fillRect(startX, 0, 2.5, h);
-  ctx.fillStyle = "#f0cf8b";
+  ctx.fillStyle = "#f59e0b";
   ctx.fillRect(Math.max(0, endX - 2.5), 0, 2.5, h);
 }
 
@@ -561,18 +568,9 @@ function updateNowPlayingBar(playback) {
   const controls = document.getElementById("nowPlayingControls");
   if (!statusEl || !controls) return;
 
-  if (window.soundboardPreview) {
-    statusEl.textContent = "Prévia · áudio disponível no aplicativo local";
-    controls.classList.add("hidden");
-    routeBadge?.classList.add("hidden");
-    eq?.classList.add("hidden");
-    dot?.classList.remove("active");
-    return;
-  }
-
   const active = playback && playback.playing ? playback : null;
   if (!active && playingIds.length === 0) {
-    statusEl.textContent = "Pronto para reproduzir";
+    statusEl.textContent = "Pronto para tocar";
     controls.classList.add("hidden");
     routeBadge?.classList.add("hidden");
     eq?.classList.add("hidden");
@@ -596,23 +594,16 @@ function updateNowPlayingBar(playback) {
   statusEl.textContent = `${emoji} ${title}`;
   if (routeBadge) {
     routeBadge.classList.remove("hidden");
-    routeBadge.textContent = monitorOnly ? "SÓ FONE" : "CALL + FONE";
+    routeBadge.textContent = monitorOnly ? "🎧 SÓ FONE" : "🔌 CALL + FONE";
   }
   controls.classList.remove("hidden");
 
-  const pauseIcon = document.getElementById("npPauseIcon");
-  if (pauseIcon) {
-    pauseIcon.innerHTML = paused
-      ? '<path d="m8 5 11 7-11 7Z"/>'
-      : '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>';
-  }
+  const pauseBtn = document.getElementById("btnNpPause");
+  if (pauseBtn) pauseBtn.textContent = paused ? "▶" : "⏸";
   const loopBtn = document.getElementById("btnNpLoop");
-  if (loopBtn) {
-    loopBtn.classList.toggle("active", loop);
-    loopBtn.setAttribute("aria-pressed", String(loop));
-  }
+  if (loopBtn) loopBtn.classList.toggle("active", loop);
 
-  const dur = Math.max(0.1, Number(active?.duration || state.playingClips[clipId]?.duration || clip?.duration || 1));
+  const dur = Math.max(0.1, Number(active?.duration || clip?.duration || 1));
   const pos = Math.max(0, Math.min(dur, Number(active?.position ?? 0)));
   const seekSlider = document.getElementById("npSeekSlider");
   if (seekSlider && document.activeElement !== seekSlider) {
@@ -642,32 +633,10 @@ function openSpeakerModal(spk) {
   document.getElementById("renameSpeakerId").value = spk.id;
   document.getElementById("renameSpeakerName").value = spk.name || "";
   document.getElementById("renameSpeakerColor").value = spk.color || "#3b82f6";
-  openModal("speakerModal","renameSpeakerName");
+  document.getElementById("speakerModal").classList.remove("hidden");
 }
 
 function bindEvents() {
-  document.getElementById("btnRouting").onclick = () => {
-    const panel=document.getElementById("routingPanel");
-    panel.hidden=!panel.hidden;
-    document.getElementById("btnRouting").setAttribute("aria-expanded",String(!panel.hidden));
-  };
-  document.getElementById("btnResetFilters").onclick=resetFilters;
-  document.getElementById("btnLoadMore").onclick=()=>{gridLimit+=48;renderGrid();};
-  document.querySelectorAll(".import-option").forEach(button=>button.addEventListener("click",()=>document.getElementById("importMenu").open=false));
-  document.addEventListener("click",e=>{if(!e.target.closest("#importMenu"))document.getElementById("importMenu").open=false;});
-  document.addEventListener("keydown",e=>{
-    const modal=[...document.querySelectorAll(".modal-backdrop")].find(el=>!el.classList.contains("hidden"));
-    if(e.key==="Escape"){
-      document.getElementById("importMenu").open=false;
-      if(modal){e.preventDefault();closeModal(modal.id);}
-    }
-    if(modal && e.key==="Tab"){
-      const focusable=[...modal.querySelectorAll('button:not(:disabled),input:not(:disabled):not([type=hidden]),select:not(:disabled),textarea:not(:disabled),summary')].filter(el=>el.getClientRects().length);
-      const first=focusable[0], last=focusable.at(-1);
-      if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}
-      else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}
-    }
-  });
   document.getElementById("cableDeviceSelect").onchange = (e) => {
     const id = Number(e.target.value);
     state.settings.cable_device_id = id;
@@ -813,7 +782,7 @@ function bindEvents() {
     };
   });
 
-  // Interactive Now Playing Deck controls
+  // Now Playing Deck controls
   const btnNpRestart = document.getElementById("btnNpRestart");
   if (btnNpRestart) {
     btnNpRestart.onclick = async () => {
@@ -906,7 +875,7 @@ function bindEvents() {
 
   // Modal bindings
   document.getElementById("btnCloseModal").onclick = () =>
-    closeModal("editModal");
+    document.getElementById("editModal").classList.add("hidden");
 
   const trimStartSlider = document.getElementById("editTrimStart");
   const trimEndSlider = document.getElementById("editTrimEnd");
@@ -951,7 +920,9 @@ function bindEvents() {
       if (wfDragTarget === "start") syncTrimValues(Math.min(t, curEn - 0.1), curEn);
       else syncTrimValues(curSt, Math.max(t, curSt + 0.1));
     });
-    const endWfDrag = () => { wfDragTarget = null; };
+    const endWfDrag = () => {
+      wfDragTarget = null;
+    };
     wfCanvas.addEventListener("pointerup", endWfDrag);
     wfCanvas.addEventListener("pointercancel", endWfDrag);
   }
@@ -1017,7 +988,7 @@ function bindEvents() {
       const idx = state.clips.findIndex((c) => c.id === payload.id);
       if (idx >= 0) state.clips[idx] = res.clip;
       state.speakers = res.speakers || state.speakers;
-      closeModal("editModal");
+      document.getElementById("editModal").classList.add("hidden");
       renderSidebar();
       renderGrid();
       showToast("💾 Alterações salvas!");
@@ -1054,7 +1025,7 @@ function bindEvents() {
     if (res && res.ok) {
       state.clips = res.clips || state.clips;
       state.speakers = res.speakers || state.speakers;
-      closeModal("editModal");
+      document.getElementById("editModal").classList.add("hidden");
       renderSidebar();
       renderGrid();
       showToast(`✅ Áudio dividido em ${res.created_count} botões separados por fala!`, "#10b981");
@@ -1077,11 +1048,10 @@ function bindEvents() {
 
   document.getElementById("btnDeleteClip").onclick = async () => {
     const id = document.getElementById("editClipId").value;
-    if (!window.confirm("Remover este botão? O arquivo de áudio será mantido.")) return;
     const res = await api().delete_clip(id, false);
     if (res && res.ok) {
       state.clips = state.clips.filter((c) => c.id !== id);
-      closeModal("editModal");
+      document.getElementById("editModal").classList.add("hidden");
       renderSidebar();
       renderGrid();
       showToast("🗑️ Botão removido do Soundboard.");
@@ -1090,17 +1060,16 @@ function bindEvents() {
 
   // Speaker rename & delete modal
   document.getElementById("btnCloseSpeakerModal").onclick = () =>
-    closeModal("speakerModal");
+    document.getElementById("speakerModal").classList.add("hidden");
 
   document.getElementById("btnDeleteSpeakerModal").onclick = async () => {
     const spkId = document.getElementById("renameSpeakerId").value;
-    if (!window.confirm("Excluir esta pessoa? Os áudios serão mantidos.")) return;
     const res = await api().delete_speaker(spkId);
     if (res && res.ok) {
       state.speakers = res.speakers || {};
       state.clips = res.clips || state.clips;
       if (state.activeSpeaker === spkId) state.activeSpeaker = "Todos";
-      closeModal("speakerModal");
+      document.getElementById("speakerModal").classList.add("hidden");
       renderSidebar();
       renderGrid();
       showToast("🗑️ Pessoa excluída com sucesso.");
@@ -1114,7 +1083,7 @@ function bindEvents() {
     const res = await api().update_speaker(spkId, name, color);
     if (res && res.ok) {
       state.speakers = res.speakers;
-      closeModal("speakerModal");
+      document.getElementById("speakerModal").classList.add("hidden");
       renderSidebar();
       renderGrid();
       showToast(`✅ Interlocutor atualizado para "${name}"!`);
@@ -1125,14 +1094,21 @@ function bindEvents() {
 // Callback receiver from Python backend
 window.onBackendEvent = (event, payload) => {
   if (event === "clip_started") {
-    state.playingClips[payload.clip_id] = {startedAt:Date.now(),duration:payload.duration||1.5};
+    state.playingClips[payload.clip_id] = true;
     state.activePlayback = { ...payload, playing: true };
     renderGrid();
+    const prog = document.getElementById(`prog_${payload.clip_id}`);
+    if (prog) {
+      prog.style.transition = `width ${payload.duration || 1.5}s linear`;
+      requestAnimationFrame(() => {
+        prog.style.width = "100%";
+      });
+    }
   } else if (event === "playback_tick") {
     if (payload && payload.clip_id) {
       state.activePlayback = payload;
       updateNowPlayingBar(payload);
-      const prog = document.getElementById("prog_" + payload.clip_id);
+      const prog = document.getElementById(`prog_${payload.clip_id}`);
       if (prog && payload.duration > 0) {
         prog.style.transition = "width 90ms linear";
         prog.style.width = `${Math.min(100, (payload.position / payload.duration) * 100)}%`;
@@ -1178,12 +1154,3 @@ window.onBackendEvent = (event, payload) => {
 };
 
 window.addEventListener("DOMContentLoaded", initApp);
-window.addEventListener("pywebviewready", initApp);
-window.addEventListener("unhandledrejection", () => showToast("A operação não foi concluída. Verifique o aplicativo local e tente novamente."));
-setTimeout(()=>{
-  if(!initialized){
-    const notice=document.getElementById("connectionNotice");
-    notice.textContent="Aguardando o aplicativo local. Para reproduzir e gerenciar áudios, abra iniciar_soundboard.bat.";
-    notice.classList.remove("hidden");
-  }
-},2500);

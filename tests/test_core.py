@@ -227,6 +227,33 @@ def test_waveform_peaks_and_playback_session_controls(tmp_path):
     assert len(wf["peaks"]) == 60
 
 
+def test_toggle_mini_overlay_never_touches_winforms_properties(tmp_path):
+    class PoisonWindow:
+        @property
+        def on_top(self):
+            raise RuntimeError("WinForms TopMost must never be accessed from background thread")
+
+        @on_top.setter
+        def on_top(self, value):
+            raise RuntimeError("WinForms TopMost must never be set from background thread")
+
+        def resize(self, width, height):
+            raise RuntimeError("WinForms resize must never be called directly from background thread")
+
+        def evaluate_js(self, script):
+            return None
+
+    api = SoundboardAPI(data_dir=str(tmp_path / "api_overlay"), start_background_services=False)
+    api._set_window(PoisonWindow())
+    res1 = api.toggle_mini_overlay()
+    assert res1["ok"] is True
+    assert res1["is_mini_overlay"] is True
+    res2 = api.toggle_mini_overlay()
+    assert res2["ok"] is True
+    assert res2["is_mini_overlay"] is False
+
+
+
 
 
 
