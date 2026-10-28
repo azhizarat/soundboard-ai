@@ -1,11 +1,15 @@
 import os
 import re
 import json
+import time
+import socket
 import subprocess
 import tempfile
 import urllib.request
 from pathlib import Path
 import numpy as np
+
+_OLLAMA_CACHE = {"checked_at": 0.0, "available": False}
 
 VIDEOS_MODELS_DIR = Path(r"C:\Users\Usuario\Videos\.modelos_voz")
 
@@ -185,8 +189,20 @@ def _extract_punchy_title(transcript: str, mood: str, speaker_name: str = "") ->
     return title[:30]
 
 
-def _query_local_ollama(prompt: str, timeout: float = 2.5) -> dict | None:
+def _query_local_ollama(prompt: str, timeout: float = 2.0) -> dict | None:
     """Optional zero-dependency call to local Ollama if running on port 11434."""
+    now = time.time()
+    if now - _OLLAMA_CACHE["checked_at"] > 60.0:
+        _OLLAMA_CACHE["checked_at"] = now
+        try:
+            with socket.create_connection(("127.0.0.1", 11434), timeout=0.12):
+                _OLLAMA_CACHE["available"] = True
+        except OSError:
+            _OLLAMA_CACHE["available"] = False
+
+    if not _OLLAMA_CACHE["available"]:
+        return None
+
     try:
         payload = json.dumps({
             "model": "qwen2.5:1.5b",

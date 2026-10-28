@@ -110,4 +110,16 @@ def test_soundboard_api_smoke(tmp_path):
     assert "speakers" in state
 
 
+def test_soundboard_api_exposes_no_public_non_callable_objects(tmp_path):
+    """Prevents pywebview from recursively crawling window.native or internal objects."""
+    api = SoundboardAPI(data_dir=str(tmp_path), start_background_services=False)
+    api._set_window(object())
+    public_non_callables = [
+        name for name in dir(api)
+        if not name.startswith("_") and not callable(getattr(api, name))
+    ]
+    assert public_non_callables == []
+
+
+
 

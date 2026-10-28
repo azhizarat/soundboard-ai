@@ -1,5 +1,6 @@
 @echo off
 chcp 65001 >nul
+set PYTHONIOENCODING=utf-8
 title Soundboard AI - VB-Audio Cable Studio
 cd /d "%~dp0"
 

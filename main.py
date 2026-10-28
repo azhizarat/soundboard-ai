@@ -10,38 +10,59 @@ from ai_analyzer import AIAnalyzer
 from audio_engine import AudioEngine
 from hotkeys import HotkeyManager
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 SUPPORTED_AUDIO_EXTS = (".mp3", ".wav", ".ogg", ".flac", ".m4a", ".webm")
 
 
 class SoundboardAPI:
     def __init__(self, data_dir: str = "data", start_background_services: bool = True):
-        self.base_dir = Path(__file__).parent.resolve()
-        resolved_data = Path(data_dir) if os.path.isabs(data_dir) else (self.base_dir / data_dir)
-        self.store = SoundboardStore(data_dir=str(resolved_data))
-        self.ai = AIAnalyzer()
-        self.audio = AudioEngine(
-            replay_seconds=float(self.store.state["settings"].get("replay_seconds", 15)),
+        # All internal state attributes MUST start with '_' so pywebview does not
+        # recursively inspect/serialize them (especially self._window.native!).
+        self._base_dir = Path(__file__).parent.resolve()
+        resolved_data = Path(data_dir) if os.path.isabs(data_dir) else (self._base_dir / data_dir)
+        self._store = SoundboardStore(data_dir=str(resolved_data))
+        self._ai = AIAnalyzer()
+        self._audio = AudioEngine(
+            replay_seconds=float(self._store.state["settings"].get("replay_seconds", 15)),
             start_loopback=start_background_services,
         )
-        self.window = None
-        self.is_mini_overlay = False
+        self._window = None
+        self._is_mini_overlay = False
 
         self._auto_bind_devices()
 
-        self.hotkeys = HotkeyManager(
+        self._hotkeys = HotkeyManager(
             on_play_clip=self.play_clip,
             on_stop_all=self.stop_all,
             on_save_replay=self.capture_replay_clip,
             on_toggle_overlay=self.toggle_mini_overlay,
         )
         if start_background_services:
-            self.hotkeys.refresh(self.store.state["clips"], self.store.state["settings"])
-            if self.store.state["settings"].get("mic_passthrough"):
+            self._hotkeys.refresh(self._store.state["clips"], self._store.state["settings"])
+            if self._store.state["settings"].get("mic_passthrough"):
                 self._apply_mic_passthrough()
+            # Pre-warm TitaNet and Faster-Whisper in background so first clip is instant
+            threading.Thread(target=self._prewarm_ai, daemon=True).start()
+
+    def _set_window(self, window):
+        self._window = window
+
+    def _prewarm_ai(self):
+        try:
+            self._ai._get_extractor()
+            self._ai._get_whisper()
+        except Exception:
+            pass
 
     def _auto_bind_devices(self):
-        dev_info = self.audio.list_devices()
-        settings = self.store.state["settings"]
+        dev_info = self._audio.list_devices()
+        settings = self._store.state["settings"]
         changed = False
 
         if settings.get("cable_device_id") is None and dev_info.get("detected_cable_id") is not None:
@@ -58,11 +79,11 @@ class SoundboardAPI:
             changed = True
 
         if changed:
-            self.store.save()
+            self._store.save()
 
     def _apply_mic_passthrough(self):
-        s = self.store.state["settings"]
-        self.audio.set_mic_passthrough(
+        s = self._store.state["settings"]
+        self._audio.set_mic_passthrough(
             enabled=bool(s.get("mic_passthrough", False)),
             mic_id=s.get("mic_device_id"),
             cable_id=s.get("cable_device_id"),
@@ -70,20 +91,19 @@ class SoundboardAPI:
         )
 
     def _notify_ui(self, event_name: str, payload: dict = None):
-        if self.window is None:
+        if self._window is None:
             return
         try:
             import json
             js_payload = json.dumps(payload or {}, ensure_ascii=False)
-            self.window.evaluate_js(
+            self._window.evaluate_js(
                 f"window.onBackendEvent && window.onBackendEvent({json.dumps(event_name)}, {js_payload});"
             )
         except Exception:
             pass
 
     def get_initial_state(self) -> dict:
-        devs = self.audio.list_devices()
-        # Discover existing 'separados' folders in C:\Users\Usuario\Videos for 1-click import
+        devs = self._audio.list_devices()
         discovered_separados = []
         videos_root = Path(r"C:\Users\Usuario\Videos")
         if videos_root.exists():
@@ -98,46 +118,46 @@ class SoundboardAPI:
                 pass
 
         return {
-            "settings": self.store.state["settings"],
-            "categories": self.store.state["categories"],
-            "speakers": self.store.state["speakers"],
-            "clips": self.store.state["clips"],
+            "settings": self._store.state["settings"],
+            "categories": self._store.state["categories"],
+            "speakers": self._store.state["speakers"],
+            "clips": self._store.state["clips"],
             "devices": devs,
             "discovered_separados": discovered_separados,
-            "models_dir": str(self.ai.models_dir),
-            "has_titanet": self.ai.emb_model_path.exists(),
-            "has_ref_voices": self.ai.ref_voices_path.exists(),
-            "is_mini_overlay": self.is_mini_overlay,
+            "models_dir": str(self._ai.models_dir),
+            "has_titanet": self._ai.emb_model_path.exists(),
+            "has_ref_voices": self._ai.ref_voices_path.exists(),
+            "is_mini_overlay": self._is_mini_overlay,
         }
 
     def refresh_devices(self) -> dict:
         self._auto_bind_devices()
-        return self.audio.list_devices()
+        return self._audio.list_devices()
 
     def update_settings(self, updates: dict) -> dict:
-        s = self.store.update_settings(updates)
+        s = self._store.update_settings(updates)
         if "replay_seconds" in updates:
-            self.audio.replay_buffer.set_max_seconds(float(s.get("replay_seconds", 15)))
+            self._audio.replay_buffer.set_max_seconds(float(s.get("replay_seconds", 15)))
         if any(k in updates for k in ("mic_passthrough", "mic_device_id", "cable_device_id", "mic_gain")):
             self._apply_mic_passthrough()
         if any(k in updates for k in ("stop_all_hotkey", "replay_hotkey", "overlay_hotkey")):
-            self.hotkeys.refresh(self.store.state["clips"], s)
+            self._hotkeys.refresh(self._store.state["clips"], s)
         return s
 
     def play_clip(self, clip_id: str, monitor_only: bool = False) -> dict:
-        clip = self.store.get_clip(clip_id)
+        clip = self._store.get_clip(clip_id)
         if not clip:
             return {"ok": False, "error": "Clip não encontrado"}
 
-        settings = self.store.state["settings"]
-        play_id = self.audio.play_clip(
+        settings = self._store.state["settings"]
+        play_id = self._audio.play_clip(
             clip=clip,
             settings=settings,
             on_finish=lambda cid, pid: self._notify_ui("clip_finished", {"clip_id": cid, "play_id": pid}),
             monitor_only=bool(monitor_only),
         )
         if not monitor_only:
-            self.store.increment_play_count(clip_id)
+            self._store.increment_play_count(clip_id)
         self._notify_ui("clip_started", {
             "clip_id": clip_id,
             "play_id": play_id,
@@ -146,66 +166,66 @@ class SoundboardAPI:
         return {"ok": True, "play_id": play_id}
 
     def stop_all(self) -> dict:
-        self.audio.stop_all()
+        self._audio.stop_all()
         self._notify_ui("stopped_all", {})
         return {"ok": True}
 
     def save_clip_edits(self, clip_data: dict) -> dict:
-        updated = self.store.add_or_update_clip(clip_data)
-        self.hotkeys.refresh(self.store.state["clips"], self.store.state["settings"])
-        return {"ok": True, "clip": updated, "speakers": self.store.state["speakers"]}
+        updated = self._store.add_or_update_clip(clip_data)
+        self._hotkeys.refresh(self._store.state["clips"], self._store.state["settings"])
+        return {"ok": True, "clip": updated, "speakers": self._store.state["speakers"]}
 
     def toggle_favorite(self, clip_id: str) -> dict:
-        clip = self.store.get_clip(clip_id)
+        clip = self._store.get_clip(clip_id)
         if not clip:
             return {"ok": False}
-        updated = self.store.add_or_update_clip({"id": clip_id, "favorite": not clip.get("favorite", False)})
+        updated = self._store.add_or_update_clip({"id": clip_id, "favorite": not clip.get("favorite", False)})
         return {"ok": True, "clip": updated}
 
     def delete_clip(self, clip_id: str, delete_file: bool = False) -> dict:
-        ok = self.store.delete_clip(clip_id, delete_file=delete_file)
-        self.hotkeys.refresh(self.store.state["clips"], self.store.state["settings"])
+        ok = self._store.delete_clip(clip_id, delete_file=delete_file)
+        self._hotkeys.refresh(self._store.state["clips"], self._store.state["settings"])
         return {"ok": ok}
 
     def update_speaker(self, spk_id: str, name: str, color: str = None, avatar: str = None) -> dict:
-        spk = self.store.update_speaker(spk_id, name=name, color=color, avatar=avatar)
-        return {"ok": True, "speaker": spk, "speakers": self.store.state["speakers"]}
+        spk = self._store.update_speaker(spk_id, name=name, color=color, avatar=avatar)
+        return {"ok": True, "speaker": spk, "speakers": self._store.state["speakers"]}
 
     def enroll_speaker_from_clip(self, clip_id: str, spk_id: str, speaker_name: str = "") -> dict:
-        clip = self.store.get_clip(clip_id)
+        clip = self._store.get_clip(clip_id)
         if not clip or not clip.get("file_path"):
             return {"ok": False, "error": "Áudio inválido"}
         if speaker_name:
-            self.store.update_speaker(spk_id, name=speaker_name)
+            self._store.update_speaker(spk_id, name=speaker_name)
         else:
-            self.store.ensure_speaker(spk_id)
-        ok = self.ai.enroll_speaker_reference(clip["file_path"], spk_id)
-        self.store.add_or_update_clip({"id": clip_id, "speaker_id": spk_id})
+            self._store.ensure_speaker(spk_id)
+        ok = self._ai.enroll_speaker_reference(clip["file_path"], spk_id)
+        self._store.add_or_update_clip({"id": clip_id, "speaker_id": spk_id})
         return {
             "ok": ok,
-            "speakers": self.store.state["speakers"],
-            "clip": self.store.get_clip(clip_id),
+            "speakers": self._store.state["speakers"],
+            "clip": self._store.get_clip(clip_id),
         }
 
     def reanalyze_clip_ai(self, clip_id: str) -> dict:
-        clip = self.store.get_clip(clip_id)
+        clip = self._store.get_clip(clip_id)
         if not clip or not clip.get("file_path") or not os.path.exists(clip["file_path"]):
             return {"ok": False, "error": "Arquivo de áudio não encontrado"}
 
         spk_id = clip.get("speaker_id", "")
-        spk_name = self.store.state["speakers"].get(spk_id, {}).get("name", "")
-        res = self.ai.analyze_file(
+        spk_name = self._store.state["speakers"].get(spk_id, {}).get("name", "")
+        res = self._ai.analyze_file(
             clip["file_path"],
             existing_transcript=None,
             existing_speaker_id=None,
             speaker_name=spk_name,
-            use_llm=bool(self.store.state["settings"].get("use_local_llm", True)),
+            use_llm=bool(self._store.state["settings"].get("use_local_llm", True)),
         )
         detected_spk = res.get("speaker_id") or spk_id
         if detected_spk:
-            self.store.ensure_speaker(detected_spk)
+            self._store.ensure_speaker(detected_spk)
 
-        updated = self.store.add_or_update_clip({
+        updated = self._store.add_or_update_clip({
             "id": clip_id,
             "title": res["title"],
             "category": res["category"],
@@ -217,13 +237,13 @@ class SoundboardAPI:
             "acoustic_mood": res["acoustic_mood"],
             "duration": res["duration"],
         })
-        return {"ok": True, "clip": updated, "speakers": self.store.state["speakers"]}
+        return {"ok": True, "clip": updated, "speakers": self._store.state["speakers"]}
 
     def import_audio_files(self, file_paths: list[str] = None) -> dict:
-        if not file_paths and self.window is not None:
+        if not file_paths and self._window is not None:
             try:
                 import webview
-                selected = self.window.create_file_dialog(
+                selected = self._window.create_file_dialog(
                     webview.OPEN_DIALOG,
                     allow_multiple=True,
                     file_types=("Arquivos de Áudio (*.mp3;*.wav;*.ogg;*.flac;*.m4a)", "Todos os arquivos (*.*)"),
@@ -236,21 +256,21 @@ class SoundboardAPI:
             return {"ok": False, "imported": []}
 
         imported = []
-        use_llm = bool(self.store.state["settings"].get("use_local_llm", True))
+        use_llm = bool(self._store.state["settings"].get("use_local_llm", True))
         for src in file_paths:
             src_path = Path(src)
             if not src_path.exists() or not src_path.is_file():
                 continue
             dst_name = f"{int(time.time() * 1000) % 1000000}_{src_path.name}"
-            dst_path = self.store.clips_dir / dst_name
+            dst_path = self._store.clips_dir / dst_name
             shutil.copy2(src_path, dst_path)
 
-            res = self.ai.analyze_file(str(dst_path), use_llm=use_llm)
+            res = self._ai.analyze_file(str(dst_path), use_llm=use_llm)
             spk_id = res.get("speaker_id", "")
             if spk_id:
-                self.store.ensure_speaker(spk_id)
+                self._store.ensure_speaker(spk_id)
 
-            clip = self.store.add_or_update_clip({
+            clip = self._store.add_or_update_clip({
                 "title": res.get("title") or src_path.stem[:28],
                 "file_path": str(dst_path),
                 "category": res.get("category") or "Call",
@@ -265,16 +285,16 @@ class SoundboardAPI:
             imported.append(clip)
 
         self._notify_ui("clips_updated", {
-            "clips": self.store.state["clips"],
-            "speakers": self.store.state["speakers"],
+            "clips": self._store.state["clips"],
+            "speakers": self._store.state["speakers"],
         })
-        return {"ok": True, "imported": imported, "clips": self.store.state["clips"], "speakers": self.store.state["speakers"]}
+        return {"ok": True, "imported": imported, "clips": self._store.state["clips"], "speakers": self._store.state["speakers"]}
 
     def import_folder_or_separados(self, folder_path: str = None) -> dict:
-        if not folder_path and self.window is not None:
+        if not folder_path and self._window is not None:
             try:
                 import webview
-                selected = self.window.create_file_dialog(webview.FOLDER_DIALOG)
+                selected = self._window.create_file_dialog(webview.FOLDER_DIALOG)
                 if selected:
                     folder_path = selected[0] if isinstance(selected, (list, tuple)) else str(selected)
             except Exception:
@@ -287,14 +307,13 @@ class SoundboardAPI:
         if not target.exists():
             return {"ok": False, "error": "Pasta não encontrada"}
 
-        # Check if target or target/separados has mapa_de_falas.json
         if (target / "separados" / "mapa_de_falas.json").exists():
             target = target / "separados"
 
-        use_llm = bool(self.store.state["settings"].get("use_local_llm", True))
+        use_llm = bool(self._store.state["settings"].get("use_local_llm", True))
         if (target / "mapa_de_falas.json").exists():
             def _fast_analyzer(fp, existing_transcript="", existing_speaker_id="", speaker_name=""):
-                return self.ai.analyze_file(
+                return self._ai.analyze_file(
                     fp,
                     existing_transcript=existing_transcript,
                     existing_speaker_id=existing_speaker_id,
@@ -302,19 +321,18 @@ class SoundboardAPI:
                     use_llm=use_llm,
                 )
 
-            imported = self.store.import_separados_manifest(str(target), analyzer_fn=_fast_analyzer)
+            imported = self._store.import_separados_manifest(str(target), analyzer_fn=_fast_analyzer)
             self._notify_ui("clips_updated", {
-                "clips": self.store.state["clips"],
-                "speakers": self.store.state["speakers"],
+                "clips": self._store.state["clips"],
+                "speakers": self._store.state["speakers"],
             })
             return {
                 "ok": True,
                 "imported_count": len(imported),
-                "clips": self.store.state["clips"],
-                "speakers": self.store.state["speakers"],
+                "clips": self._store.state["clips"],
+                "speakers": self._store.state["speakers"],
             }
 
-        # Otherwise scan audio files in folder
         audio_files = [
             str(p) for p in sorted(target.rglob("*"))
             if p.is_file() and p.suffix.lower() in SUPPORTED_AUDIO_EXTS and not p.name.endswith("_completo.mp3")
@@ -324,27 +342,27 @@ class SoundboardAPI:
         return res
 
     def capture_replay_clip(self, last_seconds: float = None) -> dict:
-        secs = float(last_seconds or self.store.state["settings"].get("replay_seconds", 15))
+        secs = float(last_seconds or self._store.state["settings"].get("replay_seconds", 15))
         out_name = f"replay_{time.strftime('%Y%m%d_%H%M%S')}.wav"
-        out_path = str(self.store.clips_dir / out_name)
+        out_path = str(self._store.clips_dir / out_name)
 
-        saved = self.audio.save_replay_wav(out_path, last_seconds=secs)
+        saved = self._audio.save_replay_wav(out_path, last_seconds=secs)
         if not saved:
             self._notify_ui("toast", {
                 "type": "warning",
-                "message": "Nenhum áudio recente detectado nos últimos segundos da call/sistema.",
+                "message": "Nenhum som recente tocado no seu fone/sistema nos últimos segundos.",
             })
-            return {"ok": False, "error": "Buffer de replay vazio ou silencioso"}
+            return {"ok": False, "error": "Nenhum áudio recente tocado no fone/sistema nos últimos 15s"}
 
-        res = self.ai.analyze_file(
+        res = self._ai.analyze_file(
             saved,
-            use_llm=bool(self.store.state["settings"].get("use_local_llm", True)),
+            use_llm=bool(self._store.state["settings"].get("use_local_llm", True)),
         )
         spk_id = res.get("speaker_id", "")
         if spk_id:
-            self.store.ensure_speaker(spk_id)
+            self._store.ensure_speaker(spk_id)
 
-        clip = self.store.add_or_update_clip({
+        clip = self._store.add_or_update_clip({
             "title": res.get("title") or f"Replay {time.strftime('%H:%M:%S')}",
             "file_path": saved,
             "category": res.get("category") or "Call",
@@ -358,24 +376,24 @@ class SoundboardAPI:
         })
         self._notify_ui("replay_captured", {
             "clip": clip,
-            "clips": self.store.state["clips"],
-            "speakers": self.store.state["speakers"],
+            "clips": self._store.state["clips"],
+            "speakers": self._store.state["speakers"],
         })
-        return {"ok": True, "clip": clip, "clips": self.store.state["clips"], "speakers": self.store.state["speakers"]}
+        return {"ok": True, "clip": clip, "clips": self._store.state["clips"], "speakers": self._store.state["speakers"]}
 
     def toggle_mini_overlay(self) -> dict:
-        self.is_mini_overlay = not self.is_mini_overlay
-        if self.window is not None:
+        self._is_mini_overlay = not self._is_mini_overlay
+        if self._window is not None:
             try:
-                self.window.on_top = self.is_mini_overlay
-                if self.is_mini_overlay:
-                    self.window.resize(410, 580)
+                self._window.on_top = self._is_mini_overlay
+                if self._is_mini_overlay:
+                    self._window.resize(410, 580)
                 else:
-                    self.window.resize(1280, 820)
+                    self._window.resize(1280, 820)
             except Exception:
                 pass
-        self._notify_ui("overlay_toggled", {"is_mini_overlay": self.is_mini_overlay})
-        return {"ok": True, "is_mini_overlay": self.is_mini_overlay}
+        self._notify_ui("overlay_toggled", {"is_mini_overlay": self._is_mini_overlay})
+        return {"ok": True, "is_mini_overlay": self._is_mini_overlay}
 
 
 def main():
@@ -393,7 +411,7 @@ def main():
         min_size=(360, 460),
         background_color="#0b0f19",
     )
-    api.window = window
+    api._set_window(window)
     webview.start(debug=False)
 
 
