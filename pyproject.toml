@@ -1,8 +1,8 @@
 [project]
 name = "soundboard-ai"
-version = "0.1.0"
+version = "1.0.0"
 description = "Digital Soundboard for VB-Audio Cable with Local AI Speaker ID, Transcription, Acoustic Mood & Replay Buffer"
-readme = "docs/superpowers/specs/2026-10-28-soundboard-design.md"
+readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "numpy>=1.26.0",
