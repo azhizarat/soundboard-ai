@@ -371,11 +371,15 @@
                   <span id="clipVolVal" class="vol-badge">100%</span>
                 </div>
                 <input type="range" id="editVolume" min="0.2" max="2.5" step="0.05" value="1.0" />
-                <div class="lufs-row">
-                  <span id="clipLufsBadge" class="status-pill status-ok" title="Nível integrado de sonoridade (EBU R128)">Nível: —</span>
-                  <button type="button" id="btnReanalyzeLufs" class="btn btn-xs btn-secondary" title="Recalcular loudness">🔊 Reanalisar nível</button>
-                </div>
               </div>
+            </div>
+
+            <div class="trim-lufs-row">
+              <div class="trim-lufs-meta">
+                <span class="trim-lufs-label">Normalização (EBU R128):</span>
+                <span id="clipLufsBadge" class="status-pill status-ok" title="Nível integrado de sonoridade (EBU R128)">Nível: —</span>
+              </div>
+              <button type="button" id="btnReanalyzeLufs" class="btn btn-xs btn-secondary" title="Recalcular loudness">🔊 Reanalisar nível</button>
             </div>
           </div>
         </div>

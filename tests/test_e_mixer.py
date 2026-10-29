@@ -227,3 +227,70 @@ def test_api_playback_controls_with_mixer(tmp_path, monkeypatch):
     stop_res = api.stop_all()
     assert stop_res["ok"] is True
 
+
+def test_dual_device_playback_speed_and_frames_rendered():
+    """Verify that dual-device playback does NOT advance at 2x speed or drop frames between streams."""
+    sr = 48000
+    mixer = AudioMixer(sr=sr, blocksize=1024)
+    # 1.0 second test audio where each frame has a distinct value
+    t = np.linspace(0.0, 1.0, sr, endpoint=False, dtype=np.float32)
+    tone = np.column_stack([t * 0.5, t * 0.5])
+
+    finished = []
+    def on_finish(cid=None, pid=None):
+        finished.append((cid, pid))
+
+    clip = {"id": "dual_test", "title": "Dual", "volume": 1.0}
+    settings = {"cable_device_id": 1, "monitor_device_id": 2, "cable_volume": 1.0, "monitor_volume": 1.0}
+
+    voice = mixer.play_voice(clip, tone, settings, on_finish=on_finish)
+    assert "cable" in voice._destinations
+    assert "monitor" in voice._destinations
+
+    cable_captured = []
+    monitor_captured = []
+
+    blocks = 0
+    # Simulate concurrent audio callbacks until voice ends
+    while not voice.stop_event.is_set() and blocks < 100:
+        b_c = mixer.cable_mixer.render_block(1024, duck_gain=1.0)
+        b_m = mixer.monitor_mixer.render_block(1024, duck_gain=1.0)
+        cable_captured.append(b_c)
+        monitor_captured.append(b_m)
+        blocks += 1
+
+    # 48000 frames with 1024 blocksize = 47 blocks (46 * 1024 + 896)
+    assert blocks == 47, f"Expected 47 blocks (1.0s playback), but took {blocks} blocks (indicates wrong playback speed!)"
+    assert voice.stop_event.is_set()
+    assert len(finished) == 1
+
+    # Both cable and monitor received full 48000 frames
+    cable_full = np.vstack(cable_captured)[:sr]
+    monitor_full = np.vstack(monitor_captured)[:sr]
+    np.testing.assert_allclose(cable_full, tone, atol=1e-3)
+    np.testing.assert_allclose(monitor_full, tone, atol=1e-3)
+
+
+def test_dual_device_seek_synchronization():
+    sr = 48000
+    mixer = AudioMixer(sr=sr, blocksize=1024)
+    # 2.0 second test audio
+    tone = np.ones((sr * 2, 2), dtype=np.float32) * 0.4
+    clip = {"id": "seek_test", "title": "Seek", "volume": 1.0}
+    settings = {"cable_device_id": 1, "monitor_device_id": 2, "cable_volume": 1.0, "monitor_volume": 1.0}
+
+    voice = mixer.play_voice(clip, tone, settings)
+    # Render 1024 frames on both
+    mixer.cable_mixer.render_block(1024, duck_gain=1.0)
+    mixer.monitor_mixer.render_block(1024, duck_gain=1.0)
+
+    # Seek to 1.5s
+    voice.seek(1.5)
+    target_sample = int(1.5 * sr)
+    assert voice.pos_idx == target_sample
+
+    # Next render block must resume from the seeked sample
+    mixer.cable_mixer.render_block(512, duck_gain=1.0)
+    assert mixer.cable_mixer._voice_states[voice.play_id]["pos"] == target_sample + 512
+    mixer.monitor_mixer.render_block(512, duck_gain=1.0)
+    assert mixer.monitor_mixer._voice_states[voice.play_id]["pos"] == target_sample + 512

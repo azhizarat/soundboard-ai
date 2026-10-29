@@ -73,15 +73,42 @@ class MixerVoice:
         self.duration_s = round(float(self.total_samples / max(1, self.sr)), 2)
 
         self.pos_idx = 0
+        self.requested_seek_pos = 0
         self.paused = False
         self.stopping = False
         self.fade_samples_remaining = CROSSFADE_SAMPLES_10MS
         self.fade_total_samples = CROSSFADE_SAMPLES_10MS
         self.seek_epoch = 0
+        self._device_positions: dict[str, int] = {}
+        self._destinations: set[str] = set()
+        self._driver_destination: str | None = None
 
         self.stop_event = threading.Event()
         self._lock = threading.RLock()
         self._notified_finish = False
+
+    def register_destinations(self, dests: set[str], driver: str | None = None) -> None:
+        with self._lock:
+            self._destinations = set(dests)
+            self._driver_destination = driver
+
+    def update_device_pos(self, dest_key: str, pos: int) -> None:
+        with self._lock:
+            self._device_positions[dest_key] = pos
+            if self._driver_destination and self._driver_destination in self._device_positions:
+                self.pos_idx = self._device_positions[self._driver_destination]
+            elif self._device_positions:
+                self.pos_idx = max(self._device_positions.values())
+
+    def finish_destination(self, dest_key: str) -> None:
+        with self._lock:
+            self._device_positions.pop(dest_key, None)
+            if self._destinations:
+                self._destinations.discard(dest_key)
+                if not self._destinations:
+                    self.trigger_finish()
+            else:
+                self.trigger_finish()
 
     def set_live_volume(self, volume: float) -> float:
         with self._lock:
@@ -111,15 +138,21 @@ class MixerVoice:
     def restart(self) -> None:
         with self._lock:
             self.pos_idx = 0
+            self.requested_seek_pos = 0
             self.seek_epoch += 1
             self.paused = False
             self.stopping = False
+            for k in list(self._device_positions.keys()):
+                self._device_positions[k] = 0
 
     def seek_to_seconds(self, sec: float) -> float:
         with self._lock:
             target_idx = max(0, min(self.total_samples, int(round(float(sec) * self.sr))))
             self.pos_idx = target_idx
+            self.requested_seek_pos = target_idx
             self.seek_epoch += 1
+            for k in list(self._device_positions.keys()):
+                self._device_positions[k] = target_idx
             return round(float(self.pos_idx / max(1, self.sr)), 2)
 
     def seek(self, position_s: float) -> float:
@@ -189,13 +222,16 @@ class DeviceMixer:
         sr: int = TARGET_SR,
         blocksize: int = DEFAULT_BLOCKSIZE,
         volume: float = 1.0,
+        dest_key: str = "device",
     ):
         self.device_id = device_id
         self.sr = sr
         self.blocksize = blocksize
         self.volume = max(0.0, float(volume))
+        self.dest_key = dest_key
         self._prev_device_vol: float = self.volume
         self._voices: dict[str, MixerVoice] = {}
+        self._voice_states: dict[str, dict] = {}
         self._lock = threading.RLock()
         self._prev_duck: float = 1.0
         self._prev_gains: dict[str, float] = {}
@@ -223,13 +259,21 @@ class DeviceMixer:
         with self._lock:
             self._voices[voice.play_id] = voice
             self._prev_gains[voice.play_id] = voice.base_gain * voice.live_volume
+            self._voice_states[voice.play_id] = {
+                "pos": voice.pos_idx,
+                "seek_epoch": voice.seek_epoch,
+                "stopping": voice.stopping,
+                "fade_rem": voice.fade_samples_remaining,
+                "fade_tot": voice.fade_total_samples,
+            }
 
     def remove_voice(self, play_id: str) -> None:
         with self._lock:
             voice = self._voices.pop(play_id, None)
             self._prev_gains.pop(play_id, None)
+            self._voice_states.pop(play_id, None)
             if voice:
-                voice.trigger_finish()
+                voice.finish_destination(self.dest_key)
 
     def get_voice(self, play_id: str) -> MixerVoice | None:
         with self._lock:
@@ -242,19 +286,33 @@ class DeviceMixer:
         with self._lock:
             finished = []
             for play_id, voice in list(self._voices.items()):
+                state = self._voice_states.get(play_id)
+                if state is None:
+                    continue
+
                 with voice._lock:
                     if voice.paused:
                         continue
-                    if voice.stop_event.is_set() and not voice.stopping:
+                    if voice.stop_event.is_set() and not state["stopping"]:
                         finished.append(play_id)
                         continue
 
-                    pos = voice.pos_idx
+                    if state["seek_epoch"] != voice.seek_epoch:
+                        state["pos"] = voice.requested_seek_pos
+                        state["seek_epoch"] = voice.seek_epoch
+                        state["stopping"] = False
+
+                    if voice.stopping and not state["stopping"]:
+                        state["stopping"] = True
+                        state["fade_rem"] = voice.fade_samples_remaining
+                        state["fade_tot"] = voice.fade_total_samples
+
+                    pos = state["pos"]
                     total = voice.total_samples
                     if pos >= total:
                         if voice.loop:
                             pos = 0
-                            voice.pos_idx = 0
+                            state["pos"] = 0
                         else:
                             finished.append(play_id)
                             continue
@@ -270,34 +328,40 @@ class DeviceMixer:
                     duck_ramp = np.linspace(self._prev_duck, duck_curr, avail, dtype=np.float32)
                     voice_signal = chunk * (gain_ramp * duck_ramp)[:, None]
 
-                    if voice.stopping:
-                        fade_rem = voice.fade_samples_remaining
-                        fade_tot = max(1, voice.fade_total_samples)
+                    if state["stopping"]:
+                        fade_rem = state["fade_rem"]
+                        fade_tot = max(1, state["fade_tot"])
                         fade_len = min(avail, fade_rem)
                         start_f = fade_rem / fade_tot
                         end_f = max(0.0, (fade_rem - fade_len) / fade_tot)
                         curve = np.linspace(start_f, end_f, fade_len, dtype=np.float32)
                         voice_signal[:fade_len] *= curve[:, None]
-                        voice.fade_samples_remaining -= fade_len
-                        if voice.fade_samples_remaining <= 0:
+                        state["fade_rem"] -= fade_len
+                        if state["fade_rem"] <= 0:
                             finished.append(play_id)
 
                     mix[:avail] += voice_signal
-                    voice.pos_idx += avail
+                    state["pos"] += avail
 
-                    if avail < frames and voice.loop and not voice.stopping and total > 0:
+                    if avail < frames and voice.loop and not state["stopping"] and total > 0:
                         rem = frames - avail
                         rem_avail = min(rem, total)
                         mix[avail : avail + rem_avail] += (
                             voice.data[:rem_avail] * (target_gain * duck_curr)
                         )
-                        voice.pos_idx = rem_avail
+                        state["pos"] = rem_avail
+
+                    if not voice.loop and state["pos"] >= total and play_id not in finished:
+                        finished.append(play_id)
+
+                voice.update_device_pos(self.dest_key, state["pos"])
 
             for pid in finished:
                 v = self._voices.pop(pid, None)
                 self._prev_gains.pop(pid, None)
+                self._voice_states.pop(pid, None)
                 if v:
-                    v.trigger_finish()
+                    v.finish_destination(self.dest_key)
 
             # Master device volume ramp across block
             target_dev_vol = self.volume
@@ -328,6 +392,12 @@ class DeviceMixer:
                 blocksize=self.blocksize,
                 callback=_callback,
             )
+            actual_sr = int(stream.samplerate)
+            if actual_sr != self.sr:
+                logger.warning(
+                    f"Dispositivo {self.device_id} ({self.dest_key}) iniciou com taxa "
+                    f"{actual_sr} Hz diferente de {self.sr} Hz."
+                )
             stream.start()
             self._stream = stream
             self._stream_running = True
@@ -355,8 +425,8 @@ class AudioMixer:
     def __init__(self, sr: int = TARGET_SR, blocksize: int = DEFAULT_BLOCKSIZE):
         self.sr = sr
         self.blocksize = blocksize
-        self.cable_mixer = DeviceMixer(sr=sr, blocksize=blocksize)
-        self.monitor_mixer = DeviceMixer(sr=sr, blocksize=blocksize)
+        self.cable_mixer = DeviceMixer(sr=sr, blocksize=blocksize, dest_key="cable")
+        self.monitor_mixer = DeviceMixer(sr=sr, blocksize=blocksize, dest_key="monitor")
         self._voices: dict[str, MixerVoice] = {}
         self._lock = threading.RLock()
         self._duck_provider: Callable[[], float] | None = None
@@ -398,6 +468,12 @@ class AudioMixer:
         clip_id = str(clip.get("id", ""))
         live_vol = float(clip.get("volume", 1.0))
 
+        destinations = set()
+        if has_cable:
+            destinations.add("cable")
+        if has_monitor:
+            destinations.add("monitor")
+
         voice = MixerVoice(
             play_id=play_id,
             clip_id=clip_id,
@@ -411,6 +487,7 @@ class AudioMixer:
             emoji=str(clip.get("emoji") or "🔊"),
             on_finish=on_finish,
         )
+        voice.register_destinations(destinations, driver="cable" if has_cable else "monitor")
 
         with self._lock:
             self._voices[play_id] = voice

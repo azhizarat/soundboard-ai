@@ -711,16 +711,43 @@ body {
   width: min(760px, 94vw);
 }
 
-.lufs-row {
+.trim-lufs-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 8px;
+  margin-top: 4px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+  flex-wrap: wrap;
+}
+
+.trim-lufs-meta {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
-.lufs-row .status-pill {
+.trim-lufs-label {
   font-size: 11px;
-  padding: 3px 8px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+#clipLufsBadge {
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1.4;
+}
+
+#btnReanalyzeLufs {
+  white-space: nowrap;
 }
 
 /* Workspace */
