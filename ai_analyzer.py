@@ -28,11 +28,11 @@ def configure_runtime(ffmpeg_path: str = None, ollama_url: str = None, ollama_mo
 CATEGORY_STYLE = {
     "Rage": {"emoji": "🔥", "color": "#ef4444"},
     "Risada": {"emoji": "😂", "color": "#f59e0b"},
-    "Meme": {"emoji": "🤡", "color": "#8b5cf6"},
-    "Call": {"emoji": "🎙️", "color": "#3b82f6"},
+    "Meme": {"emoji": "⚡", "color": "#8b5cf6"},
     "Vinhetas": {"emoji": "🎵", "color": "#06b6d4"},
-    "Efeito": {"emoji": "🔊", "color": "#10b981"},
-    "Clássico": {"emoji": "👑", "color": "#ec4899"},
+    "Call": {"emoji": "💬", "color": "#3b82f6"},
+    "Efeito": {"emoji": "🎵", "color": "#06b6d4"},
+    "Clássico": {"emoji": "⚡", "color": "#8b5cf6"},
 }
 
 STOPWORDS_PT = {
@@ -48,16 +48,28 @@ RAGE_KEYWORDS = {
     "caralho", "porra", "puta", "merda", "cacete", "desgraça", "inferno",
     "imbecil", "idiota", "lixo", "morri", "morreu", "roubado", "hack",
     "impossível", "para", "sai", "socorro", "matou", "troll", "trolou",
+    "tiltou", "tiltado", "ruim", "noob", "fudeu", "odeio", "dropei",
+    "dropar", "morro", "tenta", "vsf", "tmnc", "fdp", "grrr",
 }
 
 LAUGH_KEYWORDS = {
     "haha", "hehe", "hihi", "kkkk", "kakaka", "rsrs", "hahaha", "ahahaha",
+    "kkkkk", "huehue", "ksks", "kaka", "gargalhada", "chorei", "ri",
 }
 
 MEME_KEYWORDS = {
     "relaxa", "relaxe", "esfolar", "esfordecar", "confia", "calma", "mentira",
     "clipa", "clipado", "olha", "mano", "cara", "véi", "vei", "bicho", "lenda",
     "mito", "cuidado", "correr", "corre", "ajuda", "deus", "jesus", "nossa",
+    "tankei", "tankou", "não tankei", "nao tankei", "suave", "esquece", "brabo",
+    "braba", "mitou", "tá maluco", "ta maluco", "bora", "pode pá", "pode pa",
+    "gosta", "cesar", "certeza", "vacilou", "vacilo", "papo reto",
+}
+
+VINHETA_KEYWORDS = {
+    "musica", "música", "som", "beat", "trilha", "intro", "outro", "tema",
+    "toque", "alarme", "efeito", "jingle", "instrumental", "vinheta", "canção",
+    "toca", "soundtrack", "baixo", "guitarra", "bateria",
 }
 
 
@@ -173,15 +185,28 @@ def analyze_acoustics(audio: np.ndarray, sr: int = 16000) -> dict:
     }
 
 
-def _extract_punchy_title(transcript: str, mood: str, speaker_name: str = "") -> str:
+def _extract_punchy_title(
+    transcript: str,
+    mood: str,
+    speaker_name: str = "",
+    category: str = "Call",
+) -> str:
     clean = (transcript or "").strip()
     if not clean:
+        if category == "Risada":
+            return f"Risada ({speaker_name})"[:30] if speaker_name else "Gargalhada"
+        elif category == "Rage":
+            return f"Grito ({speaker_name})"[:30] if speaker_name else "Surto na call"
+        elif category == "Vinhetas":
+            return "Vinheta sonora"
+        elif category == "Meme":
+            return f"Bordão ({speaker_name})"[:30] if speaker_name else "Pérola da call"
         base = mood.split("/")[0].strip()
         return f"{base} ({speaker_name})"[:30] if speaker_name else f"Som: {base}"[:30]
 
-    # Split into clauses and pick the most expressive clause (exclamation, question, or last punchline)
+    # Split into clauses and pick the most expressive clause (exclamation, question, or first clause)
     clauses = [c.strip() for c in re.split(r"[.!?;]+", clean) if c.strip()]
-    chosen = clauses[-1] if clauses else clean
+    chosen = clauses[0] if clauses else clean
     for c in clauses:
         if "!" in clean or any(w in c.lower() for w in RAGE_KEYWORDS | MEME_KEYWORDS):
             chosen = c
@@ -195,9 +220,9 @@ def _extract_punchy_title(transcript: str, mood: str, speaker_name: str = "") ->
     while len(words) > 4 and words[0].lower() in STOPWORDS_PT:
         words.pop(0)
 
-    short_words = words[:5]
+    short_words = words[:4]
     title = " ".join(short_words).capitalize()
-    if mood == "Rage / Grito" and not title.endswith("!"):
+    if (mood == "Rage / Grito" or category == "Rage") and not title.endswith("!"):
         title = title[:29] + "!"
     return title[:30]
 
@@ -258,13 +283,14 @@ def generate_smart_metadata(
     mood: str,
     speaker_name: str = "",
     duration_s: float = 1.0,
-    use_llm: bool = True,
+    use_llm: bool = False,
 ) -> dict:
     """Generates catchy button title, category, emoji, color, and tags from speech + acoustic mood."""
     text_lower = (transcript or "").lower()
+    clean_text = (transcript or "").strip()
     words_set = set(re.findall(r"[\wÀ-ÿ]+", text_lower))
 
-    if use_llm and transcript:
+    if use_llm and clean_text:
         prompt = (
             "Você nomeia botões de um Soundboard gamer em português.\n"
             f"Quem falou: {speaker_name or 'Desconhecido'}\n"
@@ -272,7 +298,7 @@ def generate_smart_metadata(
             f"Transcrição: \"{transcript}\"\n"
             "Responda APENAS JSON com: "
             "{\"title\": \"titulo curto (2 a 4 palavras)\", "
-            "\"category\": \"Rage|Risada|Meme|Call|Efeito|Clássico\", "
+            "\"category\": \"Rage|Risada|Meme|Vinhetas|Call\", "
             "\"emoji\": \"🔥\", \"tags\": [\"tag1\", \"tag2\"]}"
         )
         llm_res = _query_local_ollama(prompt)
@@ -287,27 +313,52 @@ def generate_smart_metadata(
                 "tags": llm_res.get("tags") or [cat.lower(), mood.lower()],
             }
 
-    # Smart acoustic + lexical classification
-    if mood == "Risada" or bool(words_set & LAUGH_KEYWORDS) or "kkk" in text_lower or "haha" in text_lower:
+    # Smart multimodal decision tree (Acoustic + Lexical + Energy)
+    is_laugh = (
+        mood == "Risada"
+        or bool(words_set & LAUGH_KEYWORDS)
+        or any(token in text_lower for token in ("kkk", "haha", "rsrs", "huehue", "ksks", "hehe", "hihi"))
+    )
+
+    is_rage = (
+        mood == "Rage / Grito"
+        or bool(words_set & RAGE_KEYWORDS)
+    )
+
+    is_vinheta = (
+        bool(words_set & VINHETA_KEYWORDS)
+        or mood == "Efeito / Meme"
+        or (not clean_text and duration_s >= 2.5)
+    )
+
+    is_meme = (
+        bool(words_set & MEME_KEYWORDS)
+        or mood == "Fala Animada"
+        or (clean_text and len(clean_text) <= 18 and ("!" in transcript or "?" in transcript))
+    )
+
+    if is_vinheta and not is_rage and not is_laugh:
+        category = "Vinhetas"
+    elif is_laugh:
         category = "Risada"
-    elif mood == "Rage / Grito" or bool(words_set & RAGE_KEYWORDS):
+    elif is_rage:
         category = "Rage"
-    elif mood == "Efeito / Meme" and not transcript.strip():
-        category = "Efeito"
-    elif bool(words_set & MEME_KEYWORDS) or mood == "Fala Animada" or "!" in (transcript or ""):
+    elif is_vinheta:
+        category = "Vinhetas"
+    elif is_meme:
         category = "Meme"
-    elif duration_s >= 4.5:
-        category = "Clássico"
+    elif not clean_text:
+        category = "Vinhetas"
     else:
         category = "Call"
 
     style = CATEGORY_STYLE.get(category, CATEGORY_STYLE["Call"])
-    title = _extract_punchy_title(transcript, mood, speaker_name)
+    title = _extract_punchy_title(transcript, mood, speaker_name, category)
 
     tags = [category.lower(), mood.split("/")[0].strip().lower()]
     if speaker_name:
         tags.append(speaker_name.lower())
-    for kw in sorted(words_set & (RAGE_KEYWORDS | MEME_KEYWORDS | LAUGH_KEYWORDS)):
+    for kw in sorted(words_set & (RAGE_KEYWORDS | MEME_KEYWORDS | LAUGH_KEYWORDS | VINHETA_KEYWORDS)):
         if kw not in tags:
             tags.append(kw)
 
@@ -683,7 +734,7 @@ class AIAnalyzer:
         existing_speaker_id: str = None,
         speaker_name: str = "",
         speaker_names: dict = None,
-        use_llm: bool = True,
+        use_llm: bool = False,
         skip_speaker_id: bool = False,
         forced_category: str = None,
     ) -> dict:

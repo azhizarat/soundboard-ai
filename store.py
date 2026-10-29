@@ -8,13 +8,11 @@ import threading
 from pathlib import Path
 
 DEFAULT_CATEGORIES = [
-    {"id": "Rage", "name": "Rage / Surto", "emoji": "🔥", "color": "#ef4444"},
-    {"id": "Risada", "name": "Risada", "emoji": "😂", "color": "#f59e0b"},
-    {"id": "Meme", "name": "Meme / Pérola", "emoji": "🤡", "color": "#8b5cf6"},
-    {"id": "Call", "name": "Fala / Call", "emoji": "🎙️", "color": "#3b82f6"},
-    {"id": "Vinhetas", "name": "Vinhetas / Sons", "emoji": "🎵", "color": "#06b6d4"},
-    {"id": "Efeito", "name": "Efeito Sonoro", "emoji": "🔊", "color": "#10b981"},
-    {"id": "Clássico", "name": "Clássico", "emoji": "👑", "color": "#ec4899"},
+    {"id": "Rage", "name": "Rage", "emoji": "🔥", "color": "#ef4444"},
+    {"id": "Risada", "name": "Risadas & Pérolas", "emoji": "😂", "color": "#f59e0b"},
+    {"id": "Meme", "name": "Bordões & Memes", "emoji": "⚡", "color": "#8b5cf6"},
+    {"id": "Vinhetas", "name": "Vinhetas & Trilhas", "emoji": "🎵", "color": "#06b6d4"},
+    {"id": "Call", "name": "Papo & Resenha", "emoji": "💬", "color": "#3b82f6"},
 ]
 
 SPEAKER_PALETTE = [
@@ -128,14 +126,40 @@ class SoundboardStore:
     def _apply_loaded(self, loaded: dict):
         self.state["schema_version"] = int(loaded.get("schema_version", CURRENT_SCHEMA_VERSION))
         self.state["settings"] = {**DEFAULT_SETTINGS, **loaded.get("settings", {})}
-        loaded_cats = loaded.get("categories") or []
-        existing_cat_ids = {c.get("id") for c in loaded_cats if isinstance(c, dict)}
+
+        cat_map = {c["id"]: dict(c) for c in DEFAULT_CATEGORIES}
+
+        # Migrate clips with legacy categories
+        clips = loaded.get("clips") or []
+        for c in clips:
+            cat = c.get("category")
+            if cat == "Efeito":
+                c["category"] = "Vinhetas"
+            elif cat == "Clássico":
+                c["category"] = "Meme"
+            elif cat not in cat_map:
+                c["category"] = "Call"
+        self.state["clips"] = clips
+
+        # Migrate loaded category objects
+        raw_cats = loaded.get("categories") or []
+        migrated_cats = []
+        for c in raw_cats:
+            cid = c.get("id")
+            if cid in ("Efeito", "Clássico"):
+                continue
+            if cid in cat_map:
+                migrated_cats.append({**c, **cat_map[cid]})
+            else:
+                migrated_cats.append(c)
+
+        existing_ids = {c["id"] for c in migrated_cats if isinstance(c, dict)}
         for def_cat in DEFAULT_CATEGORIES:
-            if def_cat["id"] not in existing_cat_ids:
-                loaded_cats.append(dict(def_cat))
-        self.state["categories"] = loaded_cats or list(DEFAULT_CATEGORIES)
+            if def_cat["id"] not in existing_ids:
+                migrated_cats.append(dict(def_cat))
+
+        self.state["categories"] = migrated_cats or list(DEFAULT_CATEGORIES)
         self.state["speakers"] = loaded.get("speakers") or {}
-        self.state["clips"] = loaded.get("clips") or []
 
     def _perform_save(self):
         """Must be called with self._lock held."""

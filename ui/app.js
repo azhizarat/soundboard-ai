@@ -893,7 +893,29 @@ function openEditModal(clip) {
   document.getElementById("editEmoji").value = clip.emoji || "🔊";
   document.getElementById("editTitle").value = clip.title || "";
   document.getElementById("editColor").value = clip.color || "#3b82f6";
-  document.getElementById("editCategory").value = clip.category || "Call";
+
+  const catSel = document.getElementById("editCategory");
+  if (catSel) {
+    catSel.innerHTML = "";
+    const cats = (state.categories && state.categories.length)
+      ? state.categories
+      : [
+          { id: "Rage", name: "Rage", emoji: "🔥" },
+          { id: "Risada", name: "Risadas & Pérolas", emoji: "😂" },
+          { id: "Meme", name: "Bordões & Memes", emoji: "⚡" },
+          { id: "Vinhetas", name: "Vinhetas & Trilhas", emoji: "🎵" },
+          { id: "Call", name: "Papo & Resenha", emoji: "💬" },
+        ];
+    cats.forEach((c) => {
+      const opt = document.createElement("option");
+      opt.value = c.id;
+      opt.textContent = `${c.emoji || "📁"} ${c.name || c.id}`;
+      if (clip.category === c.id) opt.selected = true;
+      catSel.appendChild(opt);
+    });
+    catSel.value = clip.category || "Call";
+  }
+
   document.getElementById("editHotkey").value = clip.hotkey || "";
   document.getElementById("editMood").value = clip.acoustic_mood || "Normal";
   document.getElementById("editTranscript").value = clip.transcript || "";

@@ -150,12 +150,12 @@ def _check_ollama(config) -> CheckResult:
     except (urllib.error.URLError, OSError, ValueError):
         status = None
     if status == 200:
-        return CheckResult("ollama", "Ollama", "ok", "Ollama respondeu em /api/tags")
+        return CheckResult("ollama", "Ollama", "ok", "Ollama online em /api/tags (opcional)")
     return CheckResult(
         "ollama",
         "Ollama",
-        "warn",
-        "Ollama offline — usando heurística local",
+        "ok",
+        "Motor de decisão local ativo (Ollama offline/opcional)",
         OLLAMA_FIX,
         "Baixar Ollama",
         "open_url",
@@ -306,7 +306,7 @@ def capabilities(checks) -> dict[str, bool]:
         "ai_analysis": models is not None and models.status != "error",
         "audio_convert": ffmpeg is not None and ffmpeg.status == "ok",
         "cable_routing": vbcable is not None and vbcable.status == "ok",
-        "local_llm": ollama is not None and ollama.status == "ok",
+        "local_llm": ollama is not None and ollama.status == "ok" and "offline" not in (ollama.detail or "").lower(),
     }
 
 

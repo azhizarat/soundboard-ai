@@ -74,7 +74,7 @@ def test_generate_smart_metadata_ptbr():
         use_llm=False,
     )
     assert 2 <= len(meta["title"]) <= 32
-    assert meta["category"] in ("Rage", "Risada", "Meme", "Call", "Efeito", "Clássico")
+    assert meta["category"] in ("Rage", "Risada", "Meme", "Vinhetas", "Call")
     assert meta["emoji"]
     assert meta["color"].startswith("#")
 

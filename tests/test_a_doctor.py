@@ -250,7 +250,7 @@ def test_ollama_online(monkeypatch, cfg):
     assert seen["timeout"] == doctor.PROBE_TIMEOUT
 
 
-def test_ollama_offline_is_warn(monkeypatch, cfg):
+def test_ollama_offline_is_ok_with_local_engine(monkeypatch, cfg):
     def fake_urlopen(url, timeout=None):
         raise urllib.error.URLError("recusado")
 
@@ -258,15 +258,15 @@ def test_ollama_offline_is_warn(monkeypatch, cfg):
 
     check = doctor._check_ollama(cfg)
 
-    assert check.status == "warn"
-    assert "heurística local" in check.detail
+    assert check.status == "ok"
+    assert "local ativo" in check.detail
     assert check.fix_url == doctor.OLLAMA_FIX
 
 
-def test_ollama_non_200_is_warn(monkeypatch, cfg):
+def test_ollama_non_200_is_ok_with_local_engine(monkeypatch, cfg):
     monkeypatch.setattr(doctor.urllib.request, "urlopen", lambda url, timeout=None: _FakeResponse(status=503))
 
-    assert doctor._check_ollama(cfg).status == "warn"
+    assert doctor._check_ollama(cfg).status == "ok"
 
 
 # --- data_writable ------------------------------------------------------------
