@@ -592,8 +592,7 @@ class SoundboardAPI:
 
     def stop_all(self, from_hotkey: bool = False) -> dict:
         self._audio.stop_all()
-        if from_hotkey:
-            self._notify_ui("stopped_all", {})
+        self._notify_ui("stopped_all", {})
         return {"ok": True}
 
     def _calculate_clip_loudness(

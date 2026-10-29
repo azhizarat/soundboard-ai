@@ -796,6 +796,17 @@ function setDraftBusy(busy) {
 
 function closeEditModal() {
   document.getElementById("editModal").classList.add("hidden");
+  const editId = document.getElementById("editClipId")?.value;
+  if (state.activePlayback && state.activePlayback.clip_id === editId) {
+    api().stop_all();
+    state.activePlayback = null;
+    delete state.playingClips[editId];
+    if (playbackRafId) {
+      cancelAnimationFrame(playbackRafId);
+      playbackRafId = null;
+    }
+    renderGrid();
+  }
   updateModalPreviewButtons(false);
   state.draftClipId = null;
   applyDraftChrome(false);
@@ -949,13 +960,24 @@ function openEditModal(clip) {
     state.activePlayback.playing
   );
   updateModalPreviewButtons(curClipPlaying);
+  const curPos = curClipPlaying ? Number(state.activePlayback.position || 0) : 0;
+  const cutDur = Math.max(0.05, enVal - stVal);
+  const wfSeek = document.getElementById("wfSeekSlider");
+  if (wfSeek) {
+    wfSeek.max = cutDur.toFixed(2);
+    wfSeek.value = curPos.toFixed(2);
+  }
+  const wfCur = document.getElementById("wfPlayCurrentTime");
+  if (wfCur) wfCur.textContent = formatPlayTime(curPos);
+  const wfDur = document.getElementById("wfPlayDuration");
+  if (wfDur) wfDur.textContent = formatPlayTime(cutDur);
 
   document.getElementById("routingPopoverMenu")?.classList.add("hidden");
   document.getElementById("packPopover")?.classList.add("hidden");
   document.getElementById("editModal").classList.remove("hidden");
 }
 
-function drawWaveformCanvas() {
+function drawWaveformCanvas(playheadAbsoluteSec = null) {
   const canvas = document.getElementById("waveformCanvas");
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
@@ -982,12 +1004,35 @@ function drawWaveformCanvas() {
   const barW = Math.max(1.5, (w - (n - 1) * barGap) / n);
   const midY = h / 2;
 
+  const editId = document.getElementById("editClipId")?.value;
+  const isCurPlaying = Boolean(
+    state.activePlayback &&
+    state.activePlayback.clip_id === editId &&
+    state.activePlayback.playing
+  );
+
+  let currentPlayheadSec = playheadAbsoluteSec;
+  if (currentPlayheadSec === null && isCurPlaying) {
+    currentPlayheadSec = st + Number(state.activePlayback.position || 0);
+  }
+
+  const playheadX =
+    currentPlayheadSec !== null && currentPlayheadSec >= 0
+      ? Math.max(0, Math.min(w, (currentPlayheadSec / maxDur) * w))
+      : null;
+
   for (let i = 0; i < n; i++) {
     const x = i * (barW + barGap);
     const inTrim = x + barW >= startX && x <= endX;
     const amp = Math.max(0.06, Math.min(1, Number(peaks[i]) || 0.08));
     const bh = Math.max(3, amp * (h - 10));
-    ctx.fillStyle = inTrim ? "#3b82f6" : "#293552";
+
+    let barColor = inTrim ? "#3b82f6" : "#293552";
+    if (inTrim && playheadX !== null && x <= playheadX) {
+      barColor = "#60a5fa";
+    }
+
+    ctx.fillStyle = barColor;
     ctx.beginPath();
     ctx.roundRect(x, midY - bh / 2, barW, bh, 1.5);
     ctx.fill();
@@ -1001,6 +1046,31 @@ function drawWaveformCanvas() {
   ctx.fillRect(startX, 0, 2.5, h);
   ctx.fillStyle = "#f59e0b";
   ctx.fillRect(Math.max(0, endX - 2.5), 0, 2.5, h);
+
+  // Playhead needle cursor with glowing effect
+  if (playheadX !== null && (isCurPlaying || playheadAbsoluteSec !== null)) {
+    ctx.save();
+    ctx.shadowColor = "#38bdf8";
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(Math.max(0, playheadX - 1), 0, 2, h);
+    ctx.restore();
+
+    ctx.fillStyle = "#38bdf8";
+    ctx.beginPath();
+    ctx.moveTo(playheadX - 5, 0);
+    ctx.lineTo(playheadX + 5, 0);
+    ctx.lineTo(playheadX, 6);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(playheadX - 5, h);
+    ctx.lineTo(playheadX + 5, h);
+    ctx.lineTo(playheadX, h - 6);
+    ctx.closePath();
+    ctx.fill();
+  }
 }
 
 let playbackRafId = null;
@@ -1022,6 +1092,23 @@ function syncActivePlayback(status) {
     anchorPosSec: pos,
     anchorTimeMs: performance.now(),
   };
+
+  const editModal = document.getElementById("editModal");
+  const editClipId = document.getElementById("editClipId")?.value;
+  if (editModal && !editModal.classList.contains("hidden") && status.clip_id === editClipId) {
+    updateModalPreviewButtons(status.playing !== false);
+    const wfSeek = document.getElementById("wfSeekSlider");
+    if (wfSeek && document.activeElement !== wfSeek) {
+      wfSeek.max = dur.toFixed(2);
+      wfSeek.value = pos.toFixed(2);
+    }
+    const wfCur = document.getElementById("wfPlayCurrentTime");
+    if (wfCur) wfCur.textContent = formatPlayTime(pos);
+    const wfDur = document.getElementById("wfPlayDuration");
+    if (wfDur) wfDur.textContent = formatPlayTime(dur);
+    drawWaveformCanvas();
+  }
+
   renderGrid();
   startPlaybackRaf();
 }
@@ -1047,6 +1134,11 @@ function startPlaybackRaf() {
           state.activePlayback = null;
           playbackRafId = null;
           updateModalPreviewButtons(false);
+          const wfSeek = document.getElementById("wfSeekSlider");
+          if (wfSeek) wfSeek.value = "0";
+          const wfCur = document.getElementById("wfPlayCurrentTime");
+          if (wfCur) wfCur.textContent = "0:00.0";
+          drawWaveformCanvas();
           renderGrid();
           return;
         }
@@ -1063,6 +1155,19 @@ function startPlaybackRaf() {
       if (prog && ap.duration > 0) {
         prog.style.transition = "none";
         prog.style.width = `${Math.min(100, (curPos / ap.duration) * 100)}%`;
+      }
+
+      // Live waveform playhead and seek slider in edit modal
+      const editModal = document.getElementById("editModal");
+      const editClipId = document.getElementById("editClipId")?.value;
+      if (editModal && !editModal.classList.contains("hidden") && ap.clip_id === editClipId) {
+        drawWaveformCanvas();
+        const wfSeek = document.getElementById("wfSeekSlider");
+        if (wfSeek && document.activeElement !== wfSeek) {
+          wfSeek.value = curPos.toFixed(2);
+        }
+        const wfCur = document.getElementById("wfPlayCurrentTime");
+        if (wfCur) wfCur.textContent = formatPlayTime(curPos);
       }
     }
     playbackRafId = requestAnimationFrame(step);
@@ -1138,6 +1243,13 @@ function updateTrimTotalBadge(st, en) {
   const dur = Math.max(0.05, Number(en) - Number(st));
   const badge = document.getElementById("trimTotalDurationVal");
   if (badge) badge.textContent = `${dur.toFixed(2)}s`;
+  const wfSeek = document.getElementById("wfSeekSlider");
+  if (wfSeek) {
+    wfSeek.max = dur.toFixed(2);
+    if (Number(wfSeek.value) > dur) wfSeek.value = "0";
+  }
+  const wfDur = document.getElementById("wfPlayDuration");
+  if (wfDur) wfDur.textContent = formatPlayTime(dur);
 }
 
 let speakerConfirmTimer = null;
@@ -1836,27 +1948,124 @@ function bindEvents() {
       return ratio * maxDur;
     };
     wfCanvas.addEventListener("pointerdown", (ev) => {
-      const t = pointerToSec(ev);
+      const rect = wfCanvas.getBoundingClientRect();
+      const w = Math.max(1, rect.width);
+      const maxDur = Number(trimEndSlider.max) || 10;
       const curSt = Number(trimStartSlider.value) || 0;
-      const curEn = Number(trimEndSlider.value) || 10;
-      wfDragTarget = Math.abs(t - curSt) <= Math.abs(t - curEn) ? "start" : "end";
-      wfCanvas.setPointerCapture(ev.pointerId);
-      if (wfDragTarget === "start") syncTrimValues(Math.min(t, curEn - 0.1), curEn);
-      else syncTrimValues(curSt, Math.max(t, curSt + 0.1));
+      const curEn = Number(trimEndSlider.value) || maxDur;
+      const startX = (curSt / maxDur) * w;
+      const endX = (curEn / maxDur) * w;
+      const pointerX = ev.clientX - rect.left;
+      const t = pointerToSec(ev);
+      const HANDLE_HIT_PX = 10;
+
+      if (Math.abs(pointerX - startX) <= HANDLE_HIT_PX) {
+        wfDragTarget = "start";
+        wfCanvas.setPointerCapture(ev.pointerId);
+        syncTrimValues(Math.min(t, curEn - 0.1), curEn);
+      } else if (Math.abs(pointerX - endX) <= HANDLE_HIT_PX) {
+        wfDragTarget = "end";
+        wfCanvas.setPointerCapture(ev.pointerId);
+        syncTrimValues(curSt, Math.max(t, curSt + 0.1));
+      } else if (pointerX >= startX && pointerX <= endX) {
+        wfDragTarget = "seek";
+        wfCanvas.setPointerCapture(ev.pointerId);
+        const offset = Math.max(0, Math.min(curEn - curSt, t - curSt));
+        const wfSeek = document.getElementById("wfSeekSlider");
+        if (wfSeek) wfSeek.value = offset.toFixed(2);
+        const wfCur = document.getElementById("wfPlayCurrentTime");
+        if (wfCur) wfCur.textContent = formatPlayTime(offset);
+        const isPlaying =
+          state.activePlayback &&
+          state.activePlayback.clip_id === document.getElementById("editClipId")?.value &&
+          state.activePlayback.playing;
+        if (isPlaying) {
+          api().seek_playback(offset).then((res) => {
+            if (res && res.status) syncActivePlayback(res.status);
+          });
+        } else {
+          drawWaveformCanvas(curSt + offset);
+        }
+      } else {
+        wfDragTarget = Math.abs(t - curSt) <= Math.abs(t - curEn) ? "start" : "end";
+        wfCanvas.setPointerCapture(ev.pointerId);
+        if (wfDragTarget === "start") syncTrimValues(Math.min(t, curEn - 0.1), curEn);
+        else syncTrimValues(curSt, Math.max(t, curSt + 0.1));
+      }
     });
+
     wfCanvas.addEventListener("pointermove", (ev) => {
-      if (!wfDragTarget) return;
-      const t = pointerToSec(ev);
+      const rect = wfCanvas.getBoundingClientRect();
+      const w = Math.max(1, rect.width);
+      const maxDur = Number(trimEndSlider.max) || 10;
       const curSt = Number(trimStartSlider.value) || 0;
-      const curEn = Number(trimEndSlider.value) || 10;
+      const curEn = Number(trimEndSlider.value) || maxDur;
+      const startX = (curSt / maxDur) * w;
+      const endX = (curEn / maxDur) * w;
+      const pointerX = ev.clientX - rect.left;
+
+      if (!wfDragTarget) {
+        const HANDLE_HIT_PX = 10;
+        if (Math.abs(pointerX - startX) <= HANDLE_HIT_PX || Math.abs(pointerX - endX) <= HANDLE_HIT_PX) {
+          wfCanvas.style.cursor = "ew-resize";
+        } else if (pointerX >= startX && pointerX <= endX) {
+          wfCanvas.style.cursor = "pointer";
+        } else {
+          wfCanvas.style.cursor = "default";
+        }
+        return;
+      }
+
+      const t = pointerToSec(ev);
       if (wfDragTarget === "start") syncTrimValues(Math.min(t, curEn - 0.1), curEn);
-      else syncTrimValues(curSt, Math.max(t, curSt + 0.1));
+      else if (wfDragTarget === "end") syncTrimValues(curSt, Math.max(t, curSt + 0.1));
+      else if (wfDragTarget === "seek") {
+        const offset = Math.max(0, Math.min(curEn - curSt, t - curSt));
+        const wfSeek = document.getElementById("wfSeekSlider");
+        if (wfSeek) wfSeek.value = offset.toFixed(2);
+        const wfCur = document.getElementById("wfPlayCurrentTime");
+        if (wfCur) wfCur.textContent = formatPlayTime(offset);
+        const isPlaying =
+          state.activePlayback &&
+          state.activePlayback.clip_id === document.getElementById("editClipId")?.value &&
+          state.activePlayback.playing;
+        if (isPlaying) {
+          api().seek_playback(offset).then((res) => {
+            if (res && res.status) syncActivePlayback(res.status);
+          });
+        } else {
+          drawWaveformCanvas(curSt + offset);
+        }
+      }
     });
+
     const endWfDrag = () => {
       wfDragTarget = null;
     };
     wfCanvas.addEventListener("pointerup", endWfDrag);
     wfCanvas.addEventListener("pointercancel", endWfDrag);
+  }
+
+  const wfSeekSlider = document.getElementById("wfSeekSlider");
+  if (wfSeekSlider) {
+    wfSeekSlider.oninput = (e) => {
+      const pos = Number(e.target.value) || 0;
+      const curEl = document.getElementById("wfPlayCurrentTime");
+      if (curEl) curEl.textContent = formatPlayTime(pos);
+      const curSt = Number(trimStartSlider.value) || 0;
+      drawWaveformCanvas(curSt + pos);
+    };
+    wfSeekSlider.onchange = async (e) => {
+      const pos = Number(e.target.value) || 0;
+      const isPlaying =
+        state.activePlayback &&
+        state.activePlayback.clip_id === document.getElementById("editClipId")?.value &&
+        state.activePlayback.playing;
+      if (isPlaying) {
+        const res = await api().seek_playback(pos);
+        if (res && res.status) syncActivePlayback(res.status);
+      }
+    };
   }
 
   trimStartSlider.oninput = (e) => syncTrimValues(e.target.value, trimEndSlider.value);
@@ -1904,7 +2113,19 @@ function bindEvents() {
     if (!id) return;
     if (state.activePlayback && state.activePlayback.clip_id === id && state.activePlayback.playing) {
       api().stop_all();
+      state.activePlayback = null;
+      delete state.playingClips[id];
+      if (playbackRafId) {
+        cancelAnimationFrame(playbackRafId);
+        playbackRafId = null;
+      }
       updateModalPreviewButtons(false);
+      const wfSeek = document.getElementById("wfSeekSlider");
+      if (wfSeek) wfSeek.value = "0";
+      const wfCur = document.getElementById("wfPlayCurrentTime");
+      if (wfCur) wfCur.textContent = "0:00.0";
+      renderGrid();
+      drawWaveformCanvas();
       return;
     }
 
@@ -1920,6 +2141,13 @@ function bindEvents() {
     if (res && res.status) {
       syncActivePlayback(res.status);
       updateModalPreviewButtons(true);
+      const wfSeek = document.getElementById("wfSeekSlider");
+      const seekVal = Number(wfSeek?.value || 0);
+      if (seekVal > 0.05) {
+        api().seek_playback(seekVal).then((sRes) => {
+          if (sRes && sRes.status) syncActivePlayback(sRes.status);
+        });
+      }
     }
   }
 
@@ -2120,11 +2348,21 @@ window.onBackendEvent = (event, payload) => {
       state.activePlayback = null;
     }
     updateModalPreviewButtons(false);
+    const wfSeek = document.getElementById("wfSeekSlider");
+    if (wfSeek) wfSeek.value = "0";
+    const wfCur = document.getElementById("wfPlayCurrentTime");
+    if (wfCur) wfCur.textContent = "0:00.0";
+    drawWaveformCanvas();
     renderGrid();
   } else if (event === "stopped_all") {
     state.playingClips = {};
     state.activePlayback = null;
     updateModalPreviewButtons(false);
+    const wfSeek = document.getElementById("wfSeekSlider");
+    if (wfSeek) wfSeek.value = "0";
+    const wfCur = document.getElementById("wfPlayCurrentTime");
+    if (wfCur) wfCur.textContent = "0:00.0";
+    drawWaveformCanvas();
     renderGrid();
   } else if (event === "replay_captured" || event === "clips_updated") {
     if (payload.clips) state.clips = payload.clips;

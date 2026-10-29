@@ -2151,7 +2151,67 @@ body.mini-overlay .density-group {
   display: block;
   width: 100%;
   height: 60px;
-  cursor: ew-resize;
+  cursor: default;
+}
+
+.wf-playback-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px;
+  background: rgba(15, 23, 42, 0.45);
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  margin-top: 2px;
+}
+
+.wf-time {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  color: #94a3b8;
+  font-weight: 600;
+  min-width: 44px;
+  text-align: left;
+  user-select: none;
+}
+
+.wf-time.wf-time-dur {
+  text-align: right;
+  color: #64748b;
+}
+
+.wf-seek-range {
+  flex: 1;
+  height: 4px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 99px;
+  outline: none;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.wf-seek-range:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.wf-seek-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #38bdf8;
+  border: 2px solid #ffffff;
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(56, 189, 248, 0.5);
+  transition: transform 0.1s ease;
+}
+
+.wf-seek-range::-webkit-slider-thumb:hover {
+  transform: scale(1.25);
+  background: #0ea5e9;
 }
 
 /* ============================================================

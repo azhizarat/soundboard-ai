@@ -347,8 +347,13 @@
                 <button type="button" id="btnPreviewTrimHeader" class="btn-preset btn-preset-test" title="Ouvir o trecho cortado no seu fone sem fechar o modal">▶️ Testar Corte</button>
               </div>
             </div>
-            <div class="waveform-wrap" title="Clique ou arraste nas bordas da onda sonora para ajustar o início e o fim do corte">
+            <div class="waveform-wrap" title="Clique ou arraste nas bordas para ajustar o corte, ou clique no meio para navegar pelo áudio">
               <canvas id="waveformCanvas" width="540" height="64"></canvas>
+            </div>
+            <div class="wf-playback-bar" title="Controle de reprodução do corte">
+              <span class="wf-time" id="wfPlayCurrentTime">0:00.0</span>
+              <input type="range" id="wfSeekSlider" min="0" max="10" step="0.01" value="0" class="wf-seek-range" title="Arraste para navegar pelo tempo do áudio cortado" />
+              <span class="wf-time wf-time-dur" id="wfPlayDuration">0:00.0</span>
             </div>
             <div class="form-row trim-box">
               <div class="form-group flex-1">
