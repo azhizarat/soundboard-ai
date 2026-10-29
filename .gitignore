@@ -9,6 +9,10 @@ data/clips/*
 !data/clips/.gitkeep
 data/models/
 data/soundboard.json
+data/*.bak
+data/logs/
+data/tmp/
+data/config.json
 *.gguf
 *.onnx
 *.npz

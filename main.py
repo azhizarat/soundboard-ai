@@ -1594,7 +1594,7 @@ def main(args=None):
     import webview
     from single_instance import SingleInstance
     from app_logging import setup_logging
-    from tray import SoundboardTray, ensure_icon_image
+    from tray import SoundboardTray, ensure_icon_image, ensure_ico_file
 
     opts = parse_args(args)
 
@@ -1614,6 +1614,7 @@ def main(args=None):
     ui_path = Path(__file__).parent.resolve() / "ui" / "index.html"
     icon_path = Path(__file__).parent.resolve() / "ui" / "icon.png"
     ensure_icon_image(icon_path)
+    ico_path = ensure_ico_file(icon_path) if sys.platform == "win32" else icon_path
 
     window = webview.create_window(
         title="Soundboard AI — VB-Audio Cable Studio",
@@ -1669,7 +1670,7 @@ def main(args=None):
         window.events.closing += on_closing
 
     try:
-        webview.start(debug=opts.debug, icon=str(icon_path) if icon_path.exists() else None)
+        webview.start(debug=opts.debug, icon=str(ico_path) if ico_path and ico_path.exists() else None)
     finally:
         if tray:
             tray.stop()

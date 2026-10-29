@@ -49,6 +49,24 @@ def ensure_icon_image(icon_path: Path) -> Image.Image:
     return img
 
 
+def ensure_ico_file(png_or_ico_path: Path) -> Path | None:
+    """Ensures a valid Windows .ico file exists (WinForms webview requires .ico, rejecting .png)."""
+    path = Path(png_or_ico_path)
+    if path.suffix.lower() == ".ico" and path.is_file():
+        return path
+    ico_path = path.with_suffix(".ico")
+    if ico_path.is_file():
+        return ico_path
+    img = ensure_icon_image(path)
+    try:
+        ico_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(str(ico_path), format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (64, 64)])
+        return ico_path
+    except Exception as exc:
+        logger.warning(f"Não foi possível gerar .ico para WinForms: {exc}")
+        return None
+
+
 class SoundboardTray:
     """Manages the system tray icon, notifications and background thread."""
 

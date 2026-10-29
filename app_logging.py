@@ -47,6 +47,10 @@ def setup_logging(data_dir: Path, debug: bool = False) -> Path:
         console_handler.setLevel(logging.DEBUG)
         root_logger.addHandler(console_handler)
 
+    # Suppress verbose third-party debug spam in console and log files
+    for noisy in ("PIL", "urllib3", "pystray", "comtypes"):
+        logging.getLogger(noisy).setLevel(logging.INFO)
+
     _install_exception_hooks(root_logger)
     return log_file
 
