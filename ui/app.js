@@ -21,6 +21,13 @@ const state = {
   draftCommitting: false,
   environment: null,
   envAutoOpened: false,
+  envBannerDismissed: (function () {
+    try {
+      return sessionStorage.getItem("env_banner_dismissed") === "1";
+    } catch (_) {
+      return false;
+    }
+  })(),
   config: {},
 };
 
@@ -149,6 +156,10 @@ function renderEnvironment(env) {
   if (!env) return;
   state.environment = env;
   const pending = Number(env.incomplete || 0);
+  const checks = Array.isArray(env.checks) ? env.checks : [];
+  const errors = checks.filter((c) => c.status === "error").length;
+  const warns = checks.filter((c) => c.status === "warn").length;
+
   const badge = document.getElementById("envBadge");
   if (badge) {
     badge.textContent = `${pending} pendência(s)`;
@@ -157,10 +168,21 @@ function renderEnvironment(env) {
     badge.classList.toggle("status-ok", pending === 0);
   }
   const banner = document.getElementById("envBanner");
-  if (banner) banner.classList.toggle("hidden", pending === 0);
+  if (banner) {
+    const shouldShow = pending > 0 && !state.envBannerDismissed;
+    banner.classList.toggle("hidden", !shouldShow);
+  }
   const bannerText = document.getElementById("envBannerText");
-  if (bannerText) bannerText.textContent = `Ambiente incompleto — ${pending} pendência(s)`;
-  renderEnvChecks(env.checks || []);
+  if (bannerText) {
+    if (errors > 0) {
+      bannerText.textContent = `Ambiente incompleto — ${errors} pendência(s) crítica(s)`;
+    } else if (warns > 0) {
+      bannerText.textContent = `Avisos de ambiente — ${warns} recurso(s) opcional(is) offline (Ollama)`;
+    } else {
+      bannerText.textContent = "Ambiente completo";
+    }
+  }
+  renderEnvChecks(checks);
   applyCapabilityGating(env.capabilities || {});
 }
 
@@ -1736,6 +1758,17 @@ function bindEvents() {
   }
   const btnEnvBanner = document.getElementById("btnEnvBanner");
   if (btnEnvBanner) btnEnvBanner.onclick = () => openEnvModal();
+  const btnEnvBannerClose = document.getElementById("btnEnvBannerClose");
+  if (btnEnvBannerClose) {
+    btnEnvBannerClose.onclick = () => {
+      state.envBannerDismissed = true;
+      try {
+        sessionStorage.setItem("env_banner_dismissed", "1");
+      } catch (_) {}
+      const banner = document.getElementById("envBanner");
+      if (banner) banner.classList.add("hidden");
+    };
+  }
   const btnCloseEnvModal = document.getElementById("btnCloseEnvModal");
   if (btnCloseEnvModal) btnCloseEnvModal.onclick = closeEnvModal;
   const btnCloseEnvFooter = document.getElementById("btnCloseEnvFooter");
