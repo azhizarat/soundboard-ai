@@ -312,6 +312,18 @@ def test_webview2_present(monkeypatch, cfg):
     assert "120.0.2210.91" in check.detail
 
 
+def test_webview2_present_in_wow64_registry(monkeypatch, cfg):
+    def open_key(root, sub, *args):
+        if "WOW6432Node" in sub:
+            return contextlib.nullcontext(object())
+        raise FileNotFoundError(2, "chave ausente")
+
+    _install_winreg(monkeypatch, open_key=open_key, version="156.0.4314.50")
+    check = doctor._check_webview2(cfg)
+    assert check.status == "ok"
+    assert "156.0.4314.50" in check.detail
+
+
 def test_webview2_missing(monkeypatch, cfg):
     _install_winreg(monkeypatch, present_roots=())
 

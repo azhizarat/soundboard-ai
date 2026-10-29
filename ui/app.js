@@ -294,11 +294,11 @@ async function initApp() {
   state.config = initial.config || {};
   captureEnvOriginalTitles();
   renderEnvironment(initial.environment);
-  if (
+  const hasErrors =
     initial.environment &&
-    Number(initial.environment.incomplete || 0) > 0 &&
-    !state.envAutoOpened
-  ) {
+    Array.isArray(initial.environment.checks) &&
+    initial.environment.checks.some((c) => c.status === "error");
+  if (hasErrors && !state.envAutoOpened) {
     state.envAutoOpened = true;
     openEnvModal();
   }

@@ -29,6 +29,12 @@ VBCABLE_FIX = "https://vb-audio.com/Cable/"
 OLLAMA_FIX = "https://ollama.com/download"
 WEBVIEW2_FIX = "https://learn.microsoft.com/microsoft-edge/webview2/"
 WEBVIEW2_REG_PATH = r"Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+WEBVIEW2_REG_PATHS = (
+    WEBVIEW2_REG_PATH,
+    r"Software\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+    r"Software\Microsoft\EdgeUpdate\ClientState\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+    r"Software\WOW6432Node\Microsoft\EdgeUpdate\ClientState\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+)
 
 _CACHE = {"at": 0.0, "key": None, "checks": []}
 _CACHE_LOCK = threading.Lock()
@@ -192,19 +198,48 @@ def _check_webview2(config) -> CheckResult:
             "open_url",
         )
 
-    for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
-        try:
-            with winreg.OpenKey(root, WEBVIEW2_REG_PATH) as key:
-                version = ""
+    # 1. Registry probe (checking 64-bit and 32-bit registry views)
+    access_masks = [None]
+    if hasattr(winreg, "KEY_READ") and hasattr(winreg, "KEY_WOW64_32KEY"):
+        access_masks.append(winreg.KEY_READ | winreg.KEY_WOW64_32KEY)
+    if hasattr(winreg, "KEY_READ") and hasattr(winreg, "KEY_WOW64_64KEY"):
+        access_masks.append(winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
+
+    found_version = ""
+    for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for subpath in WEBVIEW2_REG_PATHS:
+            for mask in access_masks:
                 try:
-                    value, _ = winreg.QueryValueEx(key, "pv")
-                    version = str(value).strip()
-                except Exception:
-                    version = ""
-        except OSError:
-            continue
-        detail = "WebView2 Runtime encontrado" + (f" ({version})" if version else "")
-        return CheckResult("webview2", "WebView2", "ok", detail)
+                    if mask is not None:
+                        try:
+                            key_ctx = winreg.OpenKey(root, subpath, 0, mask)
+                        except TypeError:
+                            key_ctx = winreg.OpenKey(root, subpath)
+                    else:
+                        key_ctx = winreg.OpenKey(root, subpath)
+                    with key_ctx as key:
+                        val, _ = winreg.QueryValueEx(key, "pv")
+                        ver = str(val).strip()
+                        if ver and ver != "0.0.0.0":
+                            found_version = ver
+                            break
+                except OSError:
+                    continue
+            if found_version:
+                break
+        if found_version:
+            break
+
+    if found_version:
+        return CheckResult("webview2", "WebView2", "ok", f"WebView2 Runtime encontrado ({found_version})")
+
+    # 2. Runtime fallback: if pywebview has an active window, WebView2 is confirmed working
+    try:
+        import webview
+        if getattr(webview, "windows", None) and len(webview.windows) > 0:
+            return CheckResult("webview2", "WebView2", "ok", "WebView2 Runtime ativo na sessão atual")
+    except Exception:
+        pass
 
     return CheckResult(
         "webview2",
