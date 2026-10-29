@@ -14,8 +14,8 @@ def get_autostart_command(app_root: Path | None = None) -> str:
     """Returns the command line used to launch Soundboard silently on boot."""
     root = (app_root or Path(__file__).parent).resolve()
     vbs_path = root / "Soundboard AI.vbs"
-    # Execute wscript.exe "<path_to_vbs>"
-    return f'wscript.exe "{vbs_path}"'
+    # Execute wscript.exe "<path_to_vbs>" --minimized
+    return f'wscript.exe "{vbs_path}" --minimized'
 
 
 def is_autostart_enabled() -> bool:

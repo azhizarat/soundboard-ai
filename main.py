@@ -1585,6 +1585,7 @@ def parse_args(args=None):
     parser = argparse.ArgumentParser(description="Soundboard AI — VB-Audio Cable Studio")
     parser.add_argument("--minimized", action="store_true", help="Inicia minimizado na bandeja do sistema")
     parser.add_argument("--debug", action="store_true", help="Ativa modo debug e logs no console")
+    parser.add_argument("--devtools", action="store_true", help="Abre o painel de desenvolvedor (DevTools) do WebView")
     parser.add_argument("--no-tray", action="store_true", help="Desativa o ícone na bandeja do sistema")
     parser.add_argument("--data-dir", type=str, default=None, help="Caminho personalizado da pasta de dados")
     return parser.parse_args(args)
@@ -1670,7 +1671,7 @@ def main(args=None):
         window.events.closing += on_closing
 
     try:
-        webview.start(debug=opts.debug, icon=str(ico_path) if ico_path and ico_path.exists() else None)
+        webview.start(debug=opts.devtools, icon=str(ico_path) if ico_path and ico_path.exists() else None)
     finally:
         if tray:
             tray.stop()
