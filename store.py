@@ -37,6 +37,8 @@ DEFAULT_SETTINGS = {
     "auto_split_speakers": False,
     "normalize_on_import": True,
     "replay_seconds": 15,
+    # "" = record whatever the Windows default output is playing.
+    "replay_source_name": "",
     "stop_all_hotkey": "ctrl+shift+s",
     "replay_hotkey": "alt+f10",
     "overlay_hotkey": "ctrl+shift+o",

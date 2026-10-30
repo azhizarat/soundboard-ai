@@ -1,13 +1,82 @@
 import math
 import os
+import re
 import time
 import uuid
 import subprocess
 import tempfile
 import threading
+import logging
 from collections import OrderedDict, deque
 from pathlib import Path
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+LOOPBACK_SUFFIX = "[loopback]"
+
+
+def _clean_device_name(name: str) -> str:
+    return re.sub(r"[\ufffd\s]+", " ", (name or "").strip().casefold()).strip()
+
+
+def device_names_match(a: str, b: str) -> bool:
+    """Compares device names across host APIs.
+
+    MME truncates names to 31 chars and the console code page can mangle
+    accents into U+FFFD, so an exact comparison misses the same device.
+    """
+    ca, cb = _clean_device_name(a), _clean_device_name(b)
+    if not ca or not cb:
+        return False
+    if ca == cb:
+        return True
+    sa = re.sub(r"[^a-z0-9]", "", ca)
+    sb = re.sub(r"[^a-z0-9]", "", cb)
+    if not sa or not sb:
+        return False
+    if sa == sb:
+        return True
+    shorter, longer = sorted((sa, sb), key=len)
+    return len(shorter) >= 15 and longer.startswith(shorter)
+
+
+def loopback_display_name(name: str) -> str:
+    """'Fones (X) [Loopback]' -> 'Fones (X)'."""
+    text = str(name or "").strip()
+    if text.casefold().endswith(LOOPBACK_SUFFIX):
+        text = text[: -len(LOOPBACK_SUFFIX)].rstrip()
+    return text
+
+
+def _is_cable_name(name: str) -> bool:
+    low = str(name or "").casefold()
+    return any(tok in low for tok in ("cable", "vb-audio", "voicemeeter"))
+
+
+def pick_loopback_device(loopbacks: list[dict], default_output_name: str, source_name: str = ""):
+    """Chooses the WASAPI loopback endpoint to record the replay from.
+
+    ``source_name`` empty means automatic: follow the Windows default output,
+    never silently landing on a virtual cable. A fixed name that is not
+    connected returns None so the caller reports it instead of rerouting.
+    """
+    loopbacks = list(loopbacks or [])
+    wanted = (source_name or "").strip()
+    if wanted:
+        for lb in loopbacks:
+            if device_names_match(loopback_display_name(lb.get("name")), wanted):
+                return lb
+        return None
+    default_name = (default_output_name or "").strip()
+    if default_name:
+        for lb in loopbacks:
+            if device_names_match(loopback_display_name(lb.get("name")), default_name):
+                return lb
+    for lb in loopbacks:
+        if not _is_cable_name(lb.get("name")):
+            return lb
+    return loopbacks[0] if loopbacks else None
 
 
 def trim_and_normalize(
@@ -233,6 +302,11 @@ class ReplayRingBuffer:
                 full = full[-want:]
         return full
 
+    def clear(self):
+        with self._lock:
+            self._chunks.clear()
+            self._current_samples = 0
+
 
 class AudioEngine:
     TARGET_SR = 48000
@@ -250,6 +324,7 @@ class AudioEngine:
         start_loopback: bool = True,
         ffmpeg_path: str = "ffmpeg",
         mixer_mode: str = "mixer",
+        loopback_source: str = "",
     ):
         self.ffmpeg_path = ffmpeg_path or "ffmpeg"
         self.mixer_mode = "mixer" if str(mixer_mode).lower() in ("mixer", "v2") else "legacy"
@@ -278,6 +353,14 @@ class AudioEngine:
         self._loopback_stop_event = threading.Event()
         self._loopback_thread = None
         self.loopback_active = False
+        # "" = automatic (follow the Windows default output).
+        self._loopback_source = (loopback_source or "").strip()
+        self._loopback_enabled = False
+        self._loopback_state_lock = threading.Lock()
+        self._loopback_device_name = ""
+        self._loopback_samplerate = 0
+        self._loopback_error = None
+        self._loopback_levels = deque(maxlen=64)  # (monotonic time, peak)
 
         if self.mixer_mode == "mixer":
             from mixer import AudioMixer
@@ -296,6 +379,13 @@ class AudioEngine:
         cable_name = ""
         default_out_id = None
         default_in_id = None
+
+        try:
+            from mixer import invalidate_device_cache
+
+            invalidate_device_cache()
+        except Exception:
+            pass
 
         try:
             import sounddevice as sd
@@ -540,8 +630,13 @@ class AudioEngine:
                         with session._lock:
                             if session.seek_epoch == local_epoch:
                                 session.pos_idx = local_idx
-        except Exception:
-            pass
+        except Exception as exc:
+            # Legacy path: never swallow a dead device silently.
+            import logging
+
+            logging.getLogger(__name__).warning(
+                f"Reprodução interrompida no dispositivo {device_id}: {exc}"
+            )
 
     def _output_route_usable(self, device_id) -> bool:
         """Preflights a concrete output device before a session is created.
@@ -597,6 +692,16 @@ class AudioEngine:
         if monitor_only and (monitor_id is None or monitor_id == cable_id):
             # A monitor-only preview without a distinct monitor device has no route.
             has_monitor = False
+        if has_monitor:
+            # Monitoring into a virtual cable is never audible: VB-Cable accepts
+            # and silently drops the second render stream.
+            try:
+                from mixer import is_cable_output_device
+
+                if is_cable_output_device(monitor_id):
+                    has_monitor = False
+            except Exception:
+                pass
         if not has_cable and not has_monitor:
             return ""
 
@@ -648,13 +753,22 @@ class AudioEngine:
                     except Exception:
                         pass
 
+            # Only routes that passed preflight reach the mixer: a stale device
+            # index must never become a destination that silently plays nowhere.
+            route_settings = dict(settings)
+            route_settings["cable_device_id"] = int(cable_id) if has_cable else None
+            route_settings["monitor_device_id"] = int(monitor_id) if has_monitor else None
+
             voice = self._mixer.play_voice(
                 clip=clip,
                 data=processed,
-                settings=settings,
+                settings=route_settings,
                 monitor_only=monitor_only,
                 on_finish=_mixer_finish,
             )
+            if voice is None:
+                # No stream could be opened (device busy/reset/rejected route).
+                return ""
             play_id = voice.play_id
             with self._lock:
                 self._active_events[play_id] = voice.stop_event
@@ -762,6 +876,28 @@ class AudioEngine:
             for ev in events:
                 ev.set()
 
+    def shutdown(self) -> None:
+        """Releases device streams and worker threads; used on application exit."""
+        try:
+            self.stop_all()
+        except Exception:
+            pass
+        try:
+            self._loopback_stop_event.set()
+        except Exception:
+            pass
+        stop_ev = self._mic_stop_event
+        if stop_ev is not None:
+            try:
+                stop_ev.set()
+            except Exception:
+                pass
+        if self._mixer is not None:
+            try:
+                self._mixer.shutdown()
+            except Exception:
+                pass
+
     def set_mic_passthrough(self, enabled: bool, mic_id: int = None, cable_id: int = None, gain: float = 1.0):
         try:
             gain_value = float(gain)
@@ -837,61 +973,185 @@ class AudioEngine:
         self._mic_thread = threading.Thread(target=_mic_loop, daemon=True)
         self._mic_thread.start()
 
+    # Automatic mode re-checks the Windows default output after this long without
+    # frames (a device that stopped rendering is usually one the user left).
+    LOOPBACK_IDLE_RECHECK_S = 3.0
+    LOOPBACK_RETRY_S = 3.0
+
     def start_loopback_capture(self):
+        self._loopback_enabled = True
         if self._loopback_thread and self._loopback_thread.is_alive():
             return
-
-        self._loopback_stop_event.clear()
-
-        def _loopback_worker():
-            try:
-                import pyaudiowpatch as pyaudio
-                with pyaudio.PyAudio() as p:
-                    wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
-                    default_speakers = p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
-                    if not default_speakers.get("isLoopbackDevice", False):
-                        for loopback in p.get_loopback_device_info_generator():
-                            if default_speakers["name"] in loopback["name"]:
-                                default_speakers = loopback
-                                break
-
-                    src_sr = int(default_speakers["defaultSampleRate"])
-                    src_ch = max(1, int(default_speakers["maxInputChannels"]))
-                    chunk_frames = max(512, int(src_sr * 0.05))
-
-                    stream = p.open(
-                        format=pyaudio.paFloat32,
-                        channels=src_ch,
-                        rate=src_sr,
-                        frames_per_buffer=chunk_frames,
-                        input=True,
-                        input_device_index=default_speakers["index"],
-                    )
-                    self.loopback_active = True
-                    try:
-                        while not self._loopback_stop_event.is_set():
-                            raw = stream.read(chunk_frames, exception_on_overflow=False)
-                            arr = np.frombuffer(raw, dtype=np.float32).reshape(-1, src_ch)
-                            if src_ch == 1:
-                                arr = np.repeat(arr, 2, axis=1)
-                            elif src_ch > 2:
-                                arr = arr[:, :2]
-                            if src_sr != self.TARGET_SR and len(arr) > 0:
-                                new_len = max(1, int(round(len(arr) * self.TARGET_SR / src_sr)))
-                                old_x = np.linspace(0.0, 1.0, len(arr))
-                                new_x = np.linspace(0.0, 1.0, new_len)
-                                c0 = np.interp(new_x, old_x, arr[:, 0])
-                                c1 = np.interp(new_x, old_x, arr[:, 1])
-                                arr = np.column_stack([c0, c1]).astype(np.float32)
-                            self.replay_buffer.append(arr)
-                    finally:
-                        stream.stop_stream()
-                        stream.close()
-            except Exception:
-                self.loopback_active = False
-
-        self._loopback_thread = threading.Thread(target=_loopback_worker, daemon=True)
+        stop_ev = threading.Event()
+        self._loopback_stop_event = stop_ev
+        self._loopback_thread = threading.Thread(
+            target=self._loopback_supervisor, args=(stop_ev,), daemon=True, name="replay-loopback"
+        )
         self._loopback_thread.start()
+
+    def stop_loopback_capture(self, timeout: float = 1.5) -> None:
+        self._loopback_stop_event.set()
+        thread = self._loopback_thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout)
+        self._loopback_thread = None
+        self._set_loopback_state(active=False)
+
+    def set_loopback_source(self, source_name: str) -> None:
+        """Switches what the replay records; "" follows the Windows default output."""
+        name = (source_name or "").strip()
+        if name == self._loopback_source:
+            return
+        self._loopback_source = name
+        if self._loopback_enabled:
+            self.stop_loopback_capture()
+            self.start_loopback_capture()
+
+    def _set_loopback_state(self, **fields) -> None:
+        with self._loopback_state_lock:
+            if "active" in fields:
+                self.loopback_active = bool(fields["active"])
+            if "device_name" in fields:
+                self._loopback_device_name = fields["device_name"] or ""
+            if "samplerate" in fields:
+                self._loopback_samplerate = int(fields["samplerate"] or 0)
+            if "error" in fields:
+                self._loopback_error = fields["error"]
+
+    def _note_loopback_chunk(self, arr: np.ndarray) -> None:
+        peak = float(np.max(np.abs(arr))) if arr.size else 0.0
+        with self._loopback_state_lock:
+            self._loopback_levels.append((time.monotonic(), peak))
+
+    def loopback_status(self) -> dict:
+        now = time.monotonic()
+        with self._loopback_state_lock:
+            recent = [p for (t, p) in self._loopback_levels if now - t <= 0.35]
+            receiving = any(now - t <= 1.0 for (t, _) in self._loopback_levels)
+            peak = max(recent) if recent else 0.0
+            return {
+                "active": bool(self.loopback_active),
+                "mode": "fixed" if self._loopback_source else "auto",
+                "source_name": self._loopback_source,
+                "device_name": self._loopback_device_name,
+                "samplerate": self._loopback_samplerate,
+                "error": self._loopback_error,
+                "receiving": receiving,
+                "level_db": round(20.0 * math.log10(peak), 1) if peak > 1e-5 else -100.0,
+            }
+
+    def list_loopback_sources(self) -> dict:
+        """Outputs that can be recorded via WASAPI loopback."""
+        try:
+            import pyaudiowpatch as pyaudio
+
+            with pyaudio.PyAudio() as p:
+                default_name = ""
+                try:
+                    wasapi = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+                    default_name = p.get_device_info_by_index(wasapi["defaultOutputDevice"])["name"]
+                except Exception:
+                    pass
+                sources = []
+                for lb in p.get_loopback_device_info_generator():
+                    name = loopback_display_name(lb.get("name"))
+                    sources.append({
+                        "name": name,
+                        "is_default": device_names_match(name, default_name),
+                        "is_cable": _is_cable_name(name),
+                    })
+                return {"sources": sources, "default_name": loopback_display_name(default_name)}
+        except Exception as exc:
+            logger.warning(f"Não foi possível listar fontes de replay: {exc}")
+            return {"sources": [], "default_name": ""}
+
+    def _loopback_supervisor(self, stop_ev: threading.Event) -> None:
+        while not stop_ev.is_set():
+            try:
+                reason = self._loopback_session(stop_ev)
+            except Exception as exc:
+                logger.warning(f"Captura do replay falhou: {exc}")
+                self._set_loopback_state(active=False, error=f"Falha na captura: {exc}")
+                reason = "error"
+            if stop_ev.is_set():
+                break
+            if reason != "idle":
+                stop_ev.wait(self.LOOPBACK_RETRY_S)
+        self._set_loopback_state(active=False)
+
+    def _loopback_session(self, stop_ev: threading.Event) -> str:
+        """Records one endpoint until stopped, idle (auto mode) or failed."""
+        import pyaudiowpatch as pyaudio
+
+        source = self._loopback_source
+        with pyaudio.PyAudio() as p:
+            default_name = ""
+            try:
+                wasapi = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+                default_name = p.get_device_info_by_index(wasapi["defaultOutputDevice"])["name"]
+            except Exception:
+                pass
+            dev = pick_loopback_device(list(p.get_loopback_device_info_generator()), default_name, source)
+            if dev is None:
+                msg = (
+                    f"\"{source}\" não está conectado."
+                    if source
+                    else "Nenhuma saída de áudio disponível para gravar."
+                )
+                self._set_loopback_state(active=False, device_name="", samplerate=0, error=msg)
+                return "missing"
+
+            src_sr = int(dev["defaultSampleRate"])
+            src_ch = max(1, int(dev["maxInputChannels"]))
+            chunk_frames = max(512, int(src_sr * 0.05))
+            stream = p.open(
+                format=pyaudio.paFloat32,
+                channels=src_ch,
+                rate=src_sr,
+                frames_per_buffer=chunk_frames,
+                input=True,
+                input_device_index=dev["index"],
+            )
+            self._set_loopback_state(
+                active=True, device_name=loopback_display_name(dev["name"]), samplerate=src_sr, error=None
+            )
+            last_frames = time.monotonic()
+            try:
+                while not stop_ev.is_set():
+                    # Polling instead of a blocking read: a WASAPI loopback whose
+                    # device renders nothing never returns, which used to hang
+                    # shutdown and device switches.
+                    available = stream.get_read_available()
+                    if available <= 0:
+                        if not source and time.monotonic() - last_frames > self.LOOPBACK_IDLE_RECHECK_S:
+                            return "idle"
+                        stop_ev.wait(0.01)
+                        continue
+                    raw = stream.read(available, exception_on_overflow=False)
+                    if not raw:
+                        continue
+                    last_frames = time.monotonic()
+                    arr = np.frombuffer(raw, dtype=np.float32).reshape(-1, src_ch)
+                    if src_ch == 1:
+                        arr = np.repeat(arr, 2, axis=1)
+                    elif src_ch > 2:
+                        arr = arr[:, :2]
+                    if src_sr != self.TARGET_SR and len(arr) > 0:
+                        new_len = max(1, int(round(len(arr) * self.TARGET_SR / src_sr)))
+                        old_x = np.linspace(0.0, 1.0, len(arr))
+                        new_x = np.linspace(0.0, 1.0, new_len)
+                        c0 = np.interp(new_x, old_x, arr[:, 0])
+                        c1 = np.interp(new_x, old_x, arr[:, 1])
+                        arr = np.column_stack([c0, c1]).astype(np.float32)
+                    self._note_loopback_chunk(arr)
+                    self.replay_buffer.append(arr)
+            finally:
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except Exception:
+                    pass
+        return "stopped"
 
     def save_replay_wav(self, out_path: str, last_seconds: float = 15.0) -> str:
         import soundfile as sf
@@ -903,11 +1163,13 @@ class AudioEngine:
         # Trim leading/trailing dead silence (< -50 dB) while keeping 0.15s padding
         mono_env = np.max(np.abs(snap), axis=1)
         active_idx = np.where(mono_env > 0.003)[0]
-        if len(active_idx) > 0:
-            pad = int(self.TARGET_SR * 0.15)
-            st = max(0, int(active_idx[0]) - pad)
-            en = min(len(snap), int(active_idx[-1]) + pad)
-            snap = snap[st:en]
+        if len(active_idx) == 0:
+            return ""
+
+        pad = int(self.TARGET_SR * 0.15)
+        st = max(0, int(active_idx[0]) - pad)
+        en = min(len(snap), int(active_idx[-1]) + pad)
+        snap = snap[st:en]
 
         if len(snap) < int(self.TARGET_SR * 0.25):
             return ""

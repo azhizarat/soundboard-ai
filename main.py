@@ -19,7 +19,7 @@ import loudness
 import packs
 from store import SoundboardStore
 from ai_analyzer import AIAnalyzer
-from audio_engine import AudioEngine, compute_waveform_peaks
+from audio_engine import AudioEngine, compute_waveform_peaks, device_names_match
 from hotkeys import HotkeyManager
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -81,6 +81,10 @@ def _device_name(entries: list[dict], dev_id) -> str:
     return ""
 
 
+def _dev_names_match(a: str, b: str) -> bool:
+    return device_names_match(a, b)
+
+
 def _resolve_device(
     entries: list[dict],
     stored_id,
@@ -93,7 +97,7 @@ def _resolve_device(
     the only trusted identity. A legacy/empty name means the stored index is
     untrusted: ignore it and fall back to the device detected for that role.
     """
-    wanted_name = (stored_name or "").strip().casefold()
+    wanted_name = (stored_name or "").strip()
     if not wanted_name:
         if role_fallback_id is None:
             return None
@@ -104,7 +108,8 @@ def _resolve_device(
 
     name_match = None
     for entry in entries or []:
-        if str(entry.get("name", "")).strip().casefold() != wanted_name:
+        entry_name = str(entry.get("name", ""))
+        if not _dev_names_match(entry_name, wanted_name):
             continue
         if entry.get("id") == stored_id:
             return entry
@@ -134,7 +139,12 @@ class SoundboardAPI:
             start_loopback=start_background_services,
             ffmpeg_path=self._config.ffmpeg_path,
             mixer_mode=self._config.mixer_mode,
+            loopback_source=str(self._store.state["settings"].get("replay_source_name") or ""),
         )
+        if start_background_services:
+            # Close PortAudio handles explicitly: leaving them to the interpreter
+            # makes the virtual-cable endpoints end abruptly on exit.
+            atexit.register(self._audio.shutdown)
         self._window = None
         self._is_mini_overlay = False
         self._cable_warned = False
@@ -216,11 +226,20 @@ class SoundboardAPI:
             outputs,
             dev_info.get("detected_cable_id"),
         )
+        # The Windows default output is frequently the cable itself. Adopting it
+        # as the "fone" route would send the monitor audio back into the cable,
+        # which VB-Cable accepts and silently discards.
+        monitor_default = dev_info.get("default_output_id")
+        monitor_entry = next(
+            (d for d in outputs if d.get("id") == monitor_default), None
+        )
+        if monitor_entry and monitor_entry.get("is_cable"):
+            monitor_default = None
         _bind(
             "monitor_device_id",
             "monitor_device_name",
             outputs,
-            dev_info.get("default_output_id"),
+            monitor_default,
         )
         _bind(
             "mic_device_id",
@@ -401,6 +420,14 @@ class SoundboardAPI:
         self._auto_bind_devices()
         return self._audio.list_devices()
 
+    def list_replay_sources(self) -> dict:
+        """Outputs the replay can record (WASAPI loopback endpoints)."""
+        return self._audio.list_loopback_sources()
+
+    def get_replay_status(self) -> dict:
+        """What the replay is recording right now, with a live peak level."""
+        return self._audio.loopback_status()
+
     def _apply_device_names(self, updates: dict):
         """Keeps the saved device names in sync when a device is selected by index."""
         keys = {
@@ -435,7 +462,11 @@ class SoundboardAPI:
             updates["replay_seconds"] = round(max(1.0, min(120.0, float(updates["replay_seconds"]))), 1)
         if any(k in updates for k in ("cable_device_id", "monitor_device_id", "mic_device_id")):
             self._apply_device_names(updates)
+        if "replay_source_name" in updates:
+            updates["replay_source_name"] = str(updates["replay_source_name"] or "").strip()
         s = self._store.update_settings(updates)
+        if "replay_source_name" in updates:
+            self._audio.set_loopback_source(s.get("replay_source_name") or "")
         if "replay_seconds" in updates:
             self._audio.replay_buffer.set_max_seconds(max(60.0, float(s.get("replay_seconds", 15))))
         if any(k in updates for k in ("mic_passthrough", "mic_device_id", "cable_device_id", "mic_gain")):
@@ -515,6 +546,16 @@ class SoundboardAPI:
         if not play_id:
             # No active/valid output route (muted cable+monitor, stale device, ...).
             error = "Nenhuma saída de áudio ativa (cabo/fone mudos ou dispositivo indisponível)."
+            try:
+                from mixer import is_cable_output_device
+
+                if is_cable_output_device(settings.get("monitor_device_id")):
+                    error = (
+                        "A saída 'Fone' está apontando para o CABLE Input: monitorar no cabo "
+                        "não gera áudio. Escolha seus fones de verdade."
+                    )
+            except Exception:
+                pass
             if from_hotkey:
                 self._notify_ui("toast", {"type": "warning", "message": error})
             return {"ok": False, "error": error}

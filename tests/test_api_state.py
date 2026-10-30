@@ -35,7 +35,12 @@ def api(tmp_path):
 def _devices():
     return {
         "outputs": [
-            {"id": 7, "name": "CABLE Input (VB-Audio Virtual Cable)", "hostapi": "Windows WASAPI"}
+            {
+                "id": 7,
+                "name": "CABLE Input (VB-Audio Virtual Cable)",
+                "hostapi": "Windows WASAPI",
+                "is_cable": True,
+            }
         ],
         "inputs": [{"id": 9, "name": "Mic", "hostapi": "Windows WASAPI"}],
         "detected_cable_id": None,
@@ -204,10 +209,36 @@ def test_auto_bind_stores_names_for_default_devices(api, monkeypatch):
 
     # No cable detected, so nothing may be routed to the generic output.
     assert settings["cable_device_id"] is None
-    assert settings["monitor_device_id"] == 7
-    assert settings["monitor_device_name"] == "CABLE Input (VB-Audio Virtual Cable)"
+    # The default output is the cable itself: monitoring there is inaudible,
+    # so the "fone" route must stay unset instead of pointing at the cable.
+    assert settings["monitor_device_id"] is None
+    assert settings["monitor_device_name"] == ""
     assert settings["mic_device_id"] == 9
     assert settings["mic_device_name"] == "Mic"
+
+
+def test_auto_bind_adopts_default_output_only_when_it_is_not_the_cable(api, monkeypatch):
+    _patch_devices(monkeypatch, api, {
+        "outputs": [
+            {"id": 7, "name": "CABLE Input (VB-Audio Virtual Cable)", "hostapi": "Windows WASAPI", "is_cable": True},
+            {"id": 12, "name": "Fones de ouvido (EDIFIER)", "hostapi": "Windows WASAPI", "is_cable": False},
+        ],
+        "inputs": [{"id": 9, "name": "Mic", "hostapi": "Windows WASAPI"}],
+        "detected_cable_id": 7,
+        "default_output_id": 12,
+        "default_input_id": 9,
+    })
+    settings = api._store.state["settings"]
+    for key in ("cable_device_id", "monitor_device_id", "mic_device_id"):
+        settings[key] = None
+    for key in ("cable_device_name", "monitor_device_name", "mic_device_name"):
+        settings[key] = ""
+
+    api._auto_bind_devices()
+
+    assert settings["cable_device_id"] == 7
+    assert settings["monitor_device_id"] == 12
+    assert settings["monitor_device_name"] == "Fones de ouvido (EDIFIER)"
 
 
 def test_legacy_install_migrates_empty_names_to_role_defaults(api, monkeypatch, tmp_path):
@@ -327,10 +358,35 @@ def test_save_debounced_fires_on_its_own(tmp_path):
     store.save_debounced(delay=0.01)
 
     deadline = time.time() + 2.0
-    while time.time() < deadline and not store.db_path.exists():
+    while time.time() < deadline and not (store.db_path.exists() and not store._dirty):
         time.sleep(0.01)
 
     assert store.db_path.exists()
     assert store._dirty is False
     persisted = json.loads(store.db_path.read_text(encoding="utf-8"))
     assert persisted["clips"][0]["title"] == "Debounced"
+
+
+def test_resolve_device_matches_truncated_and_fuzzy_names():
+    from main import _resolve_device
+
+    entries = [
+        {"id": 5, "name": "CABLE Input (VB-Audio Virtual Cable)"},
+        {"id": 4, "name": "Fones de ouvido (EDIFIER W820NB Plus)"},
+        {"id": 10, "name": "Driver de som prim\ufffdrio"},
+    ]
+    # MME truncation
+    assert (
+        _resolve_device(
+            entries, stored_id=99, stored_name="CABLE Input (VB-Audio Virtual C"
+        )
+        == entries[0]
+    )
+    # Accent / replacement char
+    assert (
+        _resolve_device(
+            entries, stored_id=99, stored_name="Driver de som primário"
+        )
+        == entries[2]
+    )
+

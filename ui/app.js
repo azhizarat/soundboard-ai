@@ -29,6 +29,8 @@ const state = {
     }
   })(),
   config: {},
+  replaySources: { sources: [], default_name: "" },
+  replayMeterTimer: null,
 };
 
 function formatPlayTime(sec) {
@@ -344,7 +346,12 @@ function renderDevices() {
 
     const opt2 = document.createElement("option");
     opt2.value = d.id;
-    opt2.textContent = `${d.is_default ? "🎧 " : ""}${d.name}`;
+    // A virtual cable is never a valid "fone" route: VB-Cable accepts the second
+    // stream and silently discards it, so the clip would play into the void.
+    opt2.disabled = Boolean(d.is_cable);
+    opt2.textContent = d.is_cable
+      ? `🚫 ${d.name} (é o cabo — não use como fone)`
+      : `${d.is_default ? "🎧 " : ""}${d.name}`;
     if (state.settings.monitor_device_id === d.id) opt2.selected = true;
     monSel.appendChild(opt2);
   });
@@ -388,6 +395,121 @@ function renderDevices() {
     repSelect.appendChild(customOpt);
   }
   repSelect.value = String(repSecs);
+
+  const micSel = document.getElementById("micDeviceSelect");
+  if (micSel) {
+    micSel.innerHTML = "";
+    const inputs = state.devices.inputs || [];
+    inputs.forEach((d) => {
+      const opt = document.createElement("option");
+      opt.value = d.id;
+      opt.textContent = `${d.is_default ? "🎙️ " : ""}${d.name}`;
+      if (state.settings.mic_device_id === d.id) opt.selected = true;
+      micSel.appendChild(opt);
+    });
+  }
+
+  renderReplaySources();
+}
+
+function renderReplaySources() {
+  const sel = document.getElementById("replaySourceSelect");
+  if (!sel) return;
+  sel.innerHTML = "";
+  const saved = String(state.settings.replay_source_name || "").trim();
+  const info = state.replaySources || { sources: [], default_name: "" };
+  const sources = Array.isArray(info.sources) ? info.sources : [];
+  const defLabel = info.default_name ? `: ${info.default_name}` : " do Windows";
+
+  const autoOpt = document.createElement("option");
+  autoOpt.value = "";
+  autoOpt.textContent = `🔄 Automático (Saída padrão${defLabel})`;
+  if (!saved) autoOpt.selected = true;
+  sel.appendChild(autoOpt);
+
+  let matchedSaved = !saved;
+  sources.forEach((src) => {
+    const opt = document.createElement("option");
+    opt.value = src.name;
+    const prefix = src.is_cable ? "🔌 " : src.is_default ? "🎧 " : "🔈 ";
+    const suffix = src.is_cable ? " (cabo virtual)" : "";
+    opt.textContent = `${prefix}${src.name}${suffix}`;
+    if (saved && src.name === saved) {
+      opt.selected = true;
+      matchedSaved = true;
+    }
+    sel.appendChild(opt);
+  });
+
+  if (saved && !matchedSaved) {
+    const missingOpt = document.createElement("option");
+    missingOpt.value = saved;
+    missingOpt.textContent = `⚠️ ${saved} (desconectado)`;
+    missingOpt.selected = true;
+    sel.appendChild(missingOpt);
+  }
+}
+
+async function refreshReplaySources() {
+  if (!api() || typeof api().list_replay_sources !== "function") return;
+  try {
+    const res = await api().list_replay_sources();
+    if (res && Array.isArray(res.sources)) {
+      state.replaySources = res;
+      renderReplaySources();
+    }
+  } catch (_) {}
+  await updateReplayMeter();
+}
+
+async function updateReplayMeter() {
+  if (!api() || typeof api().get_replay_status !== "function") return;
+  const fill = document.getElementById("replayMeterFill");
+  const statusEl = document.getElementById("replayStatusText");
+  if (!fill || !statusEl) return;
+  try {
+    const st = await api().get_replay_status();
+    if (!st) return;
+    const db = Number(st.level_db ?? -100);
+    const pct = st.receiving ? Math.max(2, Math.min(100, ((db + 60) / 60) * 100)) : 0;
+    fill.style.width = `${pct.toFixed(1)}%`;
+    fill.classList.toggle("noise", st.receiving && db < -50);
+    fill.classList.toggle("hot", st.receiving && db > -3);
+
+    if (st.error) {
+      statusEl.textContent = `⚠️ ${st.error}`;
+      statusEl.classList.add("warn");
+    } else if (!st.active) {
+      statusEl.textContent = "⏸️ Aguardando saída de áudio ativa…";
+      statusEl.classList.remove("warn");
+    } else {
+      const srKhz = st.samplerate ? ` · ${(st.samplerate / 1000).toFixed(1).replace(".0", "")} kHz` : "";
+      const modeTag = st.mode === "fixed" ? "fixo" : "auto";
+      const lvl = st.receiving && db > -90 ? ` · ${db.toFixed(0)} dBFS` : " · silêncio";
+      statusEl.textContent = `🟢 Gravando de: ${st.device_name || "Saída padrão"} (${modeTag}${srKhz}${lvl})`;
+      statusEl.classList.remove("warn");
+    }
+  } catch (_) {}
+}
+
+function startReplayMeterPolling() {
+  stopReplayMeterPolling();
+  refreshReplaySources();
+  state.replayMeterTimer = setInterval(() => {
+    const menu = document.getElementById("routingPopoverMenu");
+    if (!menu || menu.classList.contains("hidden")) {
+      stopReplayMeterPolling();
+      return;
+    }
+    updateReplayMeter();
+  }, 220);
+}
+
+function stopReplayMeterPolling() {
+  if (state.replayMeterTimer) {
+    clearInterval(state.replayMeterTimer);
+    state.replayMeterTimer = null;
+  }
 }
 
 function updateRoutingSummary() {
@@ -395,7 +517,10 @@ function updateRoutingSummary() {
   if (!summaryEl) return;
   const cVol = Math.round(Number(state.settings.cable_volume ?? 1.0) * 100);
   const mVol = Math.round(Number(state.settings.monitor_volume ?? 0.75) * 100);
-  summaryEl.textContent = `Cable: ${cVol}% | Fone: ${mVol}%`;
+  const outputs = (state.devices && state.devices.outputs) || [];
+  const mon = outputs.find((d) => d.id === state.settings.monitor_device_id);
+  const warning = mon && mon.is_cable ? " ⚠️ Fone no cabo (sem áudio)" : "";
+  summaryEl.textContent = `Cable: ${cVol}% | Fone: ${mVol}%${warning}`;
 }
 
 function renderQuickImportBar() {
@@ -1392,8 +1517,47 @@ function bindEvents() {
   document.getElementById("monitorDeviceSelect").onchange = (e) => {
     const id = Number(e.target.value);
     state.settings.monitor_device_id = id;
+    updateRoutingSummary();
     api().update_settings({ monitor_device_id: id });
   };
+
+  const micDeviceSel = document.getElementById("micDeviceSelect");
+  if (micDeviceSel) {
+    micDeviceSel.onchange = (e) => {
+      const id = Number(e.target.value);
+      state.settings.mic_device_id = id;
+      api().update_settings({ mic_device_id: id });
+      showToast("🎙️ Microfone atualizado");
+    };
+  }
+
+  const replaySourceSel = document.getElementById("replaySourceSelect");
+  if (replaySourceSel) {
+    replaySourceSel.onchange = async (e) => {
+      const name = String(e.target.value || "");
+      state.settings.replay_source_name = name;
+      await api().update_settings({ replay_source_name: name });
+      await updateReplayMeter();
+      showToast(
+        name
+          ? `⚡ Fonte do Replay fixada em: ${name}`
+          : "⚡ Fonte do Replay em modo automático (segue a saída padrão do Windows)"
+      );
+    };
+  }
+
+  const btnRefreshReplay = document.getElementById("btnRefreshReplaySources");
+  if (btnRefreshReplay) {
+    btnRefreshReplay.onclick = async () => {
+      if (api() && typeof api().refresh_devices === "function") {
+        const devs = await api().refresh_devices();
+        if (devs) state.devices = devs;
+      }
+      renderDevices();
+      await refreshReplaySources();
+      showToast("🔄 Dispositivos de áudio atualizados");
+    };
+  }
 
   document.getElementById("cableVolumeSlider").oninput = (e) => {
     const v = Number(e.target.value);
@@ -1481,22 +1645,31 @@ function bindEvents() {
   if (btnRouting && routingMenu) {
     btnRouting.onclick = (e) => {
       e.stopPropagation();
+      const willOpen = routingMenu.classList.contains("hidden");
       routingMenu.classList.toggle("hidden");
+      if (willOpen) {
+        startReplayMeterPolling();
+      } else {
+        stopReplayMeterPolling();
+      }
     };
     if (btnCloseRouting) {
       btnCloseRouting.onclick = (e) => {
         e.stopPropagation();
         routingMenu.classList.add("hidden");
+        stopReplayMeterPolling();
       };
     }
     document.addEventListener("click", (e) => {
       if (!routingMenu.classList.contains("hidden") && !routingMenu.contains(e.target) && !btnRouting.contains(e.target)) {
         routingMenu.classList.add("hidden");
+        stopReplayMeterPolling();
       }
     });
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && !routingMenu.classList.contains("hidden")) {
         routingMenu.classList.add("hidden");
+        stopReplayMeterPolling();
       }
     });
   }

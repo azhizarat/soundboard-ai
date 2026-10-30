@@ -319,6 +319,41 @@ body {
   opacity: 0.55;
 }
 
+.replay-meter {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+  margin-top: 4px;
+}
+
+.replay-meter-fill {
+  height: 100%;
+  width: 0%;
+  background: #10b981;
+  transition: width 0.12s linear;
+}
+
+.replay-meter-fill.noise {
+  background: #64748b;
+}
+
+.replay-meter-fill.hot {
+  background: #f59e0b;
+}
+
+.replay-status {
+  font-size: 11px;
+  opacity: 0.75;
+  line-height: 1.4;
+}
+
+.replay-status.warn {
+  color: #f59e0b;
+  opacity: 1;
+}
+
 .deck-actions {
   display: flex;
   align-items: center;

@@ -245,3 +245,53 @@ def test_cached_audio_is_read_only(tmp_path):
     processed = trim_and_normalize(data, engine.TARGET_SR)
     assert processed.flags.writeable is True
     assert data.flags.writeable is False
+
+
+def test_shutdown_closes_mixer_streams(monkeypatch):
+    """Exit must release the device handles, not leave them to the interpreter."""
+    engine = AudioEngine(start_loopback=False, mixer_mode="mixer")
+    closed = []
+    monkeypatch.setattr(
+        engine._mixer.cable_mixer, "stop_stream", lambda: closed.append("cable")
+    )
+    monkeypatch.setattr(
+        engine._mixer.monitor_mixer, "stop_stream", lambda: closed.append("monitor")
+    )
+
+    engine.shutdown()
+
+    assert closed == ["cable", "monitor"]
+
+
+def test_save_replay_wav_handles_silence_and_noise_floor(tmp_path):
+    engine = AudioEngine(start_loopback=False)
+    out_file = tmp_path / "silence.wav"
+
+    # 1. Empty buffer returns ""
+    assert engine.save_replay_wav(str(out_file)) == ""
+    assert not out_file.exists()
+
+    # 2. Pure noise floor / static (peak < 0.003) returns ""
+    noise = np.random.uniform(-0.001, 0.001, (48000 * 2, 2)).astype(np.float32)
+    engine.replay_buffer.append(noise)
+    assert engine.save_replay_wav(str(out_file), last_seconds=2.0) == ""
+    assert not out_file.exists()
+
+    # 3. Burst of audio shorter than 0.25s (e.g. 0.05s) returns ""
+    short_burst = np.zeros((48000 * 2, 2), dtype=np.float32)
+    short_burst[1000 : 1000 + int(48000 * 0.05), :] = 0.5
+    engine.replay_buffer.clear()
+    engine.replay_buffer.append(short_burst)
+    assert engine.save_replay_wav(str(out_file), last_seconds=2.0) == ""
+    assert not out_file.exists()
+
+    # 4. Valid audio (1.0s of sine wave) returns path and writes file
+    t = np.linspace(0, 1.0, 48000, endpoint=False)
+    sine = (0.2 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+    valid_data = np.column_stack([sine, sine])
+    engine.replay_buffer.clear()
+    engine.replay_buffer.append(valid_data)
+    saved = engine.save_replay_wav(str(out_file), last_seconds=1.0)
+    assert saved == str(out_file)
+    assert out_file.exists()
+

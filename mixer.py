@@ -17,6 +17,76 @@ DEFAULT_BLOCKSIZE = 1024
 CEILING_DBTP = -1.0
 CEILING_LINEAR = 0.8910  # 10 ** (-1.0 / 20.0) rounded conservatively to stay <= -1.0 dBFS
 CROSSFADE_SAMPLES_10MS = 480  # 10 ms at 48 kHz
+# Render sides of virtual cables. Playing "monitor" audio into one of these is
+# never audible: VB-Cable accepts the stream and silently drops it, so the route
+# must be rejected instead of reported as playing.
+CABLE_NAME_TOKENS = (
+    "cable input",
+    "cable-a",
+    "cable-b",
+    "vb-audio virtual cable",
+    "vb-audio point",
+    "voicemeeter",
+)
+
+_device_info_cache: dict[int, dict] = {}
+_device_info_lock = threading.Lock()
+
+
+def device_info(device_id) -> dict:
+    """Cached PortAudio snapshot of one device; empty dict when it is gone."""
+    try:
+        idx = int(device_id)
+    except (TypeError, ValueError):
+        return {}
+    with _device_info_lock:
+        cached = _device_info_cache.get(idx)
+    if cached is not None:
+        return cached
+    try:
+        import sounddevice as sd
+
+        info = dict(sd.query_devices(idx))
+    except Exception:
+        info = {}
+    with _device_info_lock:
+        _device_info_cache.setdefault(idx, info)
+    return info
+
+
+def invalidate_device_cache() -> None:
+    """Drops cached device metadata after a refresh/device change."""
+    with _device_info_lock:
+        _device_info_cache.clear()
+
+
+def is_cable_output_device(device_id) -> bool:
+    """True when the id is the render side of a virtual cable (VB-Cable, VoiceMeeter)."""
+    info = device_info(device_id)
+    if not info:
+        return False
+    try:
+        if int(info.get("max_output_channels") or 0) <= 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    name = str(info.get("name") or "").strip().lower()
+    return any(token in name for token in CABLE_NAME_TOKENS)
+
+
+def _resample_block(block: np.ndarray, frames: int) -> np.ndarray:
+    """Linearly resamples one rendered block to the stream's frame count."""
+    src = len(block)
+    if src == frames:
+        return block
+    if src <= 1 or frames <= 0:
+        return np.zeros((max(0, frames), 2), dtype=np.float32)
+    x_old = np.linspace(0.0, 1.0, src, dtype=np.float64)
+    x_new = np.linspace(0.0, 1.0, frames, dtype=np.float64)
+    out = np.empty((frames, block.shape[1]), dtype=np.float32)
+    for ch in range(block.shape[1]):
+        out[:, ch] = np.interp(x_new, x_old, block[:, ch])
+    return out
 
 
 def apply_soft_limiter(x: np.ndarray, ceiling: float = CEILING_LINEAR) -> np.ndarray:
@@ -238,6 +308,9 @@ class DeviceMixer:
         self._duck_provider: Callable[[], float] | None = None
         self._stream = None
         self._stream_running = False
+        self._stream_sr = int(sr)
+        self._stream_flags: dict | None = None  # per-stream flags for its finished_callback
+        self._last_error: str | None = None
 
     def set_duck_provider(self, provider: Callable[[], float]) -> None:
         self._duck_provider = provider
@@ -372,51 +445,136 @@ class DeviceMixer:
         self._prev_duck = duck_curr
         return apply_soft_limiter(mix)
 
+    def _preferred_samplerate(self) -> int:
+        """Mixer rate when the device supports it, else the device's native rate.
+
+        Several endpoints (WASAPI Bluetooth headsets, some virtual devices) only
+        accept 44.1 kHz. Hardcoding 48 kHz used to drop those routes silently.
+        """
+        try:
+            import sounddevice as sd
+        except Exception:
+            return self.sr
+        candidates = [self.sr]
+        try:
+            native = int(round(float(device_info(self.device_id).get("default_samplerate") or 0)))
+        except (TypeError, ValueError):
+            native = 0
+        if native > 0 and native != self.sr:
+            candidates.append(native)
+        for rate in candidates:
+            try:
+                sd.check_output_settings(
+                    device=self.device_id, samplerate=rate, channels=2, dtype="float32"
+                )
+                return rate
+            except Exception:
+                continue
+        return self.sr
+
     def start_stream(self) -> bool:
         if self.device_id is None:
             return False
         if self._stream is not None and self._stream_running:
             return True
 
+        # A dead handle must be dropped before reopening, never reused.
+        self.stop_stream()
+
         try:
             import sounddevice as sd
 
+            requested_sr = self._preferred_samplerate()
+            # PortAudio may coerce the rate: the callback needs the real one.
+            rate_box = {"sr": float(requested_sr)}
+            status_reports = {"n": 0}
+            # Set by stop_stream() so an intentional close stays silent.
+            flags = {"closing": False}
+
             def _callback(outdata, frames, time_info, status):
-                outdata[:] = self.render_block(frames)
+                if status and status_reports["n"] < 3:
+                    status_reports["n"] += 1
+                    logger.warning(f"Stream {self.dest_key} (dispositivo {self.device_id}): {status}")
+                rate = rate_box["sr"] or float(self.sr)
+                if int(round(rate)) == self.sr:
+                    outdata[:] = self.render_block(frames)
+                    return
+                needed = max(1, int(round(frames * self.sr / rate)))
+                outdata[:] = _resample_block(self.render_block(needed), frames)
+
+            def _finished():
+                # Device reset/unplug/abort: flag the handle as dead so the next
+                # playback reopens it instead of writing into a zombie stream.
+                if flags["closing"]:
+                    return  # deliberate stop_stream()/close(): not a fault
+                self._stream_running = False
+                logger.warning(
+                    f"Stream do dispositivo {self.device_id} ({self.dest_key}) encerrou; "
+                    "será reaberto na próxima reprodução."
+                )
 
             stream = sd.OutputStream(
-                samplerate=self.sr,
+                samplerate=requested_sr,
                 device=self.device_id,
                 channels=2,
                 dtype="float32",
                 blocksize=self.blocksize,
                 callback=_callback,
+                finished_callback=_finished,
             )
-            actual_sr = int(stream.samplerate)
-            if actual_sr != self.sr:
-                logger.warning(
-                    f"Dispositivo {self.device_id} ({self.dest_key}) iniciou com taxa "
-                    f"{actual_sr} Hz diferente de {self.sr} Hz."
-                )
             stream.start()
-            self._stream = stream
-            self._stream_running = True
-            return True
+            rate_box["sr"] = float(getattr(stream, "samplerate", requested_sr) or requested_sr)
         except Exception as exc:
-            logger.warning(f"Não foi possível iniciar stream no dispositivo {self.device_id}: {exc}")
-            self._stream = None
-            self._stream_running = False
+            self._last_error = str(exc)
+            logger.warning(
+                f"Não foi possível iniciar stream no dispositivo {self.device_id} ({self.dest_key}): {exc}"
+            )
+            self.stop_stream()
             return False
 
-    def stop_stream(self) -> None:
-        if self._stream is not None:
+        with self._lock:
+            self._stream = stream
+            self._stream_running = True
+            self._stream_sr = int(round(rate_box["sr"]))
+            self._stream_flags = flags
+            self._last_error = None
+        if self._stream_sr != self.sr:
+            logger.info(
+                f"Dispositivo {self.device_id} ({self.dest_key}) aberto a {self._stream_sr} Hz "
+                f"(mixer a {self.sr} Hz, reamostrado no callback)."
+            )
+        return True
+
+    def ensure_stream(self) -> bool:
+        """Health-checks the persistent stream and reopens it after a device reset."""
+        stream = self._stream
+        if stream is not None and self._stream_running:
             try:
-                self._stream.stop()
-                self._stream.close()
+                if stream.active:
+                    return True
             except Exception:
                 pass
-            self._stream = None
+            logger.warning(
+                f"Stream do dispositivo {self.device_id} ({self.dest_key}) não está ativo; reabrindo."
+            )
             self._stream_running = False
+        return self.start_stream()
+
+    def stop_stream(self) -> None:
+        # Cleared before closing so the finished_callback cannot race the reopen.
+        self._stream_running = False
+        flags = self._stream_flags
+        if flags is not None:
+            flags["closing"] = True  # intentional close: do not warn
+        stream = self._stream
+        self._stream = None
+        self._stream_flags = None
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
 
 
 class AudioMixer:
@@ -451,11 +609,15 @@ class AudioMixer:
         settings: dict,
         monitor_only: bool = False,
         on_finish: Callable[..., None] | None = None,
-    ) -> MixerVoice:
+    ) -> MixerVoice | None:
+        """Starts one voice. Returns None when no route could actually be opened."""
         cable_id = settings.get("cable_device_id")
         monitor_id = settings.get("monitor_device_id")
-        cable_vol = float(settings.get("cable_volume", 1.0))
-        monitor_vol = float(settings.get("monitor_volume", 0.75))
+        try:
+            cable_vol = float(settings.get("cable_volume", 1.0))
+            monitor_vol = float(settings.get("monitor_volume", 0.75))
+        except (TypeError, ValueError):
+            return None
 
         has_cable = (not monitor_only) and cable_id is not None and cable_vol > 0.001
         has_monitor = (
@@ -464,47 +626,67 @@ class AudioMixer:
             and (monitor_only or monitor_id != cable_id)
         )
 
+        # Monitoring into a virtual cable is never audible: VB-Cable accepts the
+        # second render stream and silently discards it. Reject the route instead
+        # of pretending the clip is playing.
+        if has_monitor and is_cable_output_device(monitor_id):
+            logger.warning(
+                f"Rota 'Fone' ignorada: dispositivo {monitor_id} é um cabo virtual "
+                "(monitorar no cabo não gera áudio audível)."
+            )
+            has_monitor = False
+
+        if not has_cable and not has_monitor:
+            return None
+
         play_id = uuid.uuid4().hex[:8]
         clip_id = str(clip.get("id", ""))
         live_vol = float(clip.get("volume", 1.0))
 
-        destinations = set()
-        if has_cable:
-            destinations.add("cable")
-        if has_monitor:
-            destinations.add("monitor")
-
-        voice = MixerVoice(
-            play_id=play_id,
-            clip_id=clip_id,
-            data=data,
-            base_gain=1.0,
-            live_volume=live_vol,
-            loop=False,
-            monitor_only=monitor_only,
-            sr=self.sr,
-            title=str(clip.get("title") or "Áudio"),
-            emoji=str(clip.get("emoji") or "🔊"),
-            on_finish=on_finish,
-        )
-        voice.register_destinations(destinations, driver="cable" if has_cable else "monitor")
-
         with self._lock:
-            self._voices[play_id] = voice
+            if has_cable and self.cable_mixer.device_id != int(cable_id):
+                self.cable_mixer.stop_stream()
+                self.cable_mixer.device_id = int(cable_id)
+            if has_monitor and self.monitor_mixer.device_id != int(monitor_id):
+                self.monitor_mixer.stop_stream()
+                self.monitor_mixer.device_id = int(monitor_id)
+
+            # Open/health-check the device streams first: a route that cannot be
+            # opened must not count as a destination.
+            destinations = set()
             if has_cable:
-                if self.cable_mixer.device_id != int(cable_id):
-                    self.cable_mixer.stop_stream()
-                    self.cable_mixer.device_id = int(cable_id)
                 self.cable_mixer.set_volume(cable_vol)
-                self.cable_mixer.add_voice(voice)
-                self.cable_mixer.start_stream()
+                if self.cable_mixer.ensure_stream():
+                    destinations.add("cable")
             if has_monitor:
-                if self.monitor_mixer.device_id != int(monitor_id):
-                    self.monitor_mixer.stop_stream()
-                    self.monitor_mixer.device_id = int(monitor_id)
                 self.monitor_mixer.set_volume(monitor_vol)
+                if self.monitor_mixer.ensure_stream():
+                    destinations.add("monitor")
+
+            if not destinations:
+                logger.warning("Nenhuma rota de áudio pôde ser aberta (cabo/fone indisponíveis).")
+                return None
+
+            voice = MixerVoice(
+                play_id=play_id,
+                clip_id=clip_id,
+                data=data,
+                base_gain=1.0,
+                live_volume=live_vol,
+                loop=False,
+                monitor_only=monitor_only,
+                sr=self.sr,
+                title=str(clip.get("title") or "Áudio"),
+                emoji=str(clip.get("emoji") or "🔊"),
+                on_finish=on_finish,
+            )
+            voice.register_destinations(destinations, driver="cable" if "cable" in destinations else "monitor")
+
+            self._voices[play_id] = voice
+            if "cable" in destinations:
+                self.cable_mixer.add_voice(voice)
+            if "monitor" in destinations:
                 self.monitor_mixer.add_voice(voice)
-                self.monitor_mixer.start_stream()
 
         return voice
 

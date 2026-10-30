@@ -228,10 +228,12 @@ def test_api_playback_controls_with_mixer(tmp_path, monkeypatch):
     assert stop_res["ok"] is True
 
 
-def test_dual_device_playback_speed_and_frames_rendered():
+def test_dual_device_playback_speed_and_frames_rendered(monkeypatch):
     """Verify that dual-device playback does NOT advance at 2x speed or drop frames between streams."""
     sr = 48000
     mixer = AudioMixer(sr=sr, blocksize=1024)
+    # No real hardware in tests: pretend both device streams opened.
+    monkeypatch.setattr(DeviceMixer, "ensure_stream", lambda self: True)
     # 1.0 second test audio where each frame has a distinct value
     t = np.linspace(0.0, 1.0, sr, endpoint=False, dtype=np.float32)
     tone = np.column_stack([t * 0.5, t * 0.5])
@@ -271,9 +273,10 @@ def test_dual_device_playback_speed_and_frames_rendered():
     np.testing.assert_allclose(monitor_full, tone, atol=1e-3)
 
 
-def test_dual_device_seek_synchronization():
+def test_dual_device_seek_synchronization(monkeypatch):
     sr = 48000
     mixer = AudioMixer(sr=sr, blocksize=1024)
+    monkeypatch.setattr(DeviceMixer, "ensure_stream", lambda self: True)
     # 2.0 second test audio
     tone = np.ones((sr * 2, 2), dtype=np.float32) * 0.4
     clip = {"id": "seek_test", "title": "Seek", "volume": 1.0}
@@ -294,3 +297,135 @@ def test_dual_device_seek_synchronization():
     assert mixer.cable_mixer._voice_states[voice.play_id]["pos"] == target_sample + 512
     mixer.monitor_mixer.render_block(512, duck_gain=1.0)
     assert mixer.monitor_mixer._voice_states[voice.play_id]["pos"] == target_sample + 512
+
+
+# --- Route validation, dead-stream recovery and sample-rate fallback ---------
+
+
+def _fake_stream(active: bool):
+    class _Stream:
+        def __init__(self, is_active):
+            self._is_active = is_active
+
+        @property
+        def active(self):
+            return self._is_active
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    return _Stream(active)
+
+
+def test_monitor_route_on_virtual_cable_is_rejected(monkeypatch):
+    """Monitoring into the cable is inaudible: the route must be dropped, not faked."""
+    import mixer as mixer_module
+
+    monkeypatch.setattr(mixer_module, "is_cable_output_device", lambda dev: int(dev) == 13)
+    monkeypatch.setattr(DeviceMixer, "ensure_stream", lambda self: True)
+
+    mixer = AudioMixer(sr=48000, blocksize=1024)
+    tone = np.ones((4800, 2), dtype=np.float32) * 0.2
+    clip = {"id": "c", "title": "Cabo", "volume": 1.0}
+    settings = {
+        "cable_device_id": 5,
+        "monitor_device_id": 13,  # same VB-Cable, DirectSound entry
+        "cable_volume": 1.0,
+        "monitor_volume": 0.8,
+    }
+
+    voice = mixer.play_voice(clip, tone, settings)
+
+    assert voice is not None
+    assert voice._destinations == {"cable"}
+    assert mixer.monitor_mixer._voices == {}
+
+
+def test_play_voice_returns_none_when_no_stream_opens(monkeypatch):
+    """A route whose stream never opens must not be reported as playing."""
+    monkeypatch.setattr(DeviceMixer, "ensure_stream", lambda self: False)
+
+    mixer = AudioMixer(sr=48000, blocksize=1024)
+    tone = np.ones((4800, 2), dtype=np.float32) * 0.2
+    clip = {"id": "c", "title": "Falha", "volume": 1.0}
+    settings = {"cable_device_id": 5, "monitor_device_id": 4, "cable_volume": 1.0, "monitor_volume": 1.0}
+
+    assert mixer.play_voice(clip, tone, settings) is None
+    assert mixer._voices == {}
+    assert mixer.cable_mixer._voices == {}
+    assert mixer.monitor_mixer._voices == {}
+
+
+def test_ensure_stream_reopens_dead_stream(monkeypatch):
+    dev = DeviceMixer(device_id=7, sr=48000)
+    dev._stream = _fake_stream(active=False)
+    dev._stream_running = True
+    calls = []
+
+    def _start(self):
+        calls.append(True)
+        return True
+
+    monkeypatch.setattr(DeviceMixer, "start_stream", _start)
+
+    assert dev.ensure_stream() is True
+    assert calls == [True]
+
+
+def test_ensure_stream_keeps_healthy_stream(monkeypatch):
+    dev = DeviceMixer(device_id=7, sr=48000)
+    dev._stream = _fake_stream(active=True)
+    dev._stream_running = True
+    calls = []
+    monkeypatch.setattr(DeviceMixer, "start_stream", lambda self: calls.append(True) or True)
+
+    assert dev.ensure_stream() is True
+    assert calls == []
+
+
+def test_resample_block_matches_requested_frames():
+    from mixer import _resample_block
+
+    block = np.ones((1115, 2), dtype=np.float32) * 0.5
+    out = _resample_block(block, 1024)
+
+    assert out.shape == (1024, 2)
+    np.testing.assert_allclose(out, 0.5, atol=1e-5)
+
+
+def test_preferred_samplerate_falls_back_to_device_native(monkeypatch):
+    import sounddevice as sd
+    import mixer as mixer_module
+
+    def _check(**kwargs):
+        if int(kwargs.get("samplerate")) != 44100:
+            raise RuntimeError("Invalid sample rate")
+        return None
+
+    monkeypatch.setattr(sd, "check_output_settings", _check)
+    monkeypatch.setattr(mixer_module, "device_info", lambda dev: {"default_samplerate": 44100.0})
+
+    dev = DeviceMixer(device_id=18, sr=48000)
+    assert dev._preferred_samplerate() == 44100
+
+
+def test_play_clip_reports_failure_when_streams_cannot_open(tmp_path, monkeypatch):
+    from audio_engine import AudioEngine
+
+    monkeypatch.setattr(DeviceMixer, "ensure_stream", lambda self: False)
+    engine = AudioEngine(start_loopback=False, mixer_mode="mixer")
+    monkeypatch.setattr(engine, "_output_route_usable", lambda dev: True)
+
+    wav = _write_test_wav(tmp_path / "fail.wav")
+    play_id = engine.play_clip(
+        {"id": "c", "title": "Falha", "file_path": wav, "volume": 1.0},
+        {"cable_device_id": 5, "monitor_device_id": 4, "cable_volume": 1.0, "monitor_volume": 1.0},
+    )
+
+    assert play_id == ""
+    assert engine._sessions == {}
+    assert engine._latest_play_id is None
+

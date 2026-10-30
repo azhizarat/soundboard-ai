@@ -59,6 +59,29 @@
               </div>
             </div>
 
+            <div class="device-group">
+              <label title="Microfone físico usado pelo 'Mic no Cabo'">
+                🎙️ Microfone (Mic no Cabo)
+              </label>
+              <div class="device-row">
+                <select id="micDeviceSelect"></select>
+              </div>
+            </div>
+
+            <div class="device-group replay-source-group">
+              <label title="De qual saída de áudio o Clipar Call (Alt+F10) grava os últimos segundos">
+                ⚡ Fonte do Replay (o que o Clipar Call grava)
+              </label>
+              <div class="device-row">
+                <select id="replaySourceSelect"></select>
+                <button type="button" id="btnRefreshReplaySources" class="btn-clear" title="Atualizar lista">⟳</button>
+              </div>
+              <div class="replay-meter" title="Nível do que está sendo gravado agora">
+                <div id="replayMeterFill" class="replay-meter-fill"></div>
+              </div>
+              <small id="replayStatusText" class="replay-status">Verificando…</small>
+            </div>
+
             <div class="toggles-group">
               <label class="toggle-chip" title="Encaminha seu microfone físico direto para o CABLE Input em tempo real">
                 <input type="checkbox" id="micPassthroughToggle" />
