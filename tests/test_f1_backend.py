@@ -83,12 +83,12 @@ def test_restore_rejects_duplicate_id(api, tmp_path):
     assert "já existe" in res["error"].lower()
 
 
-def test_restore_rejects_file_used_by_another_clip(api, tmp_path):
+def test_restore_accepts_shared_source_with_independent_id(api, tmp_path):
     clip = _add_clip(api, tmp_path)
     res = api.restore_clip({"id": "outro_botao", "file_path": clip["file_path"]})
-    assert res["ok"] is False
-    assert "outro botão" in res["error"].lower()
-    assert api._store.get_clip("outro_botao") is None
+    assert res["ok"] is True
+    assert api._store.get_clip("outro_botao") is not None
+    assert api._store.get_clip(clip["id"]) is not None
 
 
 def test_delete_with_file_cannot_be_undone(api, tmp_path):

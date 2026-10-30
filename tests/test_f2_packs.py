@@ -370,7 +370,7 @@ def test_import_reuses_existing_speaker_by_name(tmp_path, monkeypatch):
     assert len(dst._store.state["speakers"]) == 1
 
 
-def test_import_dedupes_entries_inside_same_pack(tmp_path, monkeypatch):
+def test_import_preserves_distinct_metadata_with_same_audio(tmp_path, monkeypatch):
     dst = _api(tmp_path, monkeypatch, "dst")
     data = _wav_bytes(tmp_path)
     manifest = {
@@ -390,9 +390,9 @@ def test_import_dedupes_entries_inside_same_pack(tmp_path, monkeypatch):
 
     res = dst.import_pack(str(path))
     assert res["ok"] is True
-    assert len(res["imported"]) == 1
-    assert res["skipped"] == 1
-    assert any("já existe" in w for w in res["warnings"])
+    assert len(res["imported"]) == 2
+    assert res["skipped"] == 0
+    assert {clip["title"] for clip in res["imported"]} == {"A", "B"}
     assert not list(dst._store.clips_dir.glob("*.part"))
 
 

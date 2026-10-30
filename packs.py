@@ -7,6 +7,7 @@ import json
 import re
 import time
 import zipfile
+import io
 from pathlib import Path, PurePosixPath
 
 PACK_FORMAT = "soundboard-pack"
@@ -27,6 +28,28 @@ def sha256_file(path: str | Path, chunk_size: int = 1 << 20) -> str:
         for chunk in iter(lambda: fh.read(chunk_size), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def entry_identity(entry: dict, audio_hash: str) -> str:
+    """A identidade portátil inclui edição/metadados, nunca só os bytes da fonte."""
+    payload = {key: value for key, value in entry.items() if key != 'file'}
+    # WAVs regravados podem mudar cabeçalhos sem alterar PCM. A identidade portada
+    # já inclui a fonte/receita original e sobrevive ao bake no pacote legado.
+    media_identity = entry.get('montage_identity') or audio_hash
+    return hashlib.sha256(json.dumps([media_identity, payload], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def montage_identity(clip: dict) -> str:
+    if clip.get('montage_identity') and float(clip.get('volume', 1)) == 1.0:
+        return clip['montage_identity']
+    revision = clip['_revision']
+    recipe = {key: revision.get(key) for key in ('source_hash', 'conversion_version', 'render_version',
+                                               'spans', 'gain_db', 'normalization_gain', 'fade_samples')}
+    if revision.get('variant'):
+        recipe.update(variant=revision['variant'], variant_processor=revision.get('variant_processor'))
+    # Identidade do botão distingue também ocorrências independentes idênticas.
+    payload = ['montage-v1', clip['id'], recipe, float(clip.get('volume', 1))]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 def _safe_entry_name(name: str) -> str:
@@ -115,11 +138,28 @@ def write_pack(path: str | Path, clips: list[dict], speakers: dict) -> dict:
         raise PackError("Nenhum áudio encontrado para exportar.")
     manifest = build_manifest(existentes, speakers)
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-        archive.writestr(MANIFEST_NAME, json.dumps(manifest, ensure_ascii=False, indent=2))
         # ``existentes`` is pre-filtered, so build_manifest keeps one entry per clip
         # in the same order: both lists line up.
         for entry, clip in zip(manifest["clips"], existentes):
-            archive.write(str(clip.get("file_path")), entry["file"])
+            if clip.get('_revision'):
+                import soundfile as sf
+                from clip_renderer import render_revision
+                from clip_edits import project_segments
+                rendered = render_revision(clip['_source'], clip['_revision'], clip.get('_ffmpeg_path'))
+                # O volume atual também é baked; o manifesto não reaplica ganhos.
+                rendered *= float(clip.get('volume', 1))
+                buffer = io.BytesIO()
+                sf.write(buffer, rendered, 48000, format='WAV', subtype='FLOAT')
+                entry.update({'trim_start': 0.0, 'trim_end': len(rendered) / 48000,
+                              'duration': len(rendered) / 48000, 'volume': 1.0, 'rendered': True,
+                              'montage_identity': montage_identity(clip)})
+                projected = project_segments(clip.get('segments'), clip['_revision']['spans'])
+                if clip.get('segments'):
+                    entry['transcript'] = ' '.join(str(s.get('text') or s.get('transcript') or '').strip() for s in projected).strip()
+                archive.writestr(entry['file'], buffer.getvalue())
+            else:
+                archive.write(str(clip.get("file_path")), entry["file"])
+        archive.writestr(MANIFEST_NAME, json.dumps(manifest, ensure_ascii=False, indent=2))
     return {"count": len(manifest["clips"]), "skipped": skipped}
 
 
@@ -181,6 +221,10 @@ def validate_pack(path: str | Path) -> dict:
     for entry in clips:
         if not isinstance(entry, dict):
             raise PackError("Pacote inválido: manifesto corrompido.")
+        if 'montage_identity' in entry:
+            identity = entry['montage_identity']
+            if not isinstance(identity, str) or re.fullmatch(r'[0-9a-f]{64}', identity) is None:
+                raise PackError('Pacote inválido: identidade de montagem inválida.')
         name = _safe_entry_name(entry.get("file") or "")
         if name not in entries:
             raise PackError("Pacote inválido: áudio declarado não existe no zip.")

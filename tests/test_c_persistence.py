@@ -10,18 +10,18 @@ import pytest
 from store import SoundboardStore, CURRENT_SCHEMA_VERSION
 
 
-def test_fresh_store_initializes_with_schema_version_1(tmp_path):
+def test_fresh_store_initializes_with_schema_version_2(tmp_path):
     store = SoundboardStore(data_dir=str(tmp_path))
     try:
         assert store.state["schema_version"] == CURRENT_SCHEMA_VERSION
         store.save()
         saved = json.loads((tmp_path / "soundboard.json").read_text(encoding="utf-8"))
-        assert saved["schema_version"] == 1
+        assert saved["schema_version"] == CURRENT_SCHEMA_VERSION
     finally:
         store.close()
 
 
-def test_migration_v0_to_v1_creates_backup_and_persists_version(tmp_path):
+def test_migration_v0_to_v2_creates_backup_and_persists_version(tmp_path):
     db_file = tmp_path / "soundboard.json"
     legacy_data = {
         "clips": [{"id": "c1", "title": "Clip Antigo"}],
@@ -32,7 +32,7 @@ def test_migration_v0_to_v1_creates_backup_and_persists_version(tmp_path):
 
     store = SoundboardStore(data_dir=str(tmp_path))
     try:
-        assert store.state["schema_version"] == 1
+        assert store.state["schema_version"] == CURRENT_SCHEMA_VERSION
         assert len(store.state["clips"]) == 1
         assert store.state["clips"][0]["title"] == "Clip Antigo"
 
@@ -41,9 +41,9 @@ def test_migration_v0_to_v1_creates_backup_and_persists_version(tmp_path):
         assert bak_file.is_file()
         assert bak_file.read_text(encoding="utf-8") == raw_legacy
 
-        # Verify db_file was updated with schema_version = 1
+        # Verify db_file was updated with schema_version = 2
         updated = json.loads(db_file.read_text(encoding="utf-8"))
-        assert updated["schema_version"] == 1
+        assert updated["schema_version"] == CURRENT_SCHEMA_VERSION
     finally:
         store.close()
 

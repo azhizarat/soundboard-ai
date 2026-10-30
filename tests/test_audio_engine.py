@@ -245,3 +245,19 @@ def test_cached_audio_is_read_only(tmp_path):
     processed = trim_and_normalize(data, engine.TARGET_SR)
     assert processed.flags.writeable is True
     assert data.flags.writeable is False
+
+
+def test_shutdown_closes_mixer_streams(monkeypatch):
+    """Exit must release the device handles, not leave them to the interpreter."""
+    engine = AudioEngine(start_loopback=False, mixer_mode="mixer")
+    closed = []
+    monkeypatch.setattr(
+        engine._mixer.cable_mixer, "stop_stream", lambda: closed.append("cable")
+    )
+    monkeypatch.setattr(
+        engine._mixer.monitor_mixer, "stop_stream", lambda: closed.append("monitor")
+    )
+
+    engine.shutdown()
+
+    assert closed == ["cable", "monitor"]

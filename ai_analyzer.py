@@ -5,12 +5,37 @@ import time
 import socket
 import subprocess
 import tempfile
+import threading
+import uuid
+from functools import wraps
 import urllib.parse
 import urllib.request
 from pathlib import Path
 import numpy as np
+from audio_processing import resample_audio
+from analysis_cache import AnalysisCache, DECODE_CACHE, cache_key, pcm_hash
 
 _OLLAMA_CACHE = {"checked_at": 0.0, "available": False}
+_INFERENCE_LOCK = threading.RLock()
+
+
+class DiarizationError(RuntimeError):
+    """Falha de análise vocal, distinta de uma execução sem segmentos de fala."""
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+    def as_dict(self):
+        return {'code': self.code, 'message': str(self)}
+
+
+def _serial_inference(method):
+    @wraps(method)
+    def wrapped(*args, **kwargs):
+        # Todas as instâncias compartilham GPU/CPU, inclusive importação e replay legados.
+        with _INFERENCE_LOCK:
+            return method(*args, **kwargs)
+    return wrapped
 
 # Runtime overrides injected from AppConfig (see configure_runtime).
 _RUNTIME = {"ffmpeg": "ffmpeg", "ollama_url": "http://127.0.0.1:11434", "ollama_model": "qwen2.5:1.5b"}
@@ -284,6 +309,7 @@ def generate_smart_metadata(
     speaker_name: str = "",
     duration_s: float = 1.0,
     use_llm: bool = False,
+    transcription_status: str = "ok",
 ) -> dict:
     """Generates catchy button title, category, emoji, color, and tags from speech + acoustic mood."""
     text_lower = (transcript or "").lower()
@@ -311,6 +337,8 @@ def generate_smart_metadata(
                 "emoji": llm_res.get("emoji") or style["emoji"],
                 "color": style["color"],
                 "tags": llm_res.get("tags") or [cat.lower(), mood.lower()],
+                "metadata_source": "local_llm",
+                "fallback_reason": None,
             }
 
     # Smart multimodal decision tree (Acoustic + Lexical + Energy)
@@ -325,7 +353,8 @@ def generate_smart_metadata(
         or bool(words_set & RAGE_KEYWORDS)
     )
 
-    is_vinheta = (
+    transcription_available = transcription_status in ("ok", "no_speech", "provided")
+    is_vinheta = transcription_available and (
         bool(words_set & VINHETA_KEYWORDS)
         or mood == "Efeito / Meme"
         or (not clean_text and duration_s >= 2.5)
@@ -348,7 +377,7 @@ def generate_smart_metadata(
     elif is_meme:
         category = "Meme"
     elif not clean_text:
-        category = "Vinhetas"
+        category = "Vinhetas" if transcription_available else "Call"
     else:
         category = "Call"
 
@@ -368,12 +397,19 @@ def generate_smart_metadata(
         "emoji": style["emoji"],
         "color": style["color"],
         "tags": tags[:6],
+        "metadata_source": "heuristic",
+        "fallback_reason": "LLM local indisponível ou resposta inválida" if use_llm and clean_text else "LLM desabilitado ou texto vazio",
     }
 
 
 def load_audio_mono_16k(file_path: str) -> tuple[np.ndarray, float]:
     """Loads any audio file as 16 kHz mono float32 using soundfile or ffmpeg fallback."""
     import soundfile as sf
+    from clip_renderer import file_hash
+    key = cache_key(file_hash(file_path), None, 'decode', 'mono16k-polyphase/1', {'ffmpeg': _RUNTIME['ffmpeg']})
+    cached = DECODE_CACHE.get(key)
+    if cached is not None:
+        return cached
 
     tmp_wav = None
     try:
@@ -381,12 +417,10 @@ def load_audio_mono_16k(file_path: str) -> tuple[np.ndarray, float]:
         if data.ndim > 1:
             data = np.mean(data, axis=1)
         dur = len(data) / max(sr, 1)
-        if sr != 16000 and len(data) > 0:
-            new_len = max(1, int(round(len(data) * 16000 / sr)))
-            old_idx = np.linspace(0.0, 1.0, len(data))
-            new_idx = np.linspace(0.0, 1.0, new_len)
-            data = np.interp(new_idx, old_idx, data).astype(np.float32)
-        return data, float(dur)
+        data = resample_audio(data, sr, 16000)
+        result = data, float(dur)
+        DECODE_CACHE.put(key, result)
+        return result
     except Exception:
         fd, tmp_wav = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
@@ -395,7 +429,9 @@ def load_audio_mono_16k(file_path: str) -> tuple[np.ndarray, float]:
             check=True,
         )
         data, sr = sf.read(tmp_wav, dtype="float32")
-        return data, float(len(data) / 16000.0)
+        result = data, float(len(data) / 16000.0)
+        DECODE_CACHE.put(key, result)
+        return result
     finally:
         if tmp_wav and os.path.exists(tmp_wav):
             try:
@@ -427,6 +463,7 @@ def merge_diarized_segments(
         if (
             merged
             and merged[-1].get("speaker_id") == s.get("speaker_id")
+            and merged[-1].get("local_cluster_id") == s.get("local_cluster_id")
             and (float(s["start"]) - float(merged[-1]["end"])) <= max_merge_gap
         ):
             merged[-1]["end"] = max(float(merged[-1]["end"]), float(s["end"]))
@@ -474,7 +511,25 @@ class AIAnalyzer:
         self._extractor = None
         self._diarizer = None
         self._whisper = None
+        self.voice_profiles = None
+        self._extractor_fingerprint = None
+        self.cache = AnalysisCache()
+        self.transcription_config = {'model': 'base', 'device': 'cuda', 'beam_size': 3,
+                                     'language': 'pt', 'hotwords': '', 'initial_prompt': '', 'vad_filter': False}
+        self.transcription_runtime = {'model': 'base', 'device': None, 'compute_type': None,
+                                      'fallback_reason': None}
 
+    @_serial_inference
+    def configure_transcription(self, options):
+        previous = dict(self.transcription_config)
+        self.transcription_config.update({k: v for k, v in options.items() if k in previous})
+        self.transcription_config['beam_size'] = max(1, min(10, int(self.transcription_config['beam_size'])))
+        if any(previous[k] != self.transcription_config[k] for k in ('model', 'device')):
+            self._whisper = None
+            self.transcription_runtime = {'model': self.transcription_config['model'], 'device': None,
+                                          'compute_type': None, 'fallback_reason': None}
+
+    @_serial_inference
     def _get_extractor(self):
         if self._extractor is not None:
             return self._extractor
@@ -491,6 +546,7 @@ class AIAnalyzer:
         except Exception:
             return None
 
+    @_serial_inference
     def _get_diarizer(self):
         if self._diarizer is not None:
             return self._diarizer
@@ -513,20 +569,33 @@ class AIAnalyzer:
         except Exception:
             return None
 
+    @_serial_inference
     def _get_whisper(self):
         if self._whisper is not None:
             return self._whisper
         try:
             from faster_whisper import WhisperModel
             try:
-                self._whisper = WhisperModel("base", device="cuda", compute_type="float16")
-            except Exception:
-                self._whisper = WhisperModel("base", device="cpu", compute_type="int8")
+                device = self.transcription_config['device']
+                compute = 'float16' if device == 'cuda' else 'int8'
+                self._whisper = WhisperModel(self.transcription_config['model'], device=device, compute_type=compute, local_files_only=True)
+                self.transcription_runtime.update(model=self.transcription_config['model'], device=device, compute_type=compute)
+            except Exception as exc:
+                self.transcription_runtime['fallback_reason'] = str(exc)
+                self._whisper = WhisperModel(self.transcription_config['model'], device="cpu", compute_type="int8", local_files_only=True)
+                self.transcription_runtime.update(model=self.transcription_config['model'], device='cpu', compute_type='int8')
             return self._whisper
         except Exception:
             return None
 
+    @_serial_inference
     def compute_embedding(self, audio_16k: np.ndarray) -> np.ndarray | None:
+        if audio_16k is None or len(audio_16k) < 3200:
+            return None
+        key = cache_key(pcm_hash(audio_16k), [0, len(audio_16k)], 'embedding', self.extractor_version, {'sr': 16000})
+        cached = self.cache.get(key)
+        if cached is not None:
+            return cached
         extractor = self._get_extractor()
         if extractor is None or audio_16k is None or len(audio_16k) < 3200:
             return None
@@ -538,78 +607,121 @@ class AIAnalyzer:
                 return None
             emb = np.array(extractor.compute(stream), dtype=np.float32)
             norm = float(np.linalg.norm(emb))
-            return emb / (norm + 1e-8) if norm > 0 else emb
+            result = emb / (norm + 1e-8) if norm > 0 else emb
+            self.cache.put(key, result)
+            return result
         except Exception:
             return None
 
+    @property
+    def extractor_version(self):
+        if self._extractor_fingerprint is None:
+            from clip_renderer import file_hash
+            self._extractor_fingerprint = ('titanet:sha256:' + file_hash(self.emb_model_path)
+                                           if self.emb_model_path.exists() else 'titanet:unavailable')
+        return self._extractor_fingerprint
+
     def identify_speaker(self, audio_16k: np.ndarray, threshold: float = 0.55) -> tuple[str, float]:
-        if not self.ref_voices_path.exists():
-            return "", 0.0
         emb = self.compute_embedding(audio_16k)
-        if emb is None:
+        if emb is None or self.voice_profiles is None:
             return "", 0.0
-        try:
-            ref_data = np.load(self.ref_voices_path)
-            best_spk = ""
-            best_sim = -1.0
-            for key in ref_data.files:
-                vec = ref_data[key].astype(np.float32)
-                vec = vec / (np.linalg.norm(vec) + 1e-8)
-                sim = float(np.dot(emb, vec))
-                if sim > best_sim:
-                    best_sim = sim
-                    best_spk = key
-            if best_sim >= threshold:
-                return best_spk, round(best_sim, 3)
-        except Exception:
-            pass
+        decision = self.voice_profiles.match(emb, self.extractor_version)
+        if decision['status'] == 'identified':
+            return decision['speaker_id'], round(decision['candidates'][0]['score'], 3)
         return "", 0.0
 
-    def enroll_speaker_reference(self, file_path: str, spk_key: str) -> bool:
-        audio_16k, _ = load_audio_mono_16k(file_path)
+    def extract_speaker_reference(self, file_path: str, spk_key: str, trim_start: float = 0.0, trim_end: float = 0.0):
+        if not spk_key or not spk_key.strip():
+            raise ValueError("Selecione uma pessoa para cadastrar a voz")
+        audio_16k, duration = load_audio_mono_16k(file_path)
+        start, end = float(trim_start), float(trim_end)
+        if not np.isfinite(start) or not np.isfinite(end) or start < 0 or end < 0:
+            raise ValueError("Recorte de áudio inválido")
+        end = min(end, duration) if end > 0 else duration
+        if start >= end:
+            raise ValueError("Recorte de áudio vazio")
+        audio_16k = audio_16k[int(start * 16000):int(end * 16000)]
         emb = self.compute_embedding(audio_16k)
         if emb is None:
             return False
-        ref_dict = {}
-        if self.ref_voices_path.exists():
-            try:
-                old = np.load(self.ref_voices_path)
-                for k in old.files:
-                    ref_dict[k] = old[k]
-            except Exception:
-                pass
-        if spk_key in ref_dict:
-            blended = 0.5 * ref_dict[spk_key] + 0.5 * emb
-            ref_dict[spk_key] = blended / (np.linalg.norm(blended) + 1e-8)
-        else:
-            ref_dict[spk_key] = emb
-        np.savez(self.ref_voices_path, **ref_dict)
-        return True
+        # Cadastro persistente exige ação/origem em VoiceLearningAPI.
+        return emb
+
+    @_serial_inference
+    def transcribe_result(self, audio_16k: np.ndarray) -> dict:
+        """Distingue ausência de fala, modelo indisponível e falha na inferência."""
+        model = self._get_whisper()
+        if model is None:
+            return {"transcript": "", "status": "model_unavailable", "error": "Modelo de transcrição indisponível"}
+        if audio_16k is None or len(audio_16k) < 1600:
+            return {"transcript": "", "status": "no_speech", "error": None}
+        try:
+            segs = self._transcription_segments(audio_16k, model)
+            transcript = " ".join(s.text.strip() for s in segs).strip()
+            return {"transcript": transcript, "status": "ok" if transcript else "no_speech", "error": None}
+        except Exception as exc:
+            return {"transcript": "", "status": "inference_error", "error": f"Falha na transcrição: {exc}"}
+
+    @_serial_inference
+    def transcribe_temporal(self, audio_16k, analysis_id, source_id, interval):
+        from importlib.metadata import version
+        from transcript_model import from_segments
+        model = self._get_whisper()
+        params = {k: v for k, v in self.transcription_config.items() if k not in ('model', 'device')}
+        metadata = {**self.transcription_runtime, 'model_version': 'faster-whisper/' + version('faster-whisper'),
+                    'parameters': {**params, 'word_timestamps': True}, 'error': None,
+                    'suggestion_provenance': {'text': 'local_asr', 'correction_applied': False}}
+        if model is None:
+            return {**from_segments([], analysis_id, source_id, interval, metadata), 'status': 'failed',
+                    'error': {'code': 'model_unavailable', 'message': 'Modelo local de transcrição indisponível'}}
+        try:
+            segments = self._transcription_segments(audio_16k, model)
+            result = from_segments(segments, analysis_id, source_id, interval, metadata)
+            result['status'] = 'ready' if result['text'] else 'no_speech'
+            return result
+        except Exception as exc:
+            return {**from_segments([], analysis_id, source_id, interval, metadata), 'status': 'failed',
+                    'error': {'code': 'inference_error', 'message': str(exc)}}
+
+    def _transcription_segments(self, audio, model):
+        from importlib.metadata import version
+        # Conteúdo é o PCM da janela; IDs editoriais/perfis não alteram ASR.
+        model_path = Path(self.transcription_config['model'])
+        files = [model_path / name for name in ('model.bin', 'config.json', 'tokenizer.json')]
+        stamp = [(str(p), p.stat().st_size, p.stat().st_mtime_ns) for p in files if p.is_file()]
+        identity = {'package': version('faster-whisper'), 'local_files': stamp,
+                    'runtime': self.transcription_runtime}
+        key = cache_key(pcm_hash(audio), [0, len(audio)], 'asr', identity, self.transcription_config)
+        cached = self.cache.get(key)
+        if cached is not None:
+            return cached
+        params = {k: v for k, v in self.transcription_config.items() if k not in ('model', 'device')}
+        if params.get('vad_filter'):
+            params['vad_parameters'] = {'min_silence_duration_ms': 500, 'speech_pad_ms': 400}
+        segments, _ = model.transcribe(audio, **params, word_timestamps=True)
+        segments = list(segments)
+        self.cache.put(key, segments)
+        return segments
 
     def transcribe(self, audio_16k: np.ndarray) -> str:
-        model = self._get_whisper()
-        if model is None or audio_16k is None or len(audio_16k) < 1600:
-            return ""
-        try:
-            segs, _ = model.transcribe(audio_16k, language="pt", beam_size=3, vad_filter=False)
-            return " ".join(s.text.strip() for s in segs).strip()
-        except Exception:
-            return ""
+        """Mantém o contrato textual para consumidores existentes."""
+        return self.transcribe_result(audio_16k)["transcript"]
 
-    def diarize_and_identify(self, audio_16k: np.ndarray, speaker_names: dict = None) -> list[dict]:
+    @_serial_inference
+    def diarize_and_identify(self, audio_16k: np.ndarray, speaker_names: dict = None, transcribe_segments=True) -> list[dict]:
         """Segments audio by speaker turns using pyannote + TitaNet and matches each turn against reference voices."""
         if audio_16k is None or len(audio_16k) < 4000:
-            return []
+            raise DiarizationError('insufficient_audio', 'Áudio insuficiente para identificar pessoas: use pelo menos 250 ms')
         diarizer = self._get_diarizer()
         if diarizer is None:
-            return []
+            raise DiarizationError('model_unavailable', 'Modelo local de pessoas indisponível')
 
         sr = 16000
         total_dur = float(len(audio_16k) / sr)
         try:
             raw_segs = diarizer.process(audio_16k).sort_by_start_time()
-        except Exception:
-            return []
+        except Exception as exc:
+            raise DiarizationError('inference_error', f'Falha na diarização: {exc}') from exc
 
         if not raw_segs:
             return []
@@ -628,19 +740,7 @@ class AIAnalyzer:
                 local_clusters.setdefault(s.speaker, []).append((dur, emb))
 
         if not valid_raw:
-            return []
-
-        # Match each local cluster centroid against referencias_vozes.npz greedily
-        local_to_global = {}
-        ref_dict = {}
-        if self.ref_voices_path.exists():
-            try:
-                loaded = np.load(self.ref_voices_path)
-                for k in loaded.files:
-                    v = loaded[k].astype(np.float32)
-                    ref_dict[k] = v / (np.linalg.norm(v) + 1e-8)
-            except Exception:
-                pass
+            raise DiarizationError('insufficient_speech', 'Fala detectada, mas nenhum trecho tem duração suficiente para identificar pessoas')
 
         cluster_centroids = {}
         for l_spk, items in local_clusters.items():
@@ -650,50 +750,31 @@ class AIAnalyzer:
             cent = cent / (np.linalg.norm(cent) + 1e-8)
             cluster_centroids[l_spk] = cent
 
-        used_refs = set()
-        used_locals = set()
-        if ref_dict and cluster_centroids:
-            pairs = []
-            for l_spk, cent in cluster_centroids.items():
-                for r_key, r_vec in ref_dict.items():
-                    sim = float(np.dot(cent, r_vec))
-                    pairs.append((sim, l_spk, r_key))
-            pairs.sort(reverse=True, key=lambda x: x[0])
-
-            for sim, l_spk, r_key in pairs:
-                if sim >= 0.52 and l_spk not in used_locals and r_key not in used_refs:
-                    local_to_global[l_spk] = r_key
-                    used_locals.add(l_spk)
-                    used_refs.add(r_key)
-
-        # Assign remaining unmatched local clusters to new or fallback speaker IDs
-        existing_nums = [
-            int(k.split("_")[-1]) for k in ref_dict.keys() if "_" in k and k.split("_")[-1].isdigit()
-        ]
-        next_id = (max(existing_nums) + 1) if existing_nums else 1
-        for l_spk in sorted(local_clusters.keys()):
-            if l_spk not in local_to_global:
-                new_key = f"interlocutor_{next_id}"
-                while new_key in used_refs:
-                    next_id += 1
-                    new_key = f"interlocutor_{next_id}"
-                local_to_global[l_spk] = new_key
-                used_refs.add(new_key)
-                next_id += 1
-
+        from speaker_matching import match_embedding
+        capture_id = uuid.uuid4().hex
+        decisions = {local: (self.voice_profiles.match(centroid, self.extractor_version)
+                            if self.voice_profiles else match_embedding(centroid, {}))
+                     for local, centroid in cluster_centroids.items()}
         mapped_Input = []
         for r in valid_raw:
-            gid = local_to_global.get(r["local_spk"], "")
-            if not gid and r["emb"] is not None:
-                gid, _ = self.identify_speaker(audio_16k[int(r["start"] * sr) : int(r["end"] * sr)], threshold=0.50)
+            decision = decisions.get(r['local_spk'], match_embedding([], {}))
+            centroid = cluster_centroids.get(r['local_spk'])
             mapped_Input.append({
                 "start": r["start"],
                 "end": r["end"],
                 "dur": r["dur"],
-                "speaker_id": gid or "interlocutor_1",
+                "speaker_id": decision['speaker_id'],
+                "local_cluster_id": f"local:{capture_id}:{r['local_spk']}",
+                "identity": decision,
+                "voice_embedding": centroid.tolist() if centroid is not None else None,
+                "extractor_version": self.extractor_version,
+                "embedding_intervals": [[item['start'], item['end']] for item in valid_raw
+                                        if item['local_spk'] == r['local_spk'] and item['emb'] is not None],
             })
 
         merged = merge_diarized_segments(mapped_Input, total_duration=total_dur)
+        if not transcribe_segments:
+            return merged
         speaker_names = speaker_names or {}
 
         enriched = []
@@ -702,7 +783,8 @@ class AIAnalyzer:
             en_idx = min(len(audio_16k), int(seg["end"] * sr))
             seg_audio = audio_16k[st_idx:en_idx]
             seg_ac = analyze_acoustics(seg_audio, sr=sr)
-            seg_tx = self.transcribe(seg_audio)
+            seg_result = self.transcribe_result(seg_audio)
+            seg_tx = seg_result["transcript"]
             spk_id = seg["speaker_id"]
             spk_label = speaker_names.get(spk_id) or spk_id.replace("interlocutor_", "Amigo ")
             seg_meta = generate_smart_metadata(
@@ -710,15 +792,19 @@ class AIAnalyzer:
                 mood=seg_ac["mood"],
                 speaker_name=spk_label,
                 duration_s=seg["dur"],
+                transcription_status=seg_result["status"],
                 use_llm=False,
             )
             enriched.append({
+                **seg,
                 "start": seg["start"],
                 "end": seg["end"],
                 "dur": seg["dur"],
                 "speaker_id": spk_id,
                 "speaker_name": spk_label,
                 "transcript": seg_tx,
+                "transcription_status": seg_result["status"],
+                "transcription_error": seg_result["error"],
                 "mood": seg_ac["mood"],
                 "title": seg_meta["title"],
                 "category": seg_meta["category"],
@@ -727,6 +813,7 @@ class AIAnalyzer:
             })
         return enriched
 
+    @_serial_inference
     def analyze_file(
         self,
         file_path: str,
@@ -738,7 +825,11 @@ class AIAnalyzer:
         skip_speaker_id: bool = False,
         forced_category: str = None,
     ) -> dict:
-        audio_16k, duration_s = load_audio_mono_16k(file_path)
+        try:
+            audio_16k, duration_s = load_audio_mono_16k(file_path)
+        except Exception as exc:
+            return {"analysis_status": "decode_error", "transcription_status": "not_run",
+                    "transcript": "", "error": f"Falha ao decodificar áudio: {exc}", "warnings": []}
         acoustics = analyze_acoustics(audio_16k, sr=16000)
         speaker_names = dict(speaker_names or {})
 
@@ -746,10 +837,15 @@ class AIAnalyzer:
         speaker_ids = []
         speaker_id = ""
         speaker_sim = 0.0
+        diarization_error = None
 
         if not skip_speaker_id:
             if not existing_speaker_id and duration_s >= 1.2:
-                segments = self.diarize_and_identify(audio_16k, speaker_names=speaker_names)
+                try:
+                    segments = self.diarize_and_identify(audio_16k, speaker_names=speaker_names)
+                except DiarizationError as exc:
+                    # Importação continua com texto/acústica, mas sem esconder a falha vocal.
+                    diarization_error = exc.as_dict()
                 for seg in segments:
                     sid = seg.get("speaker_id", "")
                     if sid and sid not in speaker_ids:
@@ -762,6 +858,7 @@ class AIAnalyzer:
                 if speaker_id:
                     speaker_ids = [speaker_id]
 
+        transcription = {"status": "provided", "error": None}
         transcript = (existing_transcript or "").strip()
         if not transcript:
             if len(segments) > 1 and len(speaker_ids) > 1:
@@ -776,7 +873,8 @@ class AIAnalyzer:
                 transcript = segments[0]["transcript"]
 
             if not transcript:
-                transcript = self.transcribe(audio_16k)
+                transcription = self.transcribe_result(audio_16k)
+                transcript = transcription["transcript"]
 
         if not speaker_name and speaker_id:
             speaker_name = speaker_names.get(speaker_id, "")
@@ -787,6 +885,7 @@ class AIAnalyzer:
             mood=acoustics["mood"],
             speaker_name=speaker_name if not skip_speaker_id else "",
             duration_s=duration_s,
+            transcription_status=transcription["status"],
             use_llm=use_llm,
         )
         if forced_category and forced_category in CATEGORY_STYLE:
@@ -796,6 +895,11 @@ class AIAnalyzer:
             if not clean_for_title.strip():
                 meta["title"] = Path(file_path).stem[:28].replace("_", " ").strip().capitalize()
 
+        warnings = list(dict.fromkeys(
+            ([transcription["error"]] if transcription["error"] else [])
+            + ([diarization_error['message']] if diarization_error else [])
+            + [seg["transcription_error"] for seg in segments if seg.get("transcription_error")]
+        ))
         return {
             "title": meta["title"],
             "category": meta["category"],
@@ -803,6 +907,12 @@ class AIAnalyzer:
             "color": meta["color"],
             "tags": meta["tags"],
             "transcript": transcript,
+            "analysis_status": "partial" if warnings else "ok",
+            "transcription_status": transcription["status"],
+            "transcription_error": transcription["error"],
+            "diarization_error": diarization_error,
+            "error": None,
+            "warnings": warnings,
             "speaker_id": "" if skip_speaker_id else speaker_id,
             "speaker_ids": [] if skip_speaker_id else (speaker_ids or ([speaker_id] if speaker_id else [])),
             "segments": [] if skip_speaker_id else segments,
@@ -810,4 +920,8 @@ class AIAnalyzer:
             "acoustic_mood": acoustics["mood"],
             "duration": round(duration_s, 2),
             "acoustics": acoustics,
+            "suggestion_provenance": {'text': 'human_provided' if existing_transcript else 'local_asr',
+                                      'acoustics': 'signal_heuristic/1',
+                                      'editorial_category': 'human' if forced_category else meta['metadata_source'],
+                                      'correction_applied': False},
         }

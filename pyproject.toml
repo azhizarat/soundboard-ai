@@ -16,6 +16,7 @@ dependencies = [
     "huggingface_hub>=0.23.0",
     "pystray>=0.19.5",
     "pillow>=13.0.0",
+    "scipy>=1.11.0",
 ]
 
 [dependency-groups]

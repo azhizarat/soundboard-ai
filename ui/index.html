@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Soundboard AI — VB-Audio Cable Studio</title>
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="editor.css" />
+  <link rel="stylesheet" href="sequences.css" />
+  <link rel="stylesheet" href="collections.css" />
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -37,6 +40,8 @@
             <button type="button" id="btnCloseRoutingPopover" class="btn-clear" title="Fechar">✕</button>
           </div>
           <div class="popover-body">
+            <button type="button" id="btnRefreshRouting" class="btn">Atualizar dispositivos</button>
+            <p class="operation-hint">Após perda de saída, selecione novamente o destino. Sons antigos não serão retomados.</p>
             <div class="device-group">
               <label title="Dispositivo VB-Audio CABLE Input que envia o som para o seu CABLE Output no Discord/Jogo">
                 🔌 Saída p/ Cable Output (VB-Audio)
@@ -90,6 +95,9 @@
       </div>
 
       <div class="deck-actions">
+        <button type="button" id="btnSequences" class="btn btn-secondary">⇶ Sequências</button>
+        <select id="editDraftSelect" title="Edições preservadas" aria-label="Edições preservadas"><option value="">Edições preservadas</option></select>
+        <button id="btnResumeEdit" class="btn">Retomar edição</button>
         <div class="replay-control-group" title="Escolha quantos segundos da call quer salvar e clique em Clipar Call (ou aperte Alt+F10)">
           <button id="btnReplayClip" class="btn btn-replay">
             ⚡ Clipar<span class="replay-full-label"> Call</span> (<span id="replaySecsLabel">15</span>s)
@@ -115,6 +123,12 @@
         <button id="btnImportVinheta" class="btn btn-vinheta" title="Importar efeitos/músicas direto para a categoria 'Vinhetas' (sem associar a nenhuma pessoa)">
           🎵<span class="btn-extra-text"> +</span> Vinheta
         </button>
+        <label for="folderImportMode" class="folder-import-mode">Modo da pasta
+          <select id="folderImportMode" title="Modo usado ao importar pastas">
+            <option value="audio">Áudios com IA</option>
+            <option value="vinheta">Vinhetas sem pessoa</option>
+          </select>
+        </label>
         <button id="btnImportFolder" class="btn btn-secondary" title="Importar pasta 'separados' (com mapa_de_falas.json) ou pasta de áudios">
           📂 Pasta
         </button>
@@ -142,6 +156,39 @@
         </button>
       </div>
     </header>
+    <nav class="operation-bar" aria-label="Área de trabalho e saída">
+      <button id="btnPrepare" class="btn" aria-pressed="true">Preparar</button>
+      <button id="btnPerform" class="btn" aria-pressed="false">Tocar</button>
+      <select id="collectionSelect" aria-label="Coleção ativa"></select>
+      <button id="btnCollectionEdit" class="btn">Editar coleções</button>
+      <label class="toggle-chip" title="Mudar o modo interrompe sons e preparações anteriores."><input id="rehearsalToggle" type="checkbox"> Ensaio · só monitor</label>
+      <button id="btnOperationStop" class="btn btn-danger">Parar tudo agora</button>
+      <span id="operationStatus" class="operation-status" role="status">Verificando saída…</span>
+      <span id="collectionConflicts" role="alert"></span>
+      <span id="collectionMessage" role="status"></span>
+    </nav>
+    <details id="collectionEditor" class="collection-editor">
+      <summary>Organizar coleções · mesma biblioteca, posições fixas</summary>
+      <div class="collection-tools">
+        <select id="collectionEditSelect" aria-label="Coleção para editar"></select>
+        <button id="btnCollectionNew" class="btn">Nova coleção</button>
+        <label>Nome<input id="collectionName" maxlength="200"></label>
+        <label>Colunas<input id="collectionColumns" type="number" min="1" max="8" value="4"></label>
+        <button id="btnCollectionSave" class="btn btn-primary">Salvar coleção</button>
+        <button id="btnCollectionDelete" class="btn">Excluir coleção</button>
+        <button id="btnCollectionRefresh" class="btn">Atualizar biblioteca</button>
+      </div>
+      <p>Atalhos globais ficam reservados. Coleções inativas podem reutilizar teclas. Trocar coleção preserva o áudio; soltar a tecla encerra seu próprio som sustentado. Remova referências antes de excluir clipes ou sequências.</p>
+      <div class="collection-tools"><label>Clipe ou sequência<select id="collectionTarget"></select></label><button id="btnCollectionAdd" class="btn">Adicionar botão</button><button id="btnCollectionShuffle" class="btn">Criar grupo aleatório</button></div>
+      <p>Grupos aleatórios usam somente os membros marcados abaixo. Sem repetição imediata quando há alternativas; cooldown vale também para repetir a última escolha. O saco reinicia ao mudar membros ou reabrir o aplicativo. A escolha pode ser cancelada antes de tocar.</p>
+      <div id="collectionPadEditor"></div>
+    </details>
+    <section id="operationPanel" class="operation-panel" aria-label="Tocar coleção">
+      <p class="operation-hint">Posições e atalhos fixos durante a operação. Ensaio envia os disparos somente ao monitor. Mudar o modo interrompe os sons e pedidos anteriores.</p>
+      <div id="collectionPads" class="collection-pads"></div>
+      <div id="operationInstances" aria-label="Disparos ativos"></div>
+    </section>
+    <section class="sequence-strip" aria-label="Sequências salvas"><div id="sequencePads"></div><span id="sequenceLiveStatus">Pronta</span></section>
 
     <!-- Environment (doctor) banner -->
     <div id="envBanner" class="env-banner hidden">
@@ -169,6 +216,10 @@
     </div>
 
     <!-- Discovered 'separados' quick-import banner -->
+    <details id="importResults" class="import-results hidden">
+      <summary>Resultado da importação</summary>
+      <pre id="importResultsText"></pre>
+    </details>
     <div id="quickImportBar" class="quick-import-bar hidden">
       <span>✨ Pastas do separador de vozes detectadas em <b>Videos</b>:</span>
       <div id="quickImportChips" class="quick-chips"></div>
@@ -270,12 +321,69 @@
     <div id="editModal" class="modal-backdrop hidden">
       <div class="modal-card">
         <div class="modal-header">
-          <h2 id="modalTitle">⚙️ Configurar Botão do Soundboard</h2>
+          <h2 id="modalTitle">Editar clipe</h2>
           <button id="btnCloseModal" class="btn-clear">✕</button>
         </div>
 
         <div class="modal-body">
+          <p id="editDraftNotice" class="hint">Salvar atualiza o clipe; fechar guarda o rascunho.</p>
+          <button id="btnDiscardEdit" class="btn btn-secondary">Descartar alterações</button>
           <input type="hidden" id="editClipId" />
+
+          <section class="voice-learning" aria-label="Aprendizado de vozes">
+            <label><input type="checkbox" id="learnVoiceCorrections" /> Aprender com minhas correções</label>
+            <p>Use a seleção da fala de uma pessoa. Exemplos ficam no perfil mesmo após remover o clipe.</p>
+            <div id="voiceLearningStatus" role="status" aria-live="polite"></div>
+            <button type="button" id="btnUndoVoiceCorrection" class="btn btn-xs btn-secondary" disabled>Desfazer correção e exemplo</button>
+            <button type="button" id="btnCancelVoiceLearning" class="btn btn-xs btn-secondary" disabled>Cancelar aprendizado</button>
+            <div id="voiceIdentityChoices"></div>
+          </section>
+          <section id="integratedEditor" aria-label="Editor de áudio e transcrição">
+            <details id="variantPanel"><summary>Variantes de velocidade, tom e reverso</summary>
+              <p id="variantCapabilities"></p>
+              <div class="editor-transport">
+                <label>Velocidade (x)<input id="variantSpeed" type="number" min="0.5" max="2" step="0.05" value="1" /></label>
+                <label>Tom (semitons)<input id="variantPitch" type="number" min="-12" max="12" step="1" value="0" /></label>
+                <label><input id="variantReverse" type="checkbox" /> Reverso</label>
+                <button id="variantPreview" type="button" class="btn btn-secondary">Prévia no monitor</button>
+                <button id="variantStop" type="button" class="btn btn-secondary">Parar prévia</button>
+                <button id="variantCreate" type="button" class="btn btn-primary">Salvar como variante</button>
+              </div>
+              <p id="variantMessage" role="status"></p>
+              <p>A origem e a revisão escolhida ficam preservadas. Cadastro vocal usa a gravação original confirmada. A waveform de edição mostra a origem; a waveform da biblioteca mostra a saída processada.</p>
+            </details>
+            <div class="editor-transport">
+              <button type="button" id="editorHear" class="btn btn-primary">Ouvir seleção</button>
+              <button type="button" id="editorHearResult" class="btn btn-secondary">Ouvir resultado</button>
+              <button type="button" id="editorStop" class="btn btn-secondary">Parar</button>
+              <label><input type="checkbox" id="editorLoop" /> Repetir</label>
+              <span id="editorCursor">Cursor 0 s</span><span id="editorMetrics"></span>
+            </div>
+            <div class="editor-columns">
+              <section class="editor-transcript"><h3>Texto da origem</h3><p id="editorAlignment"></p>
+                <div id="editorWords" aria-label="Palavras e blocos selecionáveis"></div>
+                <p class="help-text">Shift+clique amplia a seleção. Texto atenuado corresponde a áudio removido; blocos mantêm suas âncoras reais.</p>
+                <label for="editorCorrection">Corrigir texto da seleção (não corta áudio)</label>
+                <textarea id="editorCorrection" rows="2"></textarea>
+                <div class="editor-actions"><button type="button" id="editorApplyText" class="btn btn-secondary">Aplicar correção</button><button type="button" id="editorDiscardText" class="btn btn-secondary">Descartar correção</button><button type="button" id="editorRetranscribe" class="btn btn-secondary">Retranscrever seleção</button></div>
+                <h3>Texto do resultado</h3><p id="editorResult"></p>
+              </section>
+              <section class="editor-audio"><h3>Áudio da origem</h3>
+                <canvas id="editorWaveform" tabindex="0" role="img" aria-label="Waveform selecionável. Arraste para selecionar; Control clique posiciona cursor." width="900" height="130"></canvas>
+                <p id="editorViewport" class="help-text"></p>
+                <div class="editor-actions"><button type="button" id="editorZoom" class="btn btn-secondary">Zoom seleção</button><button type="button" id="editorFit" class="btn btn-secondary">Ajustar largura</button><button type="button" id="editorPanLeft" class="btn btn-secondary" aria-label="Deslocar à esquerda">←</button><button type="button" id="editorPanRight" class="btn btn-secondary" aria-label="Deslocar à direita">→</button></div>
+                <div class="editor-bounds"><label>Início (s)<input id="editorStart" type="number" min="0" step="0.01" /></label><label>Fim (s)<input id="editorEnd" type="number" min="0" step="0.01" /></label><label>Borda pelo teclado<select id="editorBoundary"><option value="start">Início</option><option value="end">Fim</option></select></label></div>
+                <div class="editor-actions"><button type="button" id="editorMarkStart" class="btn btn-secondary">Início no cursor</button><button type="button" id="editorMarkEnd" class="btn btn-secondary">Fim no cursor</button></div>
+                <p class="help-text">Na waveform: ←/→ ajustam 10 ms; Shift ajusta 100 ms. Ctrl+clique posiciona o cursor. Campos de texto usam as teclas normalmente.</p>
+                <div class="editor-actions"><select id="editorJunction" aria-label="Junção para ouvir"></select><button type="button" id="editorHearJunction" class="btn btn-secondary">Ouvir junção (até 500 ms/lado)</button></div>
+                <div class="editor-actions"><label>Margem da fala (s)<input id="editorMargin" type="number" min="0" max="2" step="0.05" value="0.15" /></label><button type="button" id="editorSuggest" class="btn btn-secondary">Sugerir bordas</button></div>
+                <div id="editorVolumeMount"></div>
+              </section>
+            </div>
+            <div class="editor-actions editor-cuts"><button type="button" id="editorKeep" class="btn btn-primary">Manter seleção</button><button type="button" id="editorRemove" class="btn btn-secondary">Remover trecho</button><button type="button" id="editorRestore" class="btn btn-secondary">Restaurar trecho</button><button type="button" id="editorCreate" class="btn btn-secondary">Criar outro clipe</button><button type="button" id="editorUndo" class="btn btn-secondary">Desfazer</button><button type="button" id="editorRedo" class="btn btn-secondary">Refazer</button></div>
+            <p id="editorStatus" role="status" aria-live="polite"></p>
+          </section>
+          <details id="editorMetadata"><summary>Título, aparência, pessoas e atalhos</summary>
 
           <div class="form-row">
             <div class="form-group emoji-col">
@@ -307,8 +415,8 @@
               <label>Quem falou (Interlocutor)</label>
               <div class="speaker-select-row">
                 <select id="editSpeaker"></select>
-                <button type="button" id="btnEnrollVoice" class="btn btn-xs btn-secondary" title="Salva a voz deste áudio no referencias_vozes.npz para reconhecer este amigo nos próximos áudios">
-                  🎙️ Treinar Voz
+                <button type="button" id="btnEnrollVoice" class="btn btn-xs btn-secondary" title="Confirma a pessoa e avalia a seleção como referência vocal local">
+                  🎙️ Cadastrar voz
                 </button>
               </div>
             </div>
@@ -328,10 +436,54 @@
             </div>
           </div>
 
-          <div class="form-group">
+          </details>
+          <div class="form-group legacy-transcript">
             <label>Transcrição (Usada na busca e nomeação por IA)</label>
             <textarea id="editTranscript" rows="2" placeholder="Texto falado no áudio..."></textarea>
+            <div id="analysisAlignment" class="help-text"></div>
           </div>
+          <details id="analysisPanel">
+            <summary>Análise local: transcrição, pessoas e metadados</summary>
+            <div class="form-group">
+              <label for="analysisStage">Etapa independente</label>
+              <select id="analysisStage"><option value="transcription">Transcrever</option><option value="metadata">Gerar título e categoria pelo texto</option><option value="speakers">Identificar pessoas</option><option value="acoustics">Analisar acústica</option></select>
+              <label><input type="checkbox" id="analysisSelection" /> Retranscrever intervalo da fonte</label>
+              <div class="form-row">
+                <label>Início (s)<input type="number" id="analysisStart" min="0" step="0.01" value="0" /></label>
+                <label>Fim (s)<input type="number" id="analysisEnd" min="0" step="0.01" value="1" /></label>
+                <label>Contexto adicional (s)<input type="number" id="analysisContext" min="0" max="5" step="0.5" value="0" /></label>
+              </div>
+              <button type="button" id="btnStartAnalysis" class="btn btn-ai">Iniciar etapa</button>
+              <button type="button" id="btnCancelAnalysis" class="btn btn-secondary" hidden>Cancelar análise</button>
+              <p id="captureAnalysisWarning" role="status" hidden></p>
+              <p id="analysisStatus" role="status" aria-live="polite"></p>
+              <small id="analysisRuntime"></small>
+              <p>Comparação: texto atual</p><pre id="analysisCurrent" style="white-space:pre-wrap"></pre>
+              <p>Proposta (aplicação explícita)</p><pre id="analysisProposal" style="white-space:pre-wrap"></pre>
+              <button type="button" id="btnAcceptAnalysis" class="btn btn-secondary" hidden>Substituir campos corrigidos pela proposta</button>
+              <button type="button" id="btnLoadAnalysis" class="btn btn-secondary" hidden>Carregar resultado nos campos</button>
+            </div>
+             <details id="localQualityPanel"><summary>Qualidade local e recursos</summary>
+               <label>Perfil<select id="qualityProfile"><option value="reviewing">Revisando</option><option value="playing">Jogando</option></select></label>
+               <label><input id="qualityPaused" type="checkbox" /> Pausar novas análises</label>
+               <p>Jogando adia tarefas em segundo plano. Pedidos explícitos continuam permitidos. Pausa segura: a inferência ativa termina; trabalhos aguardando podem ser cancelados.</p>
+               <label>Dicionário pessoal confirmado (um termo por linha)<textarea id="qualityDictionary" rows="3" maxlength="8100"></textarea></label>
+               <label><input id="qualityConfirm" type="checkbox" /> Confirmo estes termos como contexto de reconhecimento</label>
+               <p>O dicionário orienta o ASR; não substitui textos nem aprende regras de uma correção isolada. Descritores acústicos são medidas do sinal; categorias são sugestões editoriais. A calibração de qualidade aguarda gravações rotuladas independentes.</p>
+               <button type="button" id="btnSaveQuality" class="btn btn-secondary">Salvar perfil e dicionário</button>
+               <button type="button" id="btnRefreshQuality" class="btn btn-secondary">Atualizar estado</button>
+               <p id="qualityStatus" role="status" aria-live="polite"></p><div id="qualityJobs"></div>
+             </details>
+             <details><summary>Modelo e parâmetros de transcrição</summary>
+              <label>Modelo em cache ou pasta local<input id="asrModel" value="base" /></label>
+              <label>Dispositivo solicitado<select id="asrDevice"><option value="cuda">CUDA, fallback CPU</option><option value="cpu">CPU</option></select></label>
+              <label>Beam size<input id="asrBeam" type="number" min="1" max="10" value="3" /></label>
+              <label>Vocabulário<input id="asrHotwords" /></label>
+              <label>Contexto textual<input id="asrPrompt" /></label>
+              <button type="button" id="btnSaveAsr" class="btn btn-secondary">Salvar parâmetros locais</button>
+              <p>Somente modelos já instalados. Não baixa arquivos. O resultado informa o dispositivo realmente usado.</p>
+            </details>
+          </details>
 
           <div class="trim-section">
             <div class="trim-header-row">
@@ -412,11 +564,26 @@
     <div id="speakerModal" class="modal-backdrop hidden">
       <div class="modal-card modal-sm">
         <div class="modal-header">
-          <h2>🎙️ Renomear Amigo / Interlocutor</h2>
+          <h2>🎙️ Perfil de voz</h2>
           <button id="btnCloseSpeakerModal" class="btn-clear">✕</button>
         </div>
         <div class="modal-body">
           <input type="hidden" id="renameSpeakerId" />
+          <section aria-label="Referências vocais" class="voice-profile">
+            <p id="voiceLegacyStatus" role="status"></p>
+            <button id="btnImportLegacyVoices" type="button" class="btn btn-xs btn-secondary">Importar referências legadas configuradas (com backup)</button>
+            <p id="voiceProfileStatus" role="status"></p>
+            <div id="voiceSamples"></div>
+            <details><summary>Critérios de correspondência e revisão</summary>
+              <p>Escores de similaridade, não porcentagens de certeza. Valores iniciais provisórios.</p>
+              <label>Limiar <input id="voiceMatchThreshold" type="number" min="-1" max="1" step="0.01" /></label>
+              <label>Margem sobre a segunda pessoa <input id="voiceMatchMargin" type="number" min="0" max="2" step="0.01" /></label>
+              <button id="btnSaveVoiceMatching" type="button" class="btn btn-xs btn-secondary">Salvar critérios</button>
+              <button id="btnReviewVoiceLibrary" type="button" class="btn btn-xs btn-secondary">Gerar propostas para o acervo</button>
+              <div id="voiceReviewProposals"></div><p id="voiceReviewStatus" role="status"></p>
+              <button id="btnApplyVoiceReview" type="button" class="btn btn-xs btn-secondary">Aplicar propostas marcadas</button>
+            </details>
+          </section>
           <div class="form-group">
             <label>Nome do Amigo</label>
             <input type="text" id="renameSpeakerName" placeholder="Ex: Diogo, João, Lucas..." />
@@ -492,7 +659,34 @@
     </div>
   </div>
 
+  <div id="sequencePanel" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="sequenceHeading">
+    <section class="sequence-modal">
+      <header><h2 id="sequenceHeading">⇶ Sequências</h2><button id="btnSequenceNew" class="btn">Nova sequência</button><button id="btnCloseSequences" class="btn" aria-label="Fechar sequências">✕</button></header>
+      <div class="sequence-workspace">
+        <aside class="sequence-library-panel"><h3>Sequências salvas</h3><div id="sequenceSaved"></div><button id="btnSequenceReload" class="btn btn-xs">Recarregar documento salvo</button><button id="btnSequenceDiscardReload" class="btn btn-xs hidden">Descartar alterações e recarregar</button><h3>Biblioteca</h3><small>Arraste para um ramo ou clique para adicionar ao fim.</small><button id="btnSequenceRefreshLibrary" class="btn btn-xs">Atualizar biblioteca</button><div id="sequenceLibrary"></div></aside>
+        <div class="sequence-editor-area">
+          <div class="sequence-metadata"><label>Nome<input id="sequenceName" maxlength="200" /></label><label>Atalho global<input id="sequenceHotkey" placeholder="Ex.: ctrl+shift+1" /></label></div>
+          <p id="sequenceCapability"></p><p id="sequenceDuration"></p>
+          <label for="sequenceClipSelect">Clipe para adicionar aos blocos</label><select id="sequenceClipSelect"></select>
+          <div><button id="btnSequenceUndo" class="btn btn-xs">Desfazer</button> <button id="btnSequenceRedo" class="btn btn-xs">Refazer</button> <button id="btnSequenceSave" class="btn btn-primary">Salvar sequência</button> <button id="btnSequenceDelete" class="btn btn-xs">Excluir sequência</button></div>
+          <p id="sequenceMessage" role="status"></p><div id="sequenceBlocks"></div>
+        </div>
+      </div>
+      <footer>
+        <button id="btnSequenceStart" class="btn btn-primary">Iniciar</button><button id="btnSequenceAdvance" class="btn" disabled>Avançar</button><button id="btnSequenceStop" class="btn">Parar sequência</button><button id="btnSequenceRestart" class="btn">Reiniciar / substituir</button><button id="btnSequencePreview" class="btn">Ouvir tudo no monitor</button>
+        <div class="sequence-execution"><span id="sequenceStatus" role="status"></span><span id="sequenceNext"></span><span id="sequenceBranchesStatus"></span></div>
+      </footer>
+    </section>
+  </div>
   <script src="fuzzy.js"></script>
+  <script src="analysis.js"></script>
+  <script src="transcript.js"></script>
+  <script src="variants.js"></script>
+  <script src="editor.js"></script>
+  <script src="voice-profiles.js"></script>
+  <script src="sequences.js"></script>
+  <script src="collections.js"></script>
   <script src="app.js"></script>
+  <script src="local-quality.js"></script>
 </body>
 </html>

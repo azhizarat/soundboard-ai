@@ -312,6 +312,14 @@ async function initApp() {
   renderSidebar();
   renderGrid();
   bindEvents();
+  if (window.SoundSequences) {
+    window.sequenceEditor = window.SoundSequences.create(document, api);
+    await window.sequenceEditor.initialize();
+  }
+  if (window.SoundCollections) {
+    window.collectionController = window.SoundCollections.create(document, api);
+    await window.collectionController.initialize();
+  }
 
   state.config = initial.config || {};
   captureEnvOriginalTitles();
@@ -344,7 +352,12 @@ function renderDevices() {
 
     const opt2 = document.createElement("option");
     opt2.value = d.id;
-    opt2.textContent = `${d.is_default ? "🎧 " : ""}${d.name}`;
+    // A virtual cable is never a valid "fone" route: VB-Cable accepts the second
+    // stream and silently discards it, so the clip would play into the void.
+    opt2.disabled = Boolean(d.is_cable);
+    opt2.textContent = d.is_cable
+      ? `🚫 ${d.name} (é o cabo — não use como fone)`
+      : `${d.is_default ? "🎧 " : ""}${d.name}`;
     if (state.settings.monitor_device_id === d.id) opt2.selected = true;
     monSel.appendChild(opt2);
   });
@@ -395,7 +408,38 @@ function updateRoutingSummary() {
   if (!summaryEl) return;
   const cVol = Math.round(Number(state.settings.cable_volume ?? 1.0) * 100);
   const mVol = Math.round(Number(state.settings.monitor_volume ?? 0.75) * 100);
-  summaryEl.textContent = `Cable: ${cVol}% | Fone: ${mVol}%`;
+  const outputs = (state.devices && state.devices.outputs) || [];
+  const mon = outputs.find((d) => d.id === state.settings.monitor_device_id);
+  const warning = mon && mon.is_cable ? " ⚠️ Fone no cabo (sem áudio)" : "";
+  summaryEl.textContent = `Cable: ${cVol}% | Fone: ${mVol}%${warning}`;
+}
+
+async function runImportOperation(operation) {
+  try {
+    const res = await operation();
+    if (!res) return;
+    state.clips = res.clips || state.clips;
+    state.speakers = res.speakers || state.speakers;
+    renderSidebar();
+    renderGrid();
+    const count = res.imported_count ?? res.imported?.length ?? 0;
+    const lines = (res.results || []).map((item) => {
+      const status = item.status === "success" ? "Importado" : "Falhou";
+      return `${status}: ${item.source}${item.error ? ` — ${item.error}` : ""}${item.warnings?.length ? ` — ${item.warnings.join("; ")}` : ""}`;
+    });
+    if (!lines.length) lines.push(...(res.warnings || []), ...(res.error ? [res.error] : []));
+    if (count || lines.length) {
+      const panel = document.getElementById("importResults");
+      document.getElementById("importResultsText").textContent = `${count} arquivo(s) importado(s).\n${lines.join("\n")}`;
+      panel.classList.remove("hidden");
+      panel.open = (res.results || []).some((item) => item.status === "failed" || item.warnings?.length) || !!res.error || !!res.warnings?.length;
+      showToast(res.ok ? `${count} arquivo(s) importado(s). Consulte o resultado da importação.` : (res.error || "Falha na importação. Consulte os detalhes."), res.ok ? "#10b981" : "#ef4444");
+    }
+    return res;
+  } catch (error) {
+    showToast(`Falha na importação: ${error.message || error}`, "#ef4444");
+    return null;
+  }
 }
 
 function renderQuickImportBar() {
@@ -412,15 +456,8 @@ function renderQuickImportBar() {
     btn.className = "quick-chip-btn";
     btn.textContent = `📥 Importar ${item.label}`;
     btn.onclick = async () => {
-      showToast(`Importando e classificando ${item.label} com IA...`, "#8b5cf6");
-      const res = await api().import_folder_or_separados(item.path);
-      if (res && res.ok) {
-        state.clips = res.clips || state.clips;
-        state.speakers = res.speakers || state.speakers;
-        renderSidebar();
-        renderGrid();
-        showToast(`✅ ${res.imported_count || 0} áudios importados com sucesso!`, "#10b981");
-      }
+      const vinheta = document.getElementById("folderImportMode").value === "vinheta";
+      await runImportOperation(() => api().import_folder_or_separados(item.path, vinheta, vinheta ? "Vinhetas" : null));
     };
     wrap.appendChild(btn);
   });
@@ -634,8 +671,8 @@ function renderGrid() {
 
     const effDur = Math.max(
       0.1,
-      (clip.trim_end && clip.trim_end > clip.trim_start ? clip.trim_end : clip.duration || 0) -
-        (clip.trim_start || 0)
+      clip.effective_duration ?? ((clip.trim_end && clip.trim_end > clip.trim_start ? clip.trim_end : clip.duration || 0) -
+        (clip.trim_start || 0))
     ).toFixed(1);
 
     const moodBadgeHtml =
@@ -715,6 +752,8 @@ function renderGrid() {
 }
 
 function updateModalPreviewButtons(isPlaying) {
+  // O rodapé integrado inicia/reinicia a prévia; Parar é um controle próprio.
+  if (state.integratedEditor || (typeof window !== 'undefined' && window.IntegratedEditor)) isPlaying = false;
   const btnFooter = document.getElementById("btnPreviewMonitor");
   const btnTrim = document.getElementById("btnPreviewTrimHeader");
   if (btnFooter) {
@@ -739,7 +778,7 @@ function updateModalPreviewButtons(isPlaying) {
   }
 }
 
-async function saveCurrentClipEdits(closeModalAfter = true) {
+function currentClipEditPayload(includeUnchanged = false) {
   const id = document.getElementById("editClipId").value;
   if (!id) return null;
   const selSpk = document.getElementById("editSpeaker").value;
@@ -753,30 +792,91 @@ async function saveCurrentClipEdits(closeModalAfter = true) {
     speaker_ids: selSpk ? [selSpk] : [],
     hotkey: document.getElementById("editHotkey").value,
     transcript: document.getElementById("editTranscript").value,
-    trim_start: Number(document.getElementById("editTrimStart").value),
-    trim_end: Number(document.getElementById("editTrimEnd").value),
     volume: Number(document.getElementById("editVolume").value),
   };
-  const res = await api().save_clip_edits(payload);
+  // Range pode arredondar sozinho ao abrir (ex.: 1/3 s -> 0,33 s).
+  // Apenas interação com os controles de corte representa intenção de editar.
+  if (!state.durableEdit || state.editTrimDirty) {
+    payload.trim_start = Number(document.getElementById("editTrimStart").value);
+    payload.trim_end = Number(document.getElementById("editTrimEnd").value);
+  }
+  if (!includeUnchanged && state.editFieldBaseline) {
+    for (const key of Object.keys(payload)) {
+      if (key !== 'id' && !key.startsWith('trim_') && JSON.stringify(payload[key]) === JSON.stringify(state.editFieldBaseline[key])) delete payload[key];
+    }
+  }
+  return payload;
+}
+
+async function persistCurrentClipDraft(skipEditor = false) {
+  if (!skipEditor && state.integratedEditor && !(await state.integratedEditor.flush())?.ok) return {ok: false};
+  const captured = currentClipEditPayload(true);
+  if (!captured || !state.durableEdit) return null;
+  const baseline = state.editFieldBaseline;
+  const previous = state.editDraftQueue || Promise.resolve();
+  state.editDraftQueue = previous.catch(() => null).then(async () => {
+    try {
+      // Compara contra a última gravação confirmada, já dentro da fila serial.
+      const payload = {...captured};
+      if (baseline) {
+        for (const key of Object.keys(payload)) {
+          if (key !== 'id' && !key.startsWith('trim_') && JSON.stringify(payload[key]) === JSON.stringify(baseline[key])) delete payload[key];
+        }
+      }
+      const result = await api().update_clip_edit(payload);
+      if (!result?.ok) showToast(result?.error || "Não foi possível preservar a edição.", "#ef4444");
+      else if (baseline) {
+        Object.assign(baseline, payload);
+        if ('volume' in payload && state.integratedEditor && document.getElementById('editClipId').value === payload.id) await state.integratedEditor.refresh();
+      }
+      return result;
+    } catch (error) {
+      showToast(`Falha ao preservar a edição: ${error.message || error}`, "#ef4444");
+      return null;
+    }
+  });
+  return state.editDraftQueue;
+}
+
+async function refreshEditDrafts() {
+  const result = await api().list_clip_edits();
+  const select = document.getElementById("editDraftSelect");
+  if (!select || !result?.ok) return;
+  state.editDraftClips = result.clips || [];
+  select.replaceChildren(new Option("Edições preservadas", ""));
+  state.editDraftClips.forEach(clip => select.add(new Option(clip.title || "Áudio", clip.id)));
+}
+
+async function saveCurrentClipEdits(closeModalAfter = true) {
+  const epoch = state.editOpenEpoch;
+  const payload = currentClipEditPayload();
+  if (!payload) return null;
+  if (state.durableEdit && !(await persistCurrentClipDraft())?.ok) return null;
+  const voiceInterval = state.integratedEditor?.selection || null;
+  const res = await api().save_clip_edits({...(state.durableEdit ? {id: payload.id} : payload), voice_interval: voiceInterval});
+  state.voiceProfiles?.observe(res);
   if (res && res.ok) {
     const idx = state.clips.findIndex((c) => c.id === payload.id);
     if (idx >= 0) state.clips[idx] = res.clip;
+    else if (!res.clip.pending) state.clips.unshift(res.clip);
     state.speakers = res.speakers || state.speakers;
     renderSidebar();
     renderGrid();
-    if (closeModalAfter) {
+    if (closeModalAfter && state.editOpenEpoch === epoch && document.getElementById('editClipId').value === payload.id) {
       closeEditModal();
       showToast("💾 Alterações salvas!");
     }
+    refreshEditDrafts();
     return res.clip;
   }
+  showToast(res?.error || "Não foi possível salvar a edição.", "#ef4444");
   return null;
 }
 
 function applyDraftChrome(isDraft) {
   document.getElementById("modalTitle").textContent = isDraft
     ? "⚡ Replay — revise antes de salvar"
-    : "⚙️ Configurar Botão do Soundboard";
+    : "Editar clipe";
   const saveBtn = document.getElementById("btnSaveClip");
   saveBtn.textContent = isDraft ? "✅ Salvar no Soundboard" : "💾 Salvar";
   saveBtn.title = isDraft ? "Salvar no Soundboard" : "Salvar alterações e fechar";
@@ -795,9 +895,15 @@ function setDraftBusy(busy) {
 }
 
 function closeEditModal() {
+  state.voiceProfiles?.close();
+  state.integratedEditor?.close();
+  state.analysisPanel?.close();
+  state.editOpenEpoch = (state.editOpenEpoch || 0) + 1;
+  state.durableEdit = false;
+  refreshEditDrafts();
   document.getElementById("editModal").classList.add("hidden");
   const editId = document.getElementById("editClipId")?.value;
-  if (state.activePlayback && state.activePlayback.clip_id === editId) {
+  if (!state.integratedEditor && state.activePlayback && state.activePlayback.clip_id === editId) {
     api().stop_all();
     state.activePlayback = null;
     delete state.playingClips[editId];
@@ -885,9 +991,31 @@ function renderClipLufsBadge(clip) {
   }
 }
 
-function openEditModal(clip) {
-  state.draftClipId = clip.pending ? clip.id : null;
-  applyDraftChrome(Boolean(clip.pending));
+async function prepareClipEdit(clip) {
+  const epoch = (state.editOpenEpoch || 0) + 1;
+  state.editOpenEpoch = epoch;
+  const opened = await api().begin_clip_edit(clip.id);
+  if (state.editOpenEpoch !== epoch) return null;
+  if (!opened?.ok) {
+    showToast(opened?.error || "Não foi possível abrir a edição.", "#ef4444");
+    return null;
+  }
+  return opened;
+}
+
+async function openEditModal(clip) {
+  if (state.durableEdit && !(await persistCurrentClipDraft())?.ok) return;
+  const opened = await prepareClipEdit(clip);
+  if (!opened) return;
+  const editorEpoch = state.editOpenEpoch;
+  clip = opened.clip;
+  state.durableEdit = true;
+  state.editTrimDirty = false;
+  state.editFieldBaseline = null;
+  state.editDraftQueue = Promise.resolve();
+  state.draftClipId = null;
+  applyDraftChrome(false);
+  refreshEditDrafts();
   renderClipLufsBadge(clip);
   document.getElementById("editClipId").value = clip.id;
   document.getElementById("editEmoji").value = clip.emoji || "🔊";
@@ -919,6 +1047,11 @@ function openEditModal(clip) {
   document.getElementById("editHotkey").value = clip.hotkey || "";
   document.getElementById("editMood").value = clip.acoustic_mood || "Normal";
   document.getElementById("editTranscript").value = clip.transcript || "";
+  const captureWarning = document.getElementById('captureAnalysisWarning');
+  if (captureWarning) {
+    captureWarning.textContent = clip.capture_analysis?.message || '';
+    captureWarning.hidden = !captureWarning.textContent;
+  }
 
   const spkSel = document.getElementById("editSpeaker");
   spkSel.innerHTML = `<option value="">-- Sem Interlocutor --</option>`;
@@ -965,7 +1098,7 @@ function openEditModal(clip) {
   drawWaveformCanvas();
   if (api()?.get_clip_waveform) {
     api()
-      .get_clip_waveform(clip.id, 160)
+      .get_edit_source_waveform(clip.id, 160)
       .then((res) => {
         if (res && res.ok && document.getElementById("editClipId").value === clip.id) {
           state.waveformPeaks = res.peaks || [];
@@ -997,6 +1130,32 @@ function openEditModal(clip) {
   document.getElementById("routingPopoverMenu")?.classList.add("hidden");
   document.getElementById("packPopover")?.classList.add("hidden");
   document.getElementById("editModal").classList.remove("hidden");
+  state.editFieldBaseline = currentClipEditPayload();
+  if (window.IntegratedEditor) {
+    state.integratedEditor ||= window.IntegratedEditor.create(document, api, {
+      persist: () => persistCurrentClipDraft(true),
+      transcriptChanged: text => {
+        document.getElementById('editTranscript').value = text;
+        if (state.editFieldBaseline) state.editFieldBaseline.transcript = text;
+      },
+      created: created => {state.clips.unshift(created); renderGrid(); refreshEditDrafts();},
+      retranscribe: () => state.analysisPanel?.start(),
+    });
+    const volumeGroup = document.getElementById('editVolume').closest('.form-group');
+    document.getElementById('editorVolumeMount').appendChild(volumeGroup);
+    await state.integratedEditor.open(clip.id);
+    if (state.editOpenEpoch !== editorEpoch) return;
+  }
+  await ensureVoiceProfiles()?.openEditor(clip);
+  if (window.AnalysisPanel) {
+    state.analysisPanel ||= window.AnalysisPanel.create(document, api, {
+      persist: persistCurrentClipDraft,
+      currentText: () => document.getElementById('editTranscript').value,
+      refresh: async () => {const id = document.getElementById('editClipId').value; await openEditModal({id});},
+      configChanged: config => {state.config = config;},
+    });
+    state.analysisPanel.open(clip.id, state.config || {});
+  }
 }
 
 function drawWaveformCanvas(playheadAbsoluteSec = null) {
@@ -1296,6 +1455,27 @@ function openSpeakerModal(spk) {
   document.getElementById("routingPopoverMenu")?.classList.add("hidden");
   resetSpeakerDeleteConfirm();
   document.getElementById("speakerModal").classList.remove("hidden");
+  ensureVoiceProfiles()?.openProfile(spk.id).catch(error => showToast(String(error), '#ef4444'));
+}
+
+function ensureVoiceProfiles() {
+  if (!window.VoiceProfiles) return null;
+  state.voiceProfiles ||= window.VoiceProfiles.create(document, api, {
+    selectInterval: interval => state.integratedEditor?.setSelection(interval),
+    changed: async clip => {
+      if (clip) {
+        const index = state.clips.findIndex(item => item.id === clip.id);
+        if (index >= 0) state.clips[index] = clip;
+        document.getElementById('editSpeaker').value = clip.speaker_id || '';
+      } else {
+        const snapshot = await api().get_state();
+        state.clips = snapshot.clips || state.clips;
+        state.speakers = snapshot.speakers || state.speakers;
+      }
+      renderGrid(); renderSidebar();
+    }
+  });
+  return state.voiceProfiles;
 }
 
 const commandState = { open: false, index: 0, results: [], returnFocus: null };
@@ -1383,16 +1563,22 @@ function moveCommandSelection(delta) {
 }
 
 function bindEvents() {
-  document.getElementById("cableDeviceSelect").onchange = (e) => {
-    const id = Number(e.target.value);
-    state.settings.cable_device_id = id;
-    api().update_settings({ cable_device_id: id });
-  };
-
-  document.getElementById("monitorDeviceSelect").onchange = (e) => {
-    const id = Number(e.target.value);
-    state.settings.monitor_device_id = id;
-    api().update_settings({ monitor_device_id: id });
+  for (const [elementId, key] of [['cableDeviceSelect','cable_device_id'],['monitorDeviceSelect','monitor_device_id']]) {
+    document.getElementById(elementId).onchange = async (e) => {
+      const id = e.target.value === '' ? null : Number(e.target.value);
+      try {
+        const result = await api().update_settings({ [key]: id });
+        if (result.ok === false) showToast(result.error);
+        else state.settings = result;
+      } catch (error) { showToast(String(error)); }
+      renderDevices();
+      window.collectionController?.poll();
+    };
+  }
+  document.getElementById('btnRefreshRouting').onclick = async () => {
+    state.devices = await api().refresh_devices();
+    renderDevices();
+    window.collectionController?.poll();
   };
 
   document.getElementById("cableVolumeSlider").oninput = (e) => {
@@ -1534,45 +1720,20 @@ function bindEvents() {
     renderSidebar();
     renderGrid();
     openEditModal(res.clip);
-    showToast("✂️ Revise o corte e clique em Salvar no Soundboard.", "#3b82f6");
+    showToast(res.warnings?.length ? res.warnings.join(' ') : "✂️ Revise o corte e clique em Salvar no Soundboard.", res.warnings?.length ? "#f59e0b" : "#3b82f6");
   };
 
   document.getElementById("btnImportFiles").onclick = async () => {
-    const res = await api().import_audio_files(null, false, null);
-    if (res && res.ok) {
-      state.clips = res.clips;
-      state.speakers = res.speakers;
-      renderSidebar();
-      renderGrid();
-      showToast(`✅ ${res.imported.length} áudio(s) importado(s) e nomeado(s) pela IA!`, "#10b981");
-    }
+    await runImportOperation(() => api().import_audio_files(null, false, null));
   };
 
   document.getElementById("btnImportVinheta").onclick = async () => {
-    const res = await api().import_audio_files(null, true, "Vinhetas");
-    if (res && res.ok) {
-      state.clips = res.clips;
-      state.speakers = res.speakers;
-      renderSidebar();
-      renderGrid();
-      showToast(`🎵 ${res.imported.length} vinheta(s) importada(s) sem associar pessoa!`, "#06b6d4");
-    }
+    await runImportOperation(() => api().import_audio_files(null, true, "Vinhetas"));
   };
 
   document.getElementById("btnImportFolder").onclick = async () => {
-    const isVinhetaFilter = state.activeCategory === "Vinhetas" || state.activeSpeaker === "__none__";
-    const res = await api().import_folder_or_separados(
-      null,
-      isVinhetaFilter,
-      isVinhetaFilter ? "Vinhetas" : null
-    );
-    if (res && res.ok) {
-      state.clips = res.clips;
-      state.speakers = res.speakers;
-      renderSidebar();
-      renderGrid();
-      showToast(`✅ ${res.imported_count || 0} áudio(s) importado(s) da pasta!`, "#10b981");
-    }
+    const vinheta = document.getElementById("folderImportMode").value === "vinheta";
+    await runImportOperation(() => api().import_folder_or_separados(null, vinheta, vinheta ? "Vinhetas" : null));
   };
 
   // Pack menu (export/import .zip)
@@ -1834,8 +1995,32 @@ function bindEvents() {
     }
   });
 
+  // Rascunhos persistidos podem ser recuperados inclusive após reiniciar.
+  refreshEditDrafts();
+  document.getElementById("btnResumeEdit").onclick = () => {
+    const id = document.getElementById("editDraftSelect").value;
+    const clip = (state.editDraftClips || []).find(item => item.id === id);
+    if (clip) openEditModal(clip);
+  };
+  document.getElementById("editModal").addEventListener("input", event => {
+    if (event.target.id?.startsWith("edit") && !event.target.id.startsWith('editor')) persistCurrentClipDraft();
+  });
+  document.getElementById("editModal").addEventListener("change", event => {
+    if (event.target.id?.startsWith("edit") && !event.target.id.startsWith('editor')) persistCurrentClipDraft();
+  });
+  document.getElementById("btnDiscardEdit").onclick = async () => {
+    const id = document.getElementById("editClipId").value;
+    await state.integratedEditor?.settle();
+    await (state.editDraftQueue || Promise.resolve());
+    const result = await api().discard_clip_edit(id);
+    if (!result?.ok) { showToast(result?.error || "Não foi possível descartar.", "#ef4444"); return; }
+    state.durableEdit = false;
+    closeEditModal();
+    refreshEditDrafts();
+  };
   // Modal bindings
-  document.getElementById("btnCloseModal").onclick = () => {
+  document.getElementById("btnCloseModal").onclick = async () => {
+    if (state.durableEdit && !(await persistCurrentClipDraft())?.ok) return;
     if (state.draftClipId) {
       discardDraftAndClose();
       return;
@@ -1949,6 +2134,7 @@ function bindEvents() {
   const trimEndNum = document.getElementById("editTrimEndNum");
 
   function syncTrimValues(st, en) {
+    state.editTrimDirty = true;
     const maxDur = Number(trimEndSlider.max) || 10;
     let s = Math.max(0, Math.min(maxDur - 0.05, Number(st) || 0));
     let e = Math.max(s + 0.05, Math.min(maxDur, Number(en) || maxDur));
@@ -1958,6 +2144,7 @@ function bindEvents() {
     trimEndNum.value = e.toFixed(2);
     updateTrimTotalBadge(s, e);
     drawWaveformCanvas();
+    persistCurrentClipDraft();
   }
 
   const wfCanvas = document.getElementById("waveformCanvas");
@@ -2131,6 +2318,7 @@ function bindEvents() {
   };
 
   async function toggleModalAudioPreview() {
+    if (state.integratedEditor) return state.integratedEditor.preview('result');
     const id = document.getElementById("editClipId").value;
     if (!id) return;
     if (state.activePlayback && state.activePlayback.clip_id === id && state.activePlayback.playing) {
@@ -2151,8 +2339,8 @@ function bindEvents() {
       return;
     }
 
-    // Save temporary adjustments without closing modal
-    await saveCurrentClipEdits(false);
+    // Prévia usa o rascunho sem publicar uma revisão.
+    if (!(await persistCurrentClipDraft())?.ok) return;
 
     // Play clip locally on headphone monitor only
     const res = await api().play_clip(id, true);
@@ -2213,19 +2401,8 @@ function bindEvents() {
   }
 
   document.getElementById("btnReanalyzeAI").onclick = async () => {
-    const id = document.getElementById("editClipId").value;
-    showToast("🧠 Analisando vozes (pyannote + TitaNet), transcrição e emoção...", "#8b5cf6");
-    const res = await api().reanalyze_clip_ai(id);
-    if (res && res.ok) {
-      const idx = state.clips.findIndex((c) => c.id === id);
-      if (idx >= 0) state.clips[idx] = res.clip;
-      state.speakers = res.speakers || state.speakers;
-      openEditModal(res.clip);
-      renderSidebar();
-      renderGrid();
-      const spkCount = (res.clip.speaker_ids || []).length || 1;
-      showToast(`✨ IA detectou ${spkCount} voz(es): "${res.clip.title}"`, "#10b981");
-    }
+    document.getElementById('analysisPanel').open = true;
+    await state.analysisPanel?.start();
   };
 
   document.getElementById("btnSplitSpeakers").onclick = async () => {
@@ -2238,7 +2415,11 @@ function bindEvents() {
       closeEditModal();
       renderSidebar();
       renderGrid();
-      showToast(`✅ Áudio dividido em ${res.created_count} botões separados por fala!`, "#10b981");
+      if (res.analysis_status === "partial") {
+        showToast(`${res.created_count} cortes criados; análise parcial: ${(res.warnings || []).join("; ")}`, "#f59e0b");
+      } else {
+        showToast(`✅ Áudio dividido em ${res.created_count} botões separados por fala!`, "#10b981");
+      }
     } else {
       showToast(res?.error || "Não há múltiplas falas para separar neste áudio.", "#f59e0b");
     }
@@ -2246,13 +2427,30 @@ function bindEvents() {
 
   document.getElementById("btnEnrollVoice").onclick = async () => {
     const id = document.getElementById("editClipId").value;
-    const spkId = document.getElementById("editSpeaker").value || "interlocutor_1";
-    const res = await api().enroll_speaker_from_clip(id, spkId, "");
-    if (res && res.ok) {
-      state.speakers = res.speakers || state.speakers;
-      showToast(`🎙️ Voz salva em referencias_vozes.npz para ${spkId}!`, "#10b981");
-    } else {
-      showToast("Não foi possível extrair embedding vocal (áudio muito curto ou sem fala).", "#f59e0b");
+    const spkId = document.getElementById("editSpeaker").value;
+    if (!spkId) {
+      showToast("Selecione uma pessoa para cadastrar a voz deste recorte.", "#f59e0b");
+      return;
+    }
+    try {
+      if (!await saveCurrentClipEdits(false)) {
+        showToast("Não foi possível salvar o recorte e a pessoa selecionada.", "#ef4444");
+        return;
+      }
+      const selection = state.integratedEditor?.selection;
+      const res = selection ? await api().enroll_speaker_from_clip(id, spkId, "", selection)
+                            : await api().enroll_speaker_from_clip(id, spkId, "");
+      state.voiceProfiles?.observe(res);
+      state.speakers = res?.speakers || state.speakers;
+      if (res?.clip) {
+        const index = state.clips.findIndex((clip) => clip.id === id);
+        if (index >= 0) state.clips[index] = res.clip;
+      }
+      renderSidebar();
+      renderGrid();
+      showToast(res?.learning?.ok ? "Pessoa corrigida; exemplo em avaliação." : (res?.error || "Pessoa salva."), res?.learning?.ok ? "#10b981" : "#f59e0b");
+    } catch (error) {
+      showToast(`Falha ao cadastrar voz: ${error.message || error}`, "#ef4444");
     }
   };
 
@@ -2301,6 +2499,7 @@ function bindEvents() {
 
   // Speaker rename & delete modal
   document.getElementById("btnCloseSpeakerModal").onclick = () => {
+    state.voiceProfiles?.close();
     resetSpeakerDeleteConfirm();
     document.getElementById("speakerModal").classList.add("hidden");
   };
@@ -2333,6 +2532,7 @@ function bindEvents() {
       state.speakers = res.speakers || {};
       state.clips = res.clips || state.clips;
       if (state.activeSpeaker === currentSpeakerId) state.activeSpeaker = "Todos";
+      state.voiceProfiles?.close();
       document.getElementById("speakerModal").classList.add("hidden");
       renderSidebar();
       renderGrid();
@@ -2347,6 +2547,7 @@ function bindEvents() {
     const res = await api().update_speaker(spkId, name, color);
     if (res && res.ok) {
       state.speakers = res.speakers;
+      state.voiceProfiles?.close();
       document.getElementById("speakerModal").classList.add("hidden");
       renderSidebar();
       renderGrid();
@@ -2392,7 +2593,7 @@ window.onBackendEvent = (event, payload) => {
     renderSidebar();
     renderGrid();
     if (event === "replay_captured" && payload.clip) {
-      showToast(`⚡ Replay salvo: "${payload.clip.title}"`, "#10b981");
+      showToast(payload.warnings?.length ? payload.warnings.join(' ') : `⚡ Replay salvo: "${payload.clip.title}"`, payload.warnings?.length ? "#f59e0b" : "#10b981");
     }
   } else if (event === "overlay_toggled") {
     document.body.classList.toggle("mini-overlay", Boolean(payload.is_mini_overlay));

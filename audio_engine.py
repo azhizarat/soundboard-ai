@@ -5,9 +5,28 @@ import uuid
 import subprocess
 import tempfile
 import threading
+import logging
 from collections import OrderedDict, deque
 from pathlib import Path
 import numpy as np
+from audio_processing import resample_audio
+from mixer import CompletionEvent, legacy_finish_adapter, notify_completion
+
+
+def _release_once(callback):
+    lock, released = threading.Lock(), False
+    def release():
+        nonlocal released
+        with lock:
+            if released:
+                return
+            released = True
+        if callable(callback):
+            try:
+                callback()
+            except Exception:
+                logging.getLogger(__name__).exception('Erro ao liberar origem de reprodução')
+    return release
 
 
 def trim_and_normalize(
@@ -126,6 +145,11 @@ class PlaybackSession:
         self.stop_event = threading.Event()
         self._lock = threading.Lock()
 
+        self.group_id = None
+        self.completion = None
+        self._finish_reason = 'completed'
+        self._finish_error = None
+
     def toggle_pause(self) -> bool:
         with self._lock:
             self.paused = not self.paused
@@ -154,7 +178,10 @@ class PlaybackSession:
             self.paused = False
 
     def stop(self):
-        self.stop_event.set()
+        with self._lock:
+            if self.completion is None:
+                self._finish_reason = 'cancelled'
+                self.stop_event.set()
 
     def status(self) -> dict:
         with self._lock:
@@ -225,13 +252,21 @@ class ReplayRingBuffer:
         with self._lock:
             if not self._chunks:
                 return np.zeros((0, self.channels), dtype=np.float32)
-            full = np.vstack(list(self._chunks))
-
-        if last_seconds is not None and last_seconds > 0:
-            want = int(round(last_seconds * self.sr))
-            if len(full) > want:
-                full = full[-want:]
-        return full
+            want = self._current_samples
+            if last_seconds is not None and last_seconds > 0:
+                requested = int(round(last_seconds * self.sr))
+                # Compatibilidade: janela que arredonda para zero preserva tudo.
+                if requested:
+                    want = min(want, requested)
+            cursor = want
+            selected = []
+            for chunk in reversed(self._chunks):
+                count = min(cursor, len(chunk))
+                selected.append(chunk[-count:])
+                cursor -= count
+                if not cursor:
+                    break
+            return np.vstack(selected[::-1])
 
 
 class AudioEngine:
@@ -268,7 +303,16 @@ class AudioEngine:
         self._sessions: dict[str, PlaybackSession] = {}
         self._latest_play_id: str | None = None
         self._lock = threading.Lock()
+        self._stop_all_condition = threading.Condition(self._lock)
+        self._stop_all_thread = None
         self._mic_stop_event = None
+        self._group_owners = {}
+        self._cancelled_owners = set()
+        self._playback_epoch = 0
+        self._stopping_all = False
+        self._completion_queue = deque()
+        self._output_failure = (0, '')
+        self._dispatching_completions = False
         self._mic_thread = None
         # Bumped on every stream start: a stale callback from a closed stream
         # must never touch the ducking envelope of the current one.
@@ -296,6 +340,13 @@ class AudioEngine:
         cable_name = ""
         default_out_id = None
         default_in_id = None
+
+        try:
+            from mixer import invalidate_device_cache
+
+            invalidate_device_cache()
+        except Exception:
+            pass
 
         try:
             import sounddevice as sd
@@ -371,17 +422,11 @@ class AudioEngine:
         tmp_wav = None
         try:
             data, sr = sf.read(file_path, dtype="float32", always_2d=True)
-            if sr != self.TARGET_SR and len(data) > 0:
-                new_len = max(1, int(round(len(data) * self.TARGET_SR / sr)))
-                old_x = np.linspace(0.0, 1.0, len(data))
-                new_x = np.linspace(0.0, 1.0, new_len)
-                ch0 = np.interp(new_x, old_x, data[:, 0])
-                ch1 = np.interp(new_x, old_x, data[:, 1] if data.shape[1] > 1 else data[:, 0])
-                data = np.column_stack([ch0, ch1]).astype(np.float32)
-            elif data.shape[1] == 1:
+            if data.shape[1] == 1:
                 data = np.repeat(data, 2, axis=1)
             elif data.shape[1] > 2:
                 data = data[:, :2]
+            data = resample_audio(data, sr, self.TARGET_SR)
         except Exception:
             fd, tmp_wav = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
@@ -540,8 +585,18 @@ class AudioEngine:
                         with session._lock:
                             if session.seek_epoch == local_epoch:
                                 session.pos_idx = local_idx
-        except Exception:
-            pass
+        except Exception as exc:
+            # Legacy path: never swallow a dead device silently.
+            import logging
+
+            logging.getLogger(__name__).warning(
+                f"Reprodução interrompida no dispositivo {device_id}: {exc}"
+            )
+            with session._lock:
+                if session._finish_reason == 'completed':
+                    session._finish_reason = 'failed'
+                    session._finish_error = str(exc)
+                session.stop_event.set()
 
     def _output_route_usable(self, device_id) -> bool:
         """Preflights a concrete output device before a session is created.
@@ -567,13 +622,51 @@ class AudioEngine:
         except Exception:
             return False
 
-    def play_clip(
+    def render_clip(self, clip: dict, settings: dict | None = None):
+        if clip.get('_revision'):
+            from clip_renderer import render_revision
+            rendered = render_revision(clip['_source'], clip['_revision'], self.ffmpeg_path)
+            if clip.get('_preview_ranges'):
+                from clip_edits import validate_spans
+                ranges = validate_spans(clip['_preview_ranges'], len(rendered))
+                return np.concatenate([rendered[a:b] for a, b in ranges])
+            return rendered
+        raw_audio, _ = self.load_clip_stereo_48k(clip['file_path'])
+        processed = trim_and_normalize(
+            raw_audio, sr=self.TARGET_SR,
+            trim_start=float(clip.get('trim_start', 0)), trim_end=float(clip.get('trim_end', 0)),
+            volume=1.0, normalize=bool((settings or {}).get('normalize_on_import', True)))
+        gain = float(clip.get('loudness_gain_db', 0) or 0)
+        return (processed * float(10 ** (gain / 20))).astype(np.float32)
+
+    def play_clip(self, clip, settings, on_finish=None, on_tick=None, monitor_only=False, on_complete=None, expected_epoch=None):
+        """Transfere o lease de origem; liberação idempotente em qualquer desfecho."""
+        release = _release_once(clip.get('_release_source'))
+        if on_finish is clip.get('_release_source'):
+            on_finish = None
+        clip = dict(clip, _release_source=release)
+        try:
+            with self._lock:
+                stopping = self._stopping_all or (expected_epoch is not None and expected_epoch != self._playback_epoch)
+                epoch = self._playback_epoch
+            result = '' if stopping else self._play_clip(clip, settings, on_finish, on_tick,
+                                                         monitor_only, on_complete, epoch)
+            if not result:
+                release()
+            return result
+        except Exception:
+            release()
+            raise
+
+    def _play_clip(
         self,
         clip: dict,
         settings: dict,
         on_finish=None,
         on_tick=None,
         monitor_only: bool = False,
+        on_complete=None,
+        epoch=None,
     ) -> str:
         file_path = clip.get("file_path", "")
         if not file_path or not os.path.exists(file_path):
@@ -597,6 +690,16 @@ class AudioEngine:
         if monitor_only and (monitor_id is None or monitor_id == cable_id):
             # A monitor-only preview without a distinct monitor device has no route.
             has_monitor = False
+        if has_monitor:
+            # Monitoring into a virtual cable is never audible: VB-Cable accepts
+            # and silently drops the second render stream.
+            try:
+                from mixer import is_cable_output_device
+
+                if is_cable_output_device(monitor_id):
+                    has_monitor = False
+            except Exception:
+                pass
         if not has_cable and not has_monitor:
             return ""
 
@@ -610,57 +713,26 @@ class AudioEngine:
         has_cable = cable_usable
         has_monitor = monitor_usable
 
-        if not settings.get("overlap_audio", False):
-            self.stop_all()
-
         try:
-            raw_audio, _ = self.load_clip_stereo_48k(file_path)
-            processed = trim_and_normalize(
-                raw_audio,
-                sr=self.TARGET_SR,
-                trim_start=float(clip.get("trim_start", 0.0)),
-                trim_end=float(clip.get("trim_end", 0.0)),
-                volume=1.0,
-                normalize=bool(settings.get("normalize_on_import", True)),
-            )
+            processed = self.render_clip(clip, settings)
         except Exception:
             return ""
         if processed is None or len(processed) == 0:
             return ""
 
-        loudness_gain_db = float(clip.get("loudness_gain_db", 0.0) or 0.0)
-        if loudness_gain_db != 0.0:
-            scale = float(10.0 ** (loudness_gain_db / 20.0))
-            processed = (processed * scale).astype(np.float32)
-
-        if self._mixer is not None:
-            def _mixer_finish(cid=None, pid=None):
-                target_pid = pid or play_id
-                target_cid = cid or clip.get("id")
-                with self._lock:
-                    self._active_events.pop(target_pid, None)
-                    self._sessions.pop(target_pid, None)
-                    if self._latest_play_id == target_pid:
-                        self._latest_play_id = next(iter(self._sessions.keys()), None)
-                if callable(on_finish):
-                    try:
-                        on_finish(target_cid, target_pid)
-                    except Exception:
-                        pass
-
-            voice = self._mixer.play_voice(
-                clip=clip,
-                data=processed,
-                settings=settings,
-                monitor_only=monitor_only,
-                on_finish=_mixer_finish,
-            )
-            play_id = voice.play_id
-            with self._lock:
-                self._active_events[play_id] = voice.stop_event
-                self._sessions[play_id] = voice
-                self._latest_play_id = play_id
-
+        if self.playback_capabilities()['groups']:
+            try:
+                route_settings = dict(settings, cable_device_id=cable_id if has_cable else None,
+                                      monitor_device_id=monitor_id if has_monitor else None)
+                group = self._prepare_rendered_group(None, [{'clip': clip, 'data': processed}],
+                                                     route_settings, monitor_only, on_complete, on_finish,
+                                                     require_all_routes=False, epoch=epoch)
+                if not monitor_only and not settings.get('overlap_audio', False):
+                    self._stop_standalone(exclude={v.play_id for v in group.voices})
+                self.start_group(group)
+            except ValueError:
+                return ''
+            voice = group.voices[0]
             if callable(on_tick):
                 def _ui_ticker():
                     while not voice.stop_event.is_set():
@@ -668,11 +740,17 @@ class AudioEngine:
                             on_tick(voice.status())
                         except Exception:
                             pass
-                        time.sleep(0.12)
-
+                        time.sleep(.12)
                 threading.Thread(target=_ui_ticker, daemon=True).start()
+            return voice.play_id
 
-            return play_id
+        if not monitor_only and not settings.get('overlap_audio', False):
+            self._stop_standalone()
+
+        if self._mixer is not None:
+            # Um backend de mixer sem prepare/register/start não pode publicar
+            # vozes com segurança. O backend legado real segue abaixo.
+            return ''
 
         play_id = uuid.uuid4().hex[:8]
         session = PlaybackSession(
@@ -685,7 +763,11 @@ class AudioEngine:
             title=str(clip.get("title") or "Áudio"),
             emoji=str(clip.get("emoji") or "🔊"),
         )
+        session._source_release = clip.get('_release_source')
+        legacy_finish = legacy_finish_adapter(on_finish)
         with self._lock:
+            if self._stopping_all or epoch != self._playback_epoch:
+                return ''
             self._active_events[play_id] = session.stop_event
             self._sessions[play_id] = session
             self._latest_play_id = play_id
@@ -730,17 +812,18 @@ class AudioEngine:
             for t in threads:
                 t.join()
 
-            session.stop_event.set()
+            with session._lock:
+                session.stop_event.set()
+                session.completion = CompletionEvent(play_id, session.clip_id, None,
+                                                     session._finish_reason, session._finish_error)
             with self._lock:
                 self._active_events.pop(play_id, None)
                 self._sessions.pop(play_id, None)
                 if self._latest_play_id == play_id:
                     self._latest_play_id = next(iter(self._sessions.keys()), None)
-            if callable(on_finish):
-                try:
-                    on_finish(clip.get("id"), play_id)
-                except Exception:
-                    pass
+            session._source_release()
+            notify_completion(on_complete, session.completion)
+            notify_completion(legacy_finish, session.completion)
 
         threading.Thread(target=_runner, daemon=True).start()
         return play_id
@@ -750,17 +833,242 @@ class AudioEngine:
             pid = self._latest_play_id if play_id is None else play_id
             return self._sessions.get(pid) if pid else None
 
-    def stop_all(self):
+    def playback_capabilities(self):
+        supported = self._mixer is not None and all(callable(getattr(self._mixer, name, None))
+                    for name in ('prepare_group', 'start_group', 'stop_group', 'cancel_prepared'))
+        return {'groups': supported, 'scheduled_playback': supported,
+                'unavailable_reason': None if supported else 'Grupos e sequências exigem o backend mixer.'}
+
+    def capture_playback_epoch(self):
+        """Marca a solicitação antes de validação/I/O; Stop All invalida a marca."""
         with self._lock:
-            if self._mixer is not None:
-                self._mixer.stop_all(fade_ms=10.0)
+            if self._stopping_all:
+                raise ValueError('Parada geral em andamento')
+            return self._playback_epoch
+
+    def output_failure(self):
+        with self._lock:
+            return self._output_failure
+
+    def register_group_owner(self, group_id, cancel, expected_epoch=None):
+        """E8 registra cancelamento do executor/esperas antes de preparar vozes."""
+        if not isinstance(group_id, str) or not group_id or not callable(cancel):
+            raise ValueError('Dono de grupo inválido')
+        with self._lock:
+            obsolete = expected_epoch is not None and (self._stopping_all or expected_epoch != self._playback_epoch)
+            if not obsolete:
+                if self._stopping_all or group_id in self._cancelled_owners or group_id in self._group_owners:
+                    raise ValueError('Dono já registrado ou cancelado; use uma nova identidade')
+                self._group_owners[group_id] = cancel
+        if obsolete:
+            # O callback nunca roda sob o lock do engine, nem o registro aguarda I/O.
+            try:
+                cancel()
+            finally:
+                raise ValueError('Solicitação cancelada por Stop All antes do registro do dono')
+
+    def unregister_group_owner(self, group_id):
+        with self._lock:
+            self._group_owners.pop(group_id, None)
+
+    def _cancel_owner(self, group_id):
+        if group_id is None:
+            return False
+        with self._lock:
+            first_cancellation = group_id not in self._cancelled_owners
+            self._cancelled_owners.add(group_id)
+            callback = self._group_owners.pop(group_id, None)
+        if callable(callback):
+            try:
+                callback()
+            except Exception:
+                logging.getLogger(__name__).exception('Erro ao cancelar dono de reprodução')
+        return first_cancellation
+
+    def _dispatch_completion(self, callback, event):
+        """Drena finalizações iterativamente; propagar a irmãos não reentra callbacks."""
+        with self._lock:
+            self._completion_queue.append((callback, event))
+            if self._dispatching_completions:
+                return
+            self._dispatching_completions = True
+        while True:
+            with self._lock:
+                if not self._completion_queue:
+                    self._dispatching_completions = False
+                    return
+                pending_callback, pending_event = self._completion_queue.popleft()
+            notify_completion(pending_callback, pending_event)
+
+    def prepare_group(self, group_id, occurrences, settings, monitor_only=False, on_complete=None):
+        """Ocorrências já resolvidas pelo store: clip, offset_samples; revisão imutável no clip.
+
+        Transfere para o engine um _release_source opcional por ocorrência, inclusive
+        nas falhas. Preparar não publica áudio; start_group publica o lote completo.
+        """
+        releases = [_release_once(item['clip'].get('_release_source')) for item in occurrences]
+        try:
+            if not self.playback_capabilities()['groups']:
+                raise ValueError('Grupos e sequências exigem o backend mixer')
+            if not isinstance(group_id, str) or not group_id:
+                raise ValueError('group_id obrigatório')
+            with self._lock:
+                epoch = self._playback_epoch
+            rendered = []
+            for item, release in zip(occurrences, releases):
+                clip = dict(item['clip'], _release_source=release)
+                if not os.path.isfile(clip.get('file_path', '')):
+                    raise ValueError('Origem de áudio indisponível')
+                rendered.append({'clip': clip, 'data': self.render_clip(clip, settings),
+                                 'offset_samples': item.get('offset_samples', 0)})
+            return self._prepare_rendered_group(group_id, rendered, settings, monitor_only,
+                                                on_complete, epoch=epoch)
+        except Exception:
+            for release in releases:
+                release()
+            raise
+
+    def _prepare_rendered_group(self, group_id, items, settings, monitor_only=False,
+                                on_complete=None, on_finish=None, require_all_routes=True, epoch=None):
+        with self._lock:
+            epoch = self._playback_epoch if epoch is None else epoch
+        legacy = legacy_finish_adapter(on_finish)
+        releases = {}
+        for item in items:
+            item['play_id'] = uuid.uuid4().hex
+            releases[item['play_id']] = _release_once(item['clip'].get('_release_source'))
+        def deliver(event):
+            if event.reason == 'failed':
+                with self._lock:
+                    self._output_failure = (self._output_failure[0] + 1, event.error or 'Falha na saída de áudio')
+            if event.reason != 'completed':
+                if self._cancel_owner(event.group_id):
+                    # O hook cancela executor/esperas; áudio do dono é obrigação
+                    # do engine, inclusive lotes preparados em outras saídas.
+                    self._mixer.stop_group(event.group_id, fade_ms=0,
+                                           reason=event.reason, error=event.error)
+            with self._lock:
+                self._sessions.pop(event.play_id, None)
+                self._active_events.pop(event.play_id, None)
+                if self._latest_play_id == event.play_id:
+                    self._latest_play_id = next(iter(self._sessions), None)
+            releases[event.play_id]()
+            notify_completion(on_complete, event)
+            source_callback = next(item['clip'].get('_release_source') for item in items
+                                   if item['play_id'] == event.play_id)
+            if on_finish is not source_callback:
+                notify_completion(legacy, event)
+        def finished(event):
+            self._dispatch_completion(deliver, event)
+        def register(group):
+            with self._lock:
+                if self._stopping_all or epoch != self._playback_epoch or group_id in self._cancelled_owners:
+                    raise ValueError('Preparação cancelada pelo dono ou Stop All')
+                for voice in group.voices:
+                    voice._source_release = releases[voice.play_id]
+                    self._sessions[voice.play_id] = voice
+                    self._active_events[voice.play_id] = voice.stop_event
+                    self._latest_play_id = voice.play_id
+        try:
+            group = self._mixer.prepare_group(group_id, items, settings, monitor_only=monitor_only,
+                                              on_complete=finished, require_all_routes=require_all_routes,
+                                              register=register)
+            group.engine_epoch = epoch
+            # Stop All pode ter ocorrido entre registrar e anexar o lote ao mixer.
+            with self._lock:
+                cancelled = epoch != self._playback_epoch or group_id in self._cancelled_owners
+            if cancelled:
+                self._mixer.cancel_prepared(group)
+                raise ValueError('Preparação cancelada')
+            return group
+        except Exception:
+            for release in releases.values():
+                release()
+            raise
+
+    def start_group(self, group, delay_samples=0):
+        with self._lock:
+            cancelled = (self._stopping_all or group.engine_epoch != self._playback_epoch or
+                         group.group_id in self._cancelled_owners)
+        if cancelled:
+            self._mixer.cancel_prepared(group)
+            raise ValueError('Grupo cancelado')
+        try:
+            return self._mixer.start_group(group, delay_samples=delay_samples)
+        except ValueError as exc:
+            self._mixer.cancel_prepared(group, reason='failed', error=str(exc))
+            raise
+
+    def stop_group(self, group_id, fade_ms=10.0):
+        self._cancel_owner(group_id)
+        if self.playback_capabilities()['groups']:
+            self._mixer.stop_group(group_id, fade_ms=fade_ms)
+
+    def _stop_standalone(self, exclude=()):
+        with self._lock:
+            sessions = [session for pid, session in self._sessions.items() if pid not in exclude
+                        and getattr(session, 'group_id', None) is None and not session.monitor_only]
+        for session in sessions:
+            session.stop()
+
+    def stop_all(self, fade_ms=10.0, wait=False):
+        with self._stop_all_condition:
+            if self._stopping_all:
+                if not wait:
+                    return
+                if self._stop_all_thread == threading.get_ident():
+                    raise ValueError('Parada reentrante não pode confirmar silêncio antes do cancelamento externo')
+                while self._stopping_all:
+                    self._stop_all_condition.wait()
+            self._stopping_all = True
+            self._stop_all_thread = threading.get_ident()
+            self._playback_epoch += 1
+            owners = set(self._group_owners) | {getattr(session, 'group_id', None)
+                                               for session in self._sessions.values()}
             events = list(self._active_events.values())
+            sessions = list(self._sessions.values())
             self._active_events.clear()
             self._sessions.clear()
             self._latest_play_id = None
-        if self._mixer is None:
-            for ev in events:
-                ev.set()
+        try:
+            for owner in owners:
+                self._cancel_owner(owner)
+            if self._mixer is not None:
+                self._mixer.stop_all(fade_ms=fade_ms)
+            for session in sessions:
+                release = getattr(session, '_source_release', None)
+                if callable(release):
+                    release()
+            if self._mixer is None:
+                for session in sessions:
+                    session.stop()
+        finally:
+            with self._stop_all_condition:
+                self._stopping_all = False
+                self._stop_all_thread = None
+                self._stop_all_condition.notify_all()
+
+    def shutdown(self) -> None:
+        """Releases device streams and worker threads; used on application exit."""
+        try:
+            self.stop_all()
+        except Exception:
+            pass
+        try:
+            self._loopback_stop_event.set()
+        except Exception:
+            pass
+        stop_ev = self._mic_stop_event
+        if stop_ev is not None:
+            try:
+                stop_ev.set()
+            except Exception:
+                pass
+        if self._mixer is not None:
+            try:
+                self._mixer.shutdown()
+            except Exception:
+                pass
 
     def set_mic_passthrough(self, enabled: bool, mic_id: int = None, cable_id: int = None, gain: float = 1.0):
         try:

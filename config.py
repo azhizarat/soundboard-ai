@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 ENV_DATA_DIR = "SOUNDBOARD_DATA_DIR"
@@ -15,6 +15,8 @@ KNOWN_KEYS = (
     "ollama_url",
     "ollama_model",
     "mixer_mode",
+    "asr_model", "asr_device", "asr_beam_size", "asr_language", "asr_hotwords", "asr_initial_prompt",
+    "analysis_profile", "analysis_paused", "personal_dictionary",
 )
 ENV_KEYS = {
     "models_dir": "SOUNDBOARD_MODELS_DIR",
@@ -39,6 +41,15 @@ class AppConfig:
     ollama_url: str = DEFAULT_OLLAMA_URL
     ollama_model: str = DEFAULT_OLLAMA_MODEL
     mixer_mode: str = DEFAULT_MIXER_MODE
+    asr_model: str = 'base'
+    asr_device: str = 'cuda'
+    asr_beam_size: int = 3
+    asr_language: str = 'pt'
+    asr_hotwords: str = ''
+    asr_initial_prompt: str = ''
+    analysis_profile: str = 'reviewing'
+    analysis_paused: bool = False
+    personal_dictionary: list = field(default_factory=list)
 
 
 def app_dir() -> Path:
@@ -85,6 +96,14 @@ def _finalize(values: dict, base: Path) -> AppConfig:
     if mixer == "v2":
         mixer = "mixer"
     clean["mixer_mode"] = mixer if mixer in MIXER_MODES else DEFAULT_MIXER_MODE
+    clean['asr_beam_size'] = max(1, min(10, int(clean['asr_beam_size'])))
+    clean['asr_device'] = clean['asr_device'] if clean['asr_device'] in ('cuda', 'cpu') else 'cpu'
+    if clean['analysis_profile'] not in ('playing', 'reviewing') or not isinstance(clean['analysis_paused'], bool):
+        raise ValueError('Perfil/pausa de análise inválidos')
+    terms = clean['personal_dictionary']
+    if not isinstance(terms, list) or len(terms) > 100 or any(not isinstance(t, str) or not 0 < len(t.strip()) <= 80 for t in terms):
+        raise ValueError('Dicionário: até 100 termos de 1 a 80 caracteres')
+    clean['personal_dictionary'] = list(dict.fromkeys(t.strip() for t in terms))
     return AppConfig(data_dir=base, **clean)
 
 
@@ -102,6 +121,9 @@ def load_config(data_dir=None) -> AppConfig:
         "ollama_url": DEFAULT_OLLAMA_URL,
         "ollama_model": DEFAULT_OLLAMA_MODEL,
         "mixer_mode": DEFAULT_MIXER_MODE,
+        "asr_model": 'base', "asr_device": 'cuda', "asr_beam_size": 3,
+        "asr_language": 'pt', "asr_hotwords": '', "asr_initial_prompt": '',
+        "analysis_profile": 'reviewing', "analysis_paused": False, "personal_dictionary": [],
     }
     values.update(file_cfg)
     for key, env_name in ENV_KEYS.items():
@@ -114,7 +136,8 @@ def load_config(data_dir=None) -> AppConfig:
 
 def save_config(config: AppConfig, updates: dict) -> AppConfig:
     """Persists only known keys (never data_dir) and returns a new config instance."""
-    clean = {k: v for k, v in (updates or {}).items() if k in KNOWN_KEYS and v not in (None, "")}
+    clean = {k: v for k, v in (updates or {}).items() if k in KNOWN_KEYS and v is not None
+             and (v != '' or k in ('asr_hotwords', 'asr_initial_prompt'))}
 
     persisted = {}
     path = config.data_dir / "config.json"
@@ -126,6 +149,11 @@ def save_config(config: AppConfig, updates: dict) -> AppConfig:
         if isinstance(raw, dict):
             persisted = {k: raw[k] for k in KNOWN_KEYS if raw.get(k) not in (None, "")}
     persisted.update(clean)
+
+    merged = asdict(config)
+    merged.update(persisted)
+    merged['data_dir'] = config.data_dir
+    validated = _finalize(merged, config.data_dir)
 
     if clean:
         tmp = path.with_name("config.json.tmp")
@@ -139,10 +167,7 @@ def save_config(config: AppConfig, updates: dict) -> AppConfig:
                 pass
             raise
 
-    merged = asdict(config)
-    merged.update(persisted)
-    merged["data_dir"] = config.data_dir
-    return _finalize(merged, config.data_dir)
+    return validated
 
 
 def config_dict(config: AppConfig) -> dict:

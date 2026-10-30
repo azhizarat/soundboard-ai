@@ -12,15 +12,22 @@ import uuid
 import webbrowser
 import zipfile
 from pathlib import Path
+from functools import wraps
 
 import config
 import doctor
 import loudness
 import packs
 from store import SoundboardStore
-from ai_analyzer import AIAnalyzer
+from ai_analyzer import AIAnalyzer, DiarizationError
 from audio_engine import AudioEngine, compute_waveform_peaks
 from hotkeys import HotkeyManager
+from analysis_jobs import AnalysisQueue, AnalysisPausedError
+from voice_service import VoiceLearningAPI
+from sequence_service import SequenceAPI
+from sequence_runner import SequenceRunner
+from operation_service import OperationAPI
+from audio_variants import VariantAPI
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -113,12 +120,23 @@ def _resolve_device(
     return name_match
 
 
-class SoundboardAPI:
+def _serialized_configuration(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        # Persistência e publicação compartilham ordem; nunca adquirir lock do store aqui.
+        with self._config_lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
+class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI):
     def __init__(self, data_dir: str = None, start_background_services: bool = True):
         # All internal state attributes MUST start with '_' so pywebview does not
         # recursively inspect/serialize them (especially self._window.native!).
         self._config = config.load_config(data_dir)
+        self._config_lock = threading.RLock()
         self._store = SoundboardStore(data_dir=str(self._config.data_dir))
+        self._store.ffmpeg_path = self._config.ffmpeg_path
         # Replay drafts live in data/tmp and are throwaway: never survive a restart.
         self._store.purge_pending_clips()
         if start_background_services:
@@ -129,24 +147,43 @@ class SoundboardAPI:
             ollama_url=self._config.ollama_url,
             ollama_model=self._config.ollama_model,
         )
+        self._configure_transcription()
+        self._inference_lock = threading.RLock()
+        self._analysis_queue = AnalysisQueue(capacity=8)
+        self._analysis_queue.set_policy(self._config.analysis_profile, self._config.analysis_paused)
+        self._voices().recover_interrupted_learning()
+        if start_background_services:
+            atexit.register(self._analysis_queue.close)
         self._audio = AudioEngine(
             replay_seconds=max(60.0, float(self._store.state["settings"].get("replay_seconds", 15))),
             start_loopback=start_background_services,
             ffmpeg_path=self._config.ffmpeg_path,
             mixer_mode=self._config.mixer_mode,
         )
+        if start_background_services:
+            # Close PortAudio handles explicitly: leaving them to the interpreter
+            # makes the virtual-cable endpoints end abruptly on exit.
+            atexit.register(self._audio.shutdown)
         self._window = None
         self._is_mini_overlay = False
         self._cable_warned = False
+        self._init_operation()
 
         self._auto_bind_devices()
 
         self._hotkeys = HotkeyManager(
-            on_play_clip=lambda cid: self.play_clip(cid, monitor_only=False, from_hotkey=True),
+            on_play_clip=self._trigger_clip_hotkey,
             on_stop_all=lambda: self.stop_all(from_hotkey=True),
             on_save_replay=self.capture_replay_clip,
             on_toggle_overlay=self.toggle_mini_overlay,
+            on_sequence=self._trigger_sequence_hotkey,
+            sequence_provider=lambda: list(self._store.snapshot()['sequences'].values()),
+            on_collection=self._dispatch_collection_hotkey,
+            collection_provider=self._active_collection,
         )
+        self._sequence_runner = SequenceRunner(self._store, self._audio)
+        if start_background_services:
+            atexit.register(self._sequence_runner.close)
         if start_background_services:
             self._hotkeys.refresh(self._public_clips(self._store.state["clips"]), self._store.state["settings"])
             if self._store.state["settings"].get("mic_passthrough"):
@@ -159,11 +196,25 @@ class SoundboardAPI:
 
     def _prewarm_ai(self):
         try:
+            if not self._analysis_queue.allows():
+                return
             self._ai._get_extractor()
             self._ai._get_diarizer()
             self._ai._get_whisper()
         except Exception:
             pass
+
+    def _analyze_audio(self, *args, **kwargs) -> dict:
+        with getattr(self, '_inference_lock', threading.RLock()):
+            self._require_explicit_analysis()
+            result = self._ai.analyze_file(*args, **kwargs)
+        if result.get("analysis_status") == "decode_error":
+            error = result.get("error") or "Falha ao decodificar áudio"
+            self._notify_ui("toast", {"type": "warning", "message": error})
+            raise ValueError(error)
+        for warning in result.get("warnings") or []:
+            self._notify_ui("toast", {"type": "warning", "message": warning})
+        return result
 
     def _get_speaker_names_map(self) -> dict:
         return {k: v.get("name", k) for k, v in self._store.state["speakers"].items()}
@@ -216,11 +267,20 @@ class SoundboardAPI:
             outputs,
             dev_info.get("detected_cable_id"),
         )
+        # The Windows default output is frequently the cable itself. Adopting it
+        # as the "fone" route would send the monitor audio back into the cable,
+        # which VB-Cable accepts and silently discards.
+        monitor_default = dev_info.get("default_output_id")
+        monitor_entry = next(
+            (d for d in outputs if d.get("id") == monitor_default), None
+        )
+        if monitor_entry and monitor_entry.get("is_cable"):
+            monitor_default = None
         _bind(
             "monitor_device_id",
             "monitor_device_name",
             outputs,
-            dev_info.get("default_output_id"),
+            monitor_default,
         )
         _bind(
             "mic_device_id",
@@ -319,6 +379,9 @@ class SoundboardAPI:
             "is_mini_overlay": self._is_mini_overlay,
             "environment": env,
             "config": config.config_dict(self._config),
+            "analysis_jobs": self._analysis_queue.list(),
+            "transcription_runtime": copy.deepcopy(self._ai.transcription_runtime),
+            "playback_capabilities": self.get_playback_capabilities(),
         }
 
     def get_environment_status(self, refresh=False) -> dict:
@@ -329,6 +392,7 @@ class SoundboardAPI:
         doctor.invalidate_cache()
         return doctor.snapshot(self._config, refresh=True)
 
+    @_serialized_configuration
     def save_app_config(self, updates: dict) -> dict:
         try:
             self._config = config.save_config(self._config, updates or {})
@@ -353,11 +417,241 @@ class SoundboardAPI:
             ollama_url=self._config.ollama_url,
             ollama_model=self._config.ollama_model,
         )
+        profiles = self._voices()
+        with profiles.transaction():
+            profiles._invalidate_matching()
         self._audio.ffmpeg_path = self._config.ffmpeg_path
+        self._store.ffmpeg_path = self._config.ffmpeg_path
+        self._configure_transcription()
         # Re-applying keeps the route in sync with the new devices/config; only
         # touch the mic stream when the user actually enabled it.
         if self._store.state["settings"].get("mic_passthrough"):
             self._apply_mic_passthrough()
+
+    def _configure_transcription(self):
+        options = {key: getattr(self._config, 'asr_' + key)
+                   for key in ('model', 'device', 'beam_size', 'language', 'hotwords', 'initial_prompt')}
+        terms = self._config.personal_dictionary
+        options['hotwords'] = ', '.join(filter(None, [self._config.asr_hotwords, ', '.join(terms)]))
+        self._ai.configure_transcription(options)
+        if hasattr(self, '_analysis_queue'):
+            self._analysis_queue.set_policy(self._config.analysis_profile, self._config.analysis_paused)
+
+    def _require_explicit_analysis(self):
+        queue = getattr(self, '_analysis_queue', None)
+        if queue and not queue.allows(explicit=True):
+            if queue.policy()['paused']:
+                raise AnalysisPausedError('Análises pausadas; retome em Qualidade local para executar esta tarefa')
+            raise ValueError('Fila de análise encerrada')
+
+    def get_local_quality(self):
+        from analysis_cache import DECODE_CACHE
+        return {'ok': True, 'policy': self._analysis_queue.policy(),
+                'dictionary': list(self._config.personal_dictionary),
+                'dictionary_provenance': 'user_confirmed_hotwords',
+                'cache': {'inference': self._ai.cache.stats(), 'decode': DECODE_CACHE.stats()},
+                'jobs': self._analysis_queue.list(),
+                'quality_calibration': 'pending_labeled_corpus'}
+
+    @_serialized_configuration
+    def set_resource_policy(self, profile='reviewing', paused=False):
+        try:
+            self._config = config.save_config(self._config, {'analysis_profile': profile, 'analysis_paused': paused})
+            self._analysis_queue.set_policy(profile, paused)
+            return self.get_local_quality()
+        except (ValueError, OSError) as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def set_analysis_priority(self, analysis_id, prioritized=True):
+        return {'ok': self._analysis_queue.reprioritize(analysis_id, prioritized)}
+
+    @_serialized_configuration
+    def save_personal_dictionary(self, terms, confirmed=False):
+        if confirmed is not True:
+            return {'ok': False, 'error': 'Confirme explicitamente os termos pessoais'}
+        try:
+            self._config = config.save_config(self._config, {'personal_dictionary': terms})
+            self._configure_transcription()
+            return self.get_local_quality()
+        except (ValueError, OSError) as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    @staticmethod
+    def _metadata_speaker_name(context, token, names):
+        provenance = token.get('field_provenance', {})
+        # Uma atribuição humana é intenção explícita, não uma previsão a recalcular.
+        if provenance.get('speaker_id') == 'human':
+            return names.get(context.get('speaker_id'), '')
+        if provenance.get('speaker_ids') == 'human':
+            return ', '.join(names[sid] for sid in context.get('speaker_ids', []) if sid in names)
+        spans = context['_revision']['spans']
+        retained = set()
+        for segment in context.get('segments', []):
+            start, end = segment.get('start_sample'), segment.get('end_sample')
+            if not isinstance(start, int) or not isinstance(end, int) or start >= end:
+                continue
+            if segment.get('source_id', token['source_id']) != token['source_id']:
+                continue
+            if segment.get('speaker_id') and any(start < hi and end > lo for lo, hi in spans):
+                retained.add(segment['speaker_id'])
+        # Sem evidência temporal ou com vários interlocutores, omite o nome.
+        # O campo antigo do clipe não demonstra quem ficou na montagem atual.
+        return names.get(next(iter(retained)), '') if len(retained) == 1 else ''
+
+    def request_clip_analysis(self, clip_id: str, stage='transcription', interval=None, context_seconds=0, priority=True):
+        handle = None
+        reserved = self._analysis_queue.reserve()
+        if not reserved['ok']:
+            return reserved
+        try:
+            if interval is not None and stage != 'transcription':
+                raise ValueError('Seleção temporal é exclusiva da transcrição')
+            with self._store._lock:
+                token = self._store.prepare_analysis(clip_id, stage, interval)
+                context = self._store.render_context(clip_id, draft=True)
+                transcript = self._store.get_transcript(clip_id)
+                handle = self._store.acquire_source(token['source_id'])
+                names = self._get_speaker_names_map()
+                use_llm = bool(self._store.state['settings'].get('use_local_llm', True))
+            analyzer = self._ai
+            from importlib.metadata import version
+            parameters = copy.deepcopy(analyzer.transcription_config) if stage == 'transcription' else {}
+            requested = {**token, 'model': parameters.pop('model', stage),
+                         'model_version': 'faster-whisper/' + version('faster-whisper') if stage == 'transcription' else 'local-v1',
+                         'parameters': {**parameters, 'word_timestamps': True} if stage == 'transcription' else {},
+                         'device': None, 'fallback_reason': None}
+            def run():
+                from ai_analyzer import generate_smart_metadata, analyze_acoustics
+                from audio_processing import resample_audio
+                from clip_renderer import render_revision, file_hash
+                import soundfile as sf
+                import numpy as np
+                with self._inference_lock:
+                    identity = {k: token[k] for k in ('analysis_id', 'source_id', 'revision_id', 'interval', 'stage')}
+                    if stage == 'metadata':
+                        meta = generate_smart_metadata(transcript['text'], context.get('acoustic_mood', 'Normal'),
+                                                       self._metadata_speaker_name(context, token, names),
+                                                       sum(b-a for a,b in context['_revision']['spans']) / 48000,
+                                                       use_llm=use_llm, transcription_status='provided')
+                        return {**identity, 'status': 'ready', 'fields': meta,
+                                'metadata_source': meta['metadata_source'], 'fallback_reason': meta['fallback_reason'],
+                                'model': self._config.ollama_model if meta['metadata_source'] == 'local_llm' else 'heuristic',
+                                'model_version': 'metadata-v1', 'parameters': {'use_llm': use_llm}, 'error': None}
+                    source = context['_source']
+                    if stage == 'speakers':
+                        from analysis_cache import project_voice_embeddings
+                        reusable = project_voice_embeddings(context.get('segments', []), source['id'],
+                            context['_revision']['spans'], analyzer.extractor_version)
+                        if reusable is not None:
+                            if file_hash(source['file_path']) != source['sha256']:
+                                raise ValueError('A fonte foi alterada')
+                            mapped = []
+                            for segment in reusable:
+                                decision = self._voices().match(segment['voice_embedding'], analyzer.extractor_version)
+                                mapped.append({**segment, 'speaker_id': decision['speaker_id'], 'identity': decision,
+                                               'id': token['analysis_id'] + ':s' + str(len(mapped)),
+                                               'embedding_provenance': 'retained_complete_source_segment'})
+                            speakers = list(dict.fromkeys(s['speaker_id'] for s in mapped if s.get('speaker_id')))
+                            return {**identity, 'status': 'ready',
+                                'fields': {'segments': mapped, 'speaker_ids': speakers, 'speaker_id': speakers[0] if speakers else ''},
+                                'model': 'retained_source_embeddings', 'model_version': analyzer.extractor_version,
+                                'parameters': {'reused_complete_segments': True}, 'error': None}
+                    if stage == 'transcription':
+                        margin = round(max(0, min(5, float(context_seconds))) * 48000)
+                        lo, hi = max(0, token['interval'][0] - margin), min(source['total_samples'], token['interval'][1] + margin)
+                        if file_hash(source['file_path']) != source['sha256']:
+                            raise ValueError('A fonte foi alterada')
+                        data, rate = sf.read(source['file_path'], start=lo, stop=hi, dtype='float32', always_2d=True)
+                        if rate != 48000:
+                            raise ValueError('Referencial PCM inválido')
+                        result = analyzer.transcribe_temporal(resample_audio(data.mean(axis=1), rate, 16000),
+                                                              token['analysis_id'], token['source_id'], [lo, hi])
+                        return {**result, **identity, 'context_interval': [lo, hi]}
+                    revision = {**context['_revision'], 'gain_db': 0, 'normalization_gain': 1, 'fade_samples': 0}
+                    audio = resample_audio(render_revision(source, revision).mean(axis=1), 48000, 16000)
+                    if stage == 'acoustics':
+                        return {**identity, 'status': 'ready', 'fields': {'acoustic_mood': analyze_acoustics(audio)['mood']},
+                                'model': 'acoustic_heuristic', 'model_version': '1', 'parameters': {}, 'error': None}
+                    if analyzer._get_diarizer() is None:
+                        return {**identity, 'status': 'failed', 'error': {'code': 'model_unavailable', 'message': 'Modelo local de pessoas indisponível'}}
+                    try:
+                        segments = analyzer.diarize_and_identify(audio, names, transcribe_segments=False)
+                    except DiarizationError as exc:
+                        return {**identity, 'status': 'failed', 'error': exc.as_dict()}
+                    mapped = []
+                    def source_ranges(start, end):
+                        offset, ranges = 0, []
+                        for lo, hi in revision['spans']:
+                            left, right = max(start, offset), min(end, offset + hi-lo)
+                            if left < right:
+                                ranges.append([lo + left-offset, lo + right-offset])
+                            offset += hi-lo
+                        return ranges
+                    for segment in segments:
+                        a, b = round(segment['start'] * 48000), round(segment['end'] * 48000)
+                        evidence = [span for start, end in segment.get('embedding_intervals', [[segment['start'],segment['end']]])
+                                    for span in source_ranges(round(start*48000),round(end*48000))]
+                        for lo, hi in source_ranges(a,b):
+                            mapped.append({**segment, 'start_sample': lo, 'end_sample': hi,
+                                           'embedding_source_id': token['source_id'], 'embedding_source_spans': evidence,
+                                           'id': token['analysis_id'] + ':s' + str(len(mapped))})
+                    speakers = list(dict.fromkeys(s['speaker_id'] for s in mapped if s.get('speaker_id')))
+                    return {**identity, 'status': 'ready' if mapped else 'no_speech',
+                            'fields': {'segments': mapped, 'speaker_ids': speakers, 'speaker_id': speakers[0] if speakers else ''},
+                            'model': 'pyannote-segmentation-3-0/titanet', 'model_version': 'local', 'parameters': {}, 'error': None}
+            queued = self._analysis_queue.submit(run, apply=lambda result: self._store.apply_analysis(token, result),
+                                                 priority=0 if priority else 10, metadata=requested,
+                                                 cleanup=lambda: self._store.release_source(handle), reservation=reserved['reservation'])
+            if not queued['ok']:
+                self._store.release_source(handle)
+                self._store.invalidate_analysis(token)
+            return queued
+        except Exception as exc:
+            if handle:
+                self._store.release_source(handle)
+            return {'ok': False, 'error': str(exc), 'error_code': 'invalid_request'}
+        finally:
+            self._analysis_queue.release_reservation(reserved['reservation'])
+
+    def get_analysis_job(self, analysis_id: str):
+        job = self._analysis_queue.get(analysis_id)
+        if not job:
+            return {'ok': False, 'error': 'Análise não encontrada'}
+        error = job.get('error')
+        return {'ok': True, **job, 'analysis_status': 'partial' if job['status'] == 'failed' else job['status'],
+                'warnings': [error['message']] if isinstance(error, dict) else []}
+
+    def list_analysis_jobs(self, clip_id=None):
+        return {'ok': True, 'jobs': [j for j in self._analysis_queue.list() if clip_id is None or j.get('clip_id') == clip_id]}
+
+    def cancel_analysis_job(self, analysis_id: str):
+        job = self._analysis_queue.get(analysis_id)
+        if job and job.get('stage') == 'voice_learning':
+            return self.cancel_voice_learning(analysis_id)
+        cancelled = self._analysis_queue.cancel(analysis_id)
+        if cancelled and all(key in job for key in ('clip_id', 'stage', 'generation')):
+            self._store.invalidate_analysis(job)
+        return {'ok': cancelled}
+
+    def accept_analysis_result(self, clip_id: str, analysis_id: str, accept_token: str):
+        try:
+            result = self._store.accept_analysis(clip_id, analysis_id, accept_token)
+            return {'ok': result['state'] == 'applied', **result,
+                    'clip': self._store.render_context(clip_id, draft=True)}
+        except (OSError, ValueError) as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def get_clip_transcript(self, clip_id: str):
+        try:
+            return {'ok': True, 'transcript': self._store.get_transcript(clip_id)}
+        except ValueError as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def correct_clip_transcript(self, clip_id: str, word_ids: list, text: str):
+        try:
+            return {'ok': True, 'transcript': self._store.correct_transcript(clip_id, word_ids, text)}
+        except (OSError, ValueError) as exc:
+            return {'ok': False, 'error': str(exc)}
 
     def pick_directory(self, kind: str) -> dict:
         if kind not in ("models_dir", "separados_root"):
@@ -398,7 +692,7 @@ class SoundboardAPI:
         return {"ok": False, "error": messages.get(name, "Recurso indisponível.")}
 
     def refresh_devices(self) -> dict:
-        self._auto_bind_devices()
+        # Enumerar reconexões não altera a escolha nem retoma sons cancelados.
         return self._audio.list_devices()
 
     def _apply_device_names(self, updates: dict):
@@ -430,12 +724,37 @@ class SoundboardAPI:
                 updates[name_key] = ""
 
     def update_settings(self, updates: dict) -> dict:
+        with getattr(self, '_operation_lock', threading.RLock()):
+            if getattr(self, '_operation_transition', False):
+                return {'ok': False, 'error': 'Mudança de modo em andamento; aguarde a confirmação'}
+            return self._update_settings_locked(updates)
+
+    def _update_settings_locked(self, updates):
         updates = dict(updates or {})
+        try:
+            self._store.validate_settings_bindings(updates)
+            if getattr(self, '_operation_rehearsal', False):
+                self._validate_rehearsal({**self._store.snapshot()['settings'], **updates})
+        except ValueError as exc:
+            return {'ok': False, 'error': str(exc)}
+        if any(k in updates for k in ('voice_match_threshold', 'voice_match_margin')):
+            from speaker_matching import match_embedding
+            settings = {**self._store.state['settings'], **updates}
+            match_embedding([], {}, settings['voice_match_threshold'], settings['voice_match_margin'])
         if "replay_seconds" in updates:
             updates["replay_seconds"] = round(max(1.0, min(120.0, float(updates["replay_seconds"]))), 1)
         if any(k in updates for k in ("cable_device_id", "monitor_device_id", "mic_device_id")):
             self._apply_device_names(updates)
-        s = self._store.update_settings(updates)
+        try:
+            s = self._voices().update_match_settings(updates) if any(k in updates for k in ('voice_match_threshold', 'voice_match_margin')) else self._store.update_settings(updates)
+        except ValueError as exc:
+            return {'ok': False, 'error': str(exc)}
+        if any(k in updates for k in ('cable_device_id', 'monitor_device_id')):
+            with self._operation_lock:
+                self._audio.stop_all()
+                self._operation_route_fault = ''
+                self._operation_failure_seen = self._audio.output_failure()[0]
+                self._check_operation_routes()
         if "replay_seconds" in updates:
             self._audio.replay_buffer.set_max_seconds(max(60.0, float(s.get("replay_seconds", 15))))
         if any(k in updates for k in ("mic_passthrough", "mic_device_id", "cable_device_id", "mic_gain")):
@@ -489,7 +808,24 @@ class SoundboardAPI:
         return {"ok": True, "settings": self._store.snapshot()["settings"]}
 
     def play_clip(self, clip_id: str, monitor_only: bool = False, from_hotkey: bool = False) -> dict:
-        clip = self._store.get_clip(clip_id)
+        try:
+            request = self._operation_request(monitor_only)
+        except ValueError as exc:
+            return {'ok': False, 'error': str(exc)}
+        return self._play_clip_request(clip_id, monitor_only, from_hotkey, request)
+
+    def _trigger_clip_hotkey(self, clip_id):
+        try:
+            request = self._operation_request()
+        except ValueError as exc:
+            self._notify_ui('toast', {'type': 'warning', 'message': str(exc)})
+            return
+        threading.Thread(target=lambda: self._play_clip_request(clip_id, False, True, request),
+                         daemon=True, name='ClipHotkeyStart').start()
+
+    def _play_clip_request(self, clip_id, monitor_only, from_hotkey, request):
+        settings, routed_monitor, request_epoch = request
+        clip = self._store.render_context(clip_id, draft=bool(monitor_only))
         if not clip:
             return {"ok": False, "error": "Clip não encontrado"}
 
@@ -500,21 +836,36 @@ class SoundboardAPI:
                 self._notify_ui("toast", {"type": "warning", "message": error})
             return {"ok": False, "error": error}
 
-        settings = self._store.state["settings"]
         eff_dur = max(
             0.2,
             float(clip.get("trim_end") or clip.get("duration") or 1.5) - float(clip.get("trim_start") or 0.0),
         )
-        play_id = self._audio.play_clip(
-            clip=clip,
-            settings=settings,
-            on_finish=None,
-            on_tick=None,
-            monitor_only=bool(monitor_only),
-        )
+        handle = self._store.acquire_source(clip['source_id']) if clip.get('source_id') else None
+        def release_source(*_args):
+            if handle:
+                self._store.release_source(handle)
+        clip['_release_source'] = release_source
+        try:
+            play_id = self._audio.play_clip(
+                clip=clip, settings=settings, on_finish=release_source,
+                on_tick=None, monitor_only=routed_monitor, expected_epoch=request_epoch)
+        except Exception as exc:
+            release_source()
+            return {'ok': False, 'error': f'Não foi possível reproduzir o áudio: {exc}'}
         if not play_id:
+            release_source()
             # No active/valid output route (muted cable+monitor, stale device, ...).
             error = "Nenhuma saída de áudio ativa (cabo/fone mudos ou dispositivo indisponível)."
+            try:
+                from mixer import is_cable_output_device
+
+                if is_cable_output_device(settings.get("monitor_device_id")):
+                    error = (
+                        "A saída 'Fone' está apontando para o CABLE Input: monitorar no cabo "
+                        "não gera áudio. Escolha seus fones de verdade."
+                    )
+            except Exception:
+                pass
             if from_hotkey:
                 self._notify_ui("toast", {"type": "warning", "message": error})
             return {"ok": False, "error": error}
@@ -532,7 +883,7 @@ class SoundboardAPI:
             "paused": False,
             "loop": False,
             "volume": float(clip.get("volume", 1.0)),
-            "monitor_only": bool(monitor_only),
+            "monitor_only": routed_monitor,
         }
         if from_hotkey:
             self._notify_ui("clip_started", initial_status)
@@ -580,20 +931,36 @@ class SoundboardAPI:
         return {"ok": True, "status": st}
 
     def get_clip_waveform(self, clip_id: str, num_bins: int = 160) -> dict:
-        clip = self._store.get_clip(clip_id)
+        clip = self._store.render_context(clip_id)
         if not clip or not clip.get("file_path") or not os.path.exists(clip["file_path"]):
             return {"ok": False, "peaks": []}
         try:
-            raw_audio, dur = self._audio.load_clip_stereo_48k(clip["file_path"])
+            if clip.get('_revision'):
+                raw_audio = self._audio.render_clip(clip)
+                dur = len(raw_audio) / 48000
+            else:
+                raw_audio, dur = self._audio.load_clip_stereo_48k(clip["file_path"])
             peaks = compute_waveform_peaks(raw_audio, num_bins=num_bins)
             return {"ok": True, "peaks": peaks, "duration": round(dur, 2)}
         except Exception:
             return {"ok": False, "peaks": []}
 
     def stop_all(self, from_hotkey: bool = False) -> dict:
-        self._audio.stop_all()
+        self._audio.stop_all(fade_ms=0)
         self._notify_ui("stopped_all", {})
         return {"ok": True}
+
+    def get_playback_capabilities(self) -> dict:
+        return self._audio.playback_capabilities()
+
+    def stop_playback_group(self, group_id: str) -> dict:
+        capabilities = self.get_playback_capabilities()
+        if not capabilities['groups']:
+            return {'ok': False, 'error': capabilities['unavailable_reason']}
+        if not isinstance(group_id, str) or not group_id:
+            return {'ok': False, 'error': 'group_id obrigatório'}
+        self._audio.stop_group(group_id)
+        return {'ok': True}
 
     def _calculate_clip_loudness(
         self, file_path: str, trim_start: float = 0.0, trim_end: float = 0.0
@@ -622,11 +989,17 @@ class SoundboardAPI:
         file_path = clip.get("file_path", "")
         if not file_path or not os.path.exists(file_path):
             return {"ok": False, "error": "Arquivo de áudio não encontrado."}
-        loud_info = self._calculate_clip_loudness(
-            file_path,
-            trim_start=float(clip.get("trim_start", 0.0)),
-            trim_end=float(clip.get("trim_end", 0.0)),
-        )
+        context = self._store.render_context(clip_id)
+        if context.get('_revision'):
+            try:
+                samples = self._audio.render_clip(context)
+                loud_info = loudness.analyze_audio_loudness(samples, sr=48000)
+            except (OSError, ValueError, RuntimeError) as exc:
+                return {'ok': False, 'error': f'Não foi possível medir a revisão: {exc}'}
+        else:
+            loud_info = self._calculate_clip_loudness(
+                file_path, trim_start=float(clip.get('trim_start', 0.0)),
+                trim_end=float(clip.get('trim_end', 0.0)))
         updated = self._store.add_or_update_clip({"id": clip_id, **loud_info})
         snap = self._store.snapshot()
         self._notify_ui("clips_updated", {
@@ -636,6 +1009,11 @@ class SoundboardAPI:
 
     def save_clip_edits(self, clip_data: dict) -> dict:
         data = dict(clip_data or {})
+        if 'hotkey' in data:
+            try:
+                self._store.validate_binding_change('clip', data.get('id'), data['hotkey'])
+            except ValueError as exc:
+                return {'ok': False, 'error': str(exc)}
         # Whitelist: a draft must not be publishable (pending/file_path/duration/...).
         payload = {"id": data.get("id")}
         for key in EDITABLE_CLIP_FIELDS:
@@ -643,6 +1021,24 @@ class SoundboardAPI:
                 payload[key] = data[key]
         clip_id = payload.get("id")
         existing = self._store.get_clip(clip_id) if clip_id else None
+        previous = copy.deepcopy(existing or {})
+        self._preserve_voice_evidence(previous)
+        if existing:
+            self._preserve_voice_evidence(self._store.render_context(clip_id, draft=True))
+        if existing and existing.get('revision_id') and clip_id not in self._store.snapshot()['edit_drafts']:
+            opened = self.begin_clip_edit(clip_id)
+            if not opened.get('ok'):
+                return opened
+        if existing and clip_id in self._store.snapshot()['edit_drafts']:
+            try:
+                self._store.update_edit(clip_id, payload)
+                updated = self._store.commit_edit(clip_id)
+            except (OSError, ValueError, RuntimeError) as exc:
+                return {'ok': False, 'error': f'Não foi possível salvar a edição: {exc}'}
+            snap = self._store.snapshot()
+            self._hotkeys.refresh(self._public_clips(snap['clips']), snap['settings'])
+            learning = self._learn_correction(previous, self._store.get_clip(clip_id), data.get('voice_interval')) if previous.get('speaker_id') != updated.get('speaker_id') else {}
+            return {'ok': True, 'clip': copy.deepcopy(self._store.get_clip(clip_id)), 'speakers': snap['speakers'], **learning}
         if existing and existing.get("file_path"):
             trim_start = float(payload.get("trim_start", existing.get("trim_start", 0.0)))
             trim_end = float(payload.get("trim_end", existing.get("trim_end", 0.0)))
@@ -653,7 +1049,133 @@ class SoundboardAPI:
         updated = self._store.add_or_update_clip(payload)
         snap = self._store.snapshot()
         self._hotkeys.refresh(self._public_clips(snap["clips"]), snap["settings"])
-        return {"ok": True, "clip": copy.deepcopy(updated), "speakers": snap["speakers"]}
+        learning = self._learn_correction(previous, updated, data.get('voice_interval')) if previous.get('speaker_id') != updated.get('speaker_id') else {}
+        return {"ok": True, "clip": copy.deepcopy(updated), "speakers": snap["speakers"], **learning}
+
+    def begin_clip_edit(self, clip_id: str) -> dict:
+        try:
+            self._store.begin_edit(clip_id)
+            draft = self._store.reopen_edit(clip_id)
+            clip = copy.deepcopy(self._store.get_clip(clip_id))
+            clip.update(draft['fields'])
+            return {'ok': True, 'clip': clip, 'draft': draft}
+        except (OSError, ValueError, RuntimeError) as exc:
+            return {'ok': False, 'error': f'Não foi possível abrir a edição: {exc}'}
+
+    def list_clip_edits(self) -> dict:
+        snapshot = self._store.snapshot()
+        clips = {clip['id']: clip for clip in snapshot['clips']}
+        return {'ok': True, 'clips': [{**clips[key], **draft['fields']} for key, draft in
+                                    snapshot['edit_drafts'].items() if key in clips]}
+
+    def update_clip_edit(self, clip_data: dict) -> dict:
+        try:
+            draft = self._store.update_edit(str(clip_data.get('id') or ''), clip_data)
+            return {'ok': True, 'draft': draft}
+        except (OSError, ValueError, RuntimeError) as exc:
+            return {'ok': False, 'error': f'Não foi possível preservar a edição: {exc}'}
+
+    def discard_clip_edit(self, clip_id: str) -> dict:
+        try:
+            return {'ok': self._store.discard_edit(clip_id)}
+        except OSError as exc:
+            return {'ok': False, 'error': f'Não foi possível descartar a edição: {exc}'}
+
+    def get_edit_source_waveform(self, clip_id: str, num_bins: int = 160) -> dict:
+        # Os controles legados de corte ainda usam a régua da fonte, não da montagem.
+        context = self._store.render_context(clip_id, draft=True)
+        if not context or not context.get('_source'):
+            return self.get_clip_waveform(clip_id, num_bins)
+        try:
+            from clip_renderer import render_revision
+            source = context['_source']
+            revision = {**context['_revision'], 'spans': [[0, source['total_samples']]],
+                        'variant': {}, 'gain_db': 0, 'normalization_gain': 1, 'fade_samples': 0}
+            data = render_revision(source, revision)
+            return {'ok': True, 'peaks': compute_waveform_peaks(data, num_bins), 'duration': source['duration']}
+        except (OSError, ValueError, RuntimeError):
+            return {'ok': False, 'peaks': []}
+
+    def get_clip_editor(self, clip_id: str) -> dict:
+        try:
+            import editor_service
+            editor = editor_service.state(self._store, clip_id)
+            context = self._store.render_context(clip_id, True)
+            samples = self._audio.render_clip(context) * float(context.get('volume', 1))
+            measurement = loudness.analyze_audio_loudness(samples, sr=48000)
+            editor['lufs'] = measurement['lufs']
+            editor['lufs_estimated'] = measurement['lufs_estimated']
+            return {'ok': True, 'editor': editor}
+        except (OSError, ValueError, RuntimeError, TypeError, KeyError) as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def edit_clip_command(self, clip_id: str, action: str, payload: dict = None) -> dict:
+        try:
+            import editor_service
+            created = editor_service.command(self._store, clip_id, action, payload or {})
+            result = self.get_clip_editor(clip_id)
+            if created:
+                result['clip'] = created
+            return result
+        except (OSError, ValueError, RuntimeError, TypeError, KeyError) as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def suggest_clip_edges(self, clip_id: str, margin: float = .15) -> dict:
+        try:
+            from editor_service import suggest
+            return {'ok': True, **suggest(self._store.render_context(clip_id, True), margin)}
+        except (OSError, ValueError, RuntimeError, TypeError, KeyError) as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def preview_clip_edit(self, clip_id: str, mode: str = 'selection', interval: list = None,
+                          junction: int = 0, loop: bool = False) -> dict:
+        handle = None
+        try:
+            request_settings, _, request_epoch = self._operation_request(True)
+            from editor_service import preview_ranges
+            from clip_edits import validate_spans
+            with self._store._lock:
+                context = self._store.render_context(clip_id, True)
+                if not context or not context.get('_revision'):
+                    raise ValueError('Abra uma montagem antes de ouvir')
+                if interval is not None:
+                    validate_spans([interval], context['_source']['total_samples'])
+                ranges = preview_ranges(context['_revision']['spans'], mode, interval, junction)
+                if context['_revision'].get('variant'):
+                    from audio_variants import map_ranges
+                    ranges = map_ranges(ranges, sum(b-a for a,b in context['_revision']['spans']), context['_revision']['variant'])
+                context['_preview_ranges'] = ranges
+                handle = self._store.acquire_source(context['source_id'])
+            def release(*_args):
+                self._store.release_source(handle)
+            context['_release_source'] = release
+            # Audição do editor é independente da política pública de sobreposição.
+            # Uma prévia (mesmo falha) não deve interromper transmissão ou monitor externo.
+            preview_settings = {**request_settings, 'overlap_audio': True}
+            play_id = self._audio.play_clip(clip=context, settings=preview_settings,
+                                            monitor_only=True, on_finish=release, on_tick=None, expected_epoch=request_epoch)
+            if not play_id:
+                release()
+                raise ValueError('Nenhum monitor disponível para ouvir a seleção')
+            session = self._audio.get_session(play_id)
+            if session:
+                session.set_loop(bool(loop))
+            return {'ok': True, 'play_id': play_id, 'duration': sum(b-a for a,b in ranges)/48000,
+                    'ranges': ranges, 'status': session.status() if session else None}
+        except (OSError, ValueError, RuntimeError, TypeError, KeyError) as exc:
+            if handle:
+                self._store.release_source(handle)
+            return {'ok': False, 'error': str(exc)}
+
+    def get_editor_playback(self, play_id: str) -> dict:
+        session = self._audio.get_session(play_id)
+        return {'ok': True, 'status': session.status() if session else {'playing': False}}
+
+    def stop_editor_preview(self, play_id: str) -> dict:
+        session = self._audio.get_session(play_id)
+        if session and session.monitor_only:
+            session.stop()
+        return {'ok': True}
 
     def toggle_favorite(self, clip_id: str) -> dict:
         clip = self._store.get_clip(clip_id)
@@ -665,7 +1187,10 @@ class SoundboardAPI:
     def delete_clip(self, clip_id: str, delete_file: bool = False) -> dict:
         clip = self._store.get_clip(clip_id)
         file_path = (clip or {}).get("file_path") or ""
-        ok = self._store.delete_clip(clip_id, delete_file=delete_file)
+        try:
+            ok = self._store.delete_clip(clip_id, delete_file=delete_file)
+        except ValueError as exc:
+            return {'ok': False, 'error': str(exc)}
         if file_path:
             self._audio.invalidate_cache(file_path)
         snap = self._store.snapshot()
@@ -707,23 +1232,6 @@ class SoundboardAPI:
                 "speakers": empty["speakers"],
             }
 
-        # A re-imported clip owns that file now: undoing would create two clips
-        # sharing one file, so one deletion would silently break the other.
-        for other in empty["clips"]:
-            other_path = str(other.get("file_path") or "")
-            if not other_path:
-                continue
-            try:
-                if Path(other_path).resolve() == resolved:
-                    return {
-                        "ok": False,
-                        "error": "Este áudio já pertence a outro botão.",
-                        "clips": self._public_clips(empty["clips"]),
-                        "speakers": empty["speakers"],
-                    }
-            except Exception:
-                continue
-
         payload["file_path"] = str(resolved)
         saved = self._store.add_or_update_clip(payload)
         snap = self._store.snapshot()
@@ -741,15 +1249,7 @@ class SoundboardAPI:
         return {"ok": True, "speaker": copy.deepcopy(spk), "speakers": snap["speakers"]}
 
     def delete_speaker(self, spk_id: str) -> dict:
-        ok = self._store.delete_speaker(spk_id)
-        if self._ai.ref_voices_path.exists():
-            try:
-                import numpy as np
-                old = np.load(self._ai.ref_voices_path)
-                kept = {k: old[k] for k in old.files if k != spk_id}
-                np.savez(self._ai.ref_voices_path, **kept)
-            except Exception:
-                pass
+        ok = self._voices().delete_person(spk_id)
         snap = self._store.snapshot()
         return {
             "ok": ok,
@@ -757,28 +1257,8 @@ class SoundboardAPI:
             "clips": self._public_clips(snap["clips"]),
         }
 
-    def enroll_speaker_from_clip(self, clip_id: str, spk_id: str, speaker_name: str = "") -> dict:
-        blocked = self._capability_error("ai_analysis")
-        if blocked:
-            return blocked
-        rejected = self._reject_pending(clip_id, "cadastrar voz")
-        if rejected:
-            return rejected
-        clip = self._store.get_clip(clip_id)
-        if not clip or not clip.get("file_path"):
-            return {"ok": False, "error": "Áudio inválido"}
-        if speaker_name:
-            self._store.update_speaker(spk_id, name=speaker_name)
-        else:
-            self._store.ensure_speaker(spk_id)
-        ok = self._ai.enroll_speaker_reference(clip["file_path"], spk_id)
-        updated = self._store.add_or_update_clip({"id": clip_id, "speaker_id": spk_id})
-        snap = self._store.snapshot()
-        return {
-            "ok": ok,
-            "speakers": snap["speakers"],
-            "clip": copy.deepcopy(updated),
-        }
+    def enroll_speaker_from_clip(self, clip_id: str, spk_id: str, speaker_name: str = "", interval=None) -> dict:
+        return self._enroll_voice(clip_id, spk_id, speaker_name, interval)
 
     def reanalyze_clip_ai(self, clip_id: str) -> dict:
         blocked = self._capability_error("ai_analysis")
@@ -787,52 +1267,8 @@ class SoundboardAPI:
         rejected = self._reject_pending(clip_id, "reanalisar")
         if rejected:
             return rejected
-        clip = self._store.get_clip(clip_id)
-        if not clip or not clip.get("file_path") or not os.path.exists(clip["file_path"]):
-            return {"ok": False, "error": "Arquivo de áudio não encontrado"}
-
-        self._emit_progress(True, 1, 2, "Re-analisando com IA Local...", clip.get("title", ""))
-        try:
-            spk_id = clip.get("speaker_id", "")
-            spk_names = self._get_speaker_names_map()
-            spk_name = spk_names.get(spk_id, "")
-            res = self._ai.analyze_file(
-                clip["file_path"],
-                existing_transcript=None,
-                existing_speaker_id=None,
-                speaker_name=spk_name,
-                speaker_names=spk_names,
-                use_llm=bool(self._store.state["settings"].get("use_local_llm", True)),
-            )
-            detected_spk = res.get("speaker_id") or spk_id
-            detected_spks = res.get("speaker_ids") or ([detected_spk] if detected_spk else [])
-            for sid in detected_spks:
-                self._store.ensure_speaker(sid)
-
-            loud_info = self._calculate_clip_loudness(
-                clip["file_path"],
-                trim_start=float(clip.get("trim_start", 0.0)),
-                trim_end=float(clip.get("trim_end", 0.0)),
-            )
-            updated = self._store.add_or_update_clip({
-                "id": clip_id,
-                "title": res["title"],
-                "category": res["category"],
-                "emoji": res["emoji"],
-                "color": res["color"],
-                "tags": res["tags"],
-                "transcript": res["transcript"],
-                "speaker_id": detected_spk,
-                "speaker_ids": detected_spks,
-                "segments": res.get("segments") or [],
-                "acoustic_mood": res["acoustic_mood"],
-                "duration": res["duration"],
-                **loud_info,
-            })
-            snap = self._store.snapshot()
-            return {"ok": True, "clip": copy.deepcopy(updated), "speakers": snap["speakers"]}
-        finally:
-            self._emit_progress(False)
+        # Compatibilidade do nome público; o trabalho agora pode ser consultado/cancelado.
+        return self.request_clip_analysis(clip_id, 'transcription')
 
     def split_clip_by_speakers(self, clip_id: str) -> dict:
         blocked = self._capability_error("ai_analysis")
@@ -853,11 +1289,16 @@ class SoundboardAPI:
             spk_names = self._get_speaker_names_map()
             segments = clip.get("segments") or []
             if len(segments) <= 1:
+                self._require_explicit_analysis()
                 audio_16k, _ = load_audio_mono_16k(clip["file_path"])
                 segments = self._ai.diarize_and_identify(audio_16k, speaker_names=spk_names)
 
+            warnings = list(dict.fromkeys(seg["transcription_error"] for seg in segments if seg.get("transcription_error")))
+            for warning in warnings:
+                self._notify_ui("toast", {"type": "warning", "message": warning})
             if len(segments) <= 1:
-                return {"ok": False, "error": "Apenas 1 fala/interlocutor contínuo foi detectado neste áudio."}
+                return {"ok": False, "error": "Apenas 1 fala/interlocutor contínuo foi detectado neste áudio.",
+                        "analysis_status": "partial" if warnings else "ok", "warnings": warnings}
 
             stereo_data, _ = self._audio.load_clip_stereo_48k(clip["file_path"])
             sr = self._audio.TARGET_SR
@@ -907,11 +1348,16 @@ class SoundboardAPI:
             })
             return {
                 "ok": True,
+                "analysis_status": "partial" if warnings else "ok",
+                "warnings": warnings,
                 "created_count": len(created_clips),
                 "created_clips": copy.deepcopy(created_clips),
                 "clips": self._public_clips(snap["clips"]),
                 "speakers": snap["speakers"],
             }
+        except DiarizationError as exc:
+            return {'ok': False, 'error': str(exc), 'error_code': exc.code,
+                    'analysis_status': 'failed', 'warnings': [str(exc)]}
         finally:
             self._emit_progress(False)
 
@@ -937,82 +1383,75 @@ class SoundboardAPI:
             return {"ok": False, "imported": []}
 
         imported = []
-        blocked_names = []
+        results = []
         caps = self._capabilities()
         use_llm = bool(self._store.state["settings"].get("use_local_llm", True))
         total_files = len(file_paths)
         mode_lbl = "Importando Vinhetas / Sons" if skip_speaker_id else "Importando e analisando áudios com IA"
-
         try:
             for idx, src in enumerate(file_paths, 1):
-                src_path = Path(src)
-                if not src_path.exists() or not src_path.is_file():
-                    continue
-                if src_path.suffix.lower() in CONVERT_ONLY_EXTS and not caps.get("audio_convert", True):
-                    blocked_names.append(src_path.name)
-                    continue
-                self._emit_progress(True, idx, total_files, f"{mode_lbl} ({idx}/{total_files})", src_path.name)
-                dst_name = f"{int(time.time() * 1000) % 1000000}_{src_path.name}"
-                dst_path = self._store.clips_dir / dst_name
-                shutil.copy2(src_path, dst_path)
+                dst_path = None
+                persisted = False
+                item = {"source": str(src), "status": "failed", "error": None, "warnings": []}
+                try:
+                    src_path = Path(src)
+                    if not src_path.is_file():
+                        raise ValueError("Arquivo não encontrado")
+                    if src_path.suffix.lower() in CONVERT_ONLY_EXTS and not caps.get("audio_convert", True):
+                        raise ValueError("Instale o FFmpeg para importar este formato")
+                    self._emit_progress(True, idx, total_files, f"{mode_lbl} ({idx}/{total_files})", src_path.name)
+                    # Nome exclusivo: uma falha nunca remove cópia de uma importação anterior.
+                    dst_path = self._store.clips_dir / f"{uuid.uuid4().hex}_{src_path.name}"
+                    shutil.copy2(src_path, dst_path)
+                    res = self._analyze_audio(
+                        str(dst_path), speaker_names=self._get_speaker_names_map(), use_llm=use_llm,
+                        skip_speaker_id=bool(skip_speaker_id), forced_category=forced_category,
+                    )
+                    item["warnings"] = list(res.get("warnings") or [])
+                    spk_id = "" if skip_speaker_id else res.get("speaker_id", "")
+                    spk_ids = [] if skip_speaker_id else (res.get("speaker_ids") or ([spk_id] if spk_id else []))
+                    for sid in spk_ids:
+                        self._store.ensure_speaker(sid)
 
-                res = self._ai.analyze_file(
-                    str(dst_path),
-                    speaker_names=self._get_speaker_names_map(),
-                    use_llm=use_llm,
-                    skip_speaker_id=bool(skip_speaker_id),
-                    forced_category=forced_category,
-                )
-                spk_id = "" if skip_speaker_id else res.get("speaker_id", "")
-                spk_ids = [] if skip_speaker_id else (res.get("speaker_ids") or ([spk_id] if spk_id else []))
-                for sid in spk_ids:
-                    self._store.ensure_speaker(sid)
-
-                loud_info = self._calculate_clip_loudness(str(dst_path))
-                clip = self._store.add_or_update_clip({
-                    "title": res.get("title") or src_path.stem[:28],
-                    "file_path": str(dst_path),
-                    "category": forced_category or res.get("category") or "Call",
-                    "speaker_id": spk_id,
-                    "speaker_ids": spk_ids,
-                    "segments": [] if skip_speaker_id else (res.get("segments") or []),
-                    "transcript": res.get("transcript") or "",
-                    "acoustic_mood": res.get("acoustic_mood") or "Normal",
-                    "emoji": res.get("emoji") or ("🎵" if forced_category == "Vinhetas" else "🔊"),
-                    "color": res.get("color") or ("#06b6d4" if forced_category == "Vinhetas" else "#3b82f6"),
-                    "tags": res.get("tags") or [],
-                    "duration": res.get("duration") or 1.0,
-                    "created_at": time.time(),
-                    **loud_info,
-                })
-                imported.append(clip)
+                    loud_info = self._calculate_clip_loudness(str(dst_path))
+                    clip = self._store.add_or_update_clip({
+                        "title": res.get("title") or src_path.stem[:28],
+                        "file_path": str(dst_path),
+                        "category": forced_category or res.get("category") or "Call",
+                        "speaker_id": spk_id,
+                        "speaker_ids": spk_ids,
+                        "segments": [] if skip_speaker_id else (res.get("segments") or []),
+                        "transcript": res.get("transcript") or "",
+                        "acoustic_mood": res.get("acoustic_mood") or "Normal",
+                        "emoji": res.get("emoji") or ("🎵" if forced_category == "Vinhetas" else "🔊"),
+                        "color": res.get("color") or ("#06b6d4" if forced_category == "Vinhetas" else "#3b82f6"),
+                        "tags": res.get("tags") or [],
+                        "duration": res.get("duration") or 1.0,
+                        "created_at": time.time(),
+                        **loud_info,
+                    })
+                    persisted = True
+                    imported.append(clip)
+                    item.update(status="success", clip_id=clip["id"])
+                except Exception as exc:
+                    item["error"] = str(exc) or "Falha ao importar arquivo"
+                    if dst_path is not None and not persisted:
+                        try:
+                            dst_path.unlink(missing_ok=True)
+                        except OSError as cleanup_error:
+                            item["warnings"].append(f"Não foi possível remover a cópia incompleta: {cleanup_error}")
+                results.append(item)
         finally:
             self._emit_progress(False)
-
         snap = self._store.snapshot()
         self._notify_ui("clips_updated", {
-            "clips": self._public_clips(snap["clips"]),
-            "speakers": snap["speakers"],
+            "clips": self._public_clips(snap["clips"]), "speakers": snap["speakers"],
         })
-        if blocked_names and not imported:
-            names = ", ".join(blocked_names[:5])
-            return {
-                "ok": False,
-                "error": f"Instale o FFmpeg para importar este formato: {names}",
-                "imported": [],
-                "clips": self._public_clips(snap["clips"]),
-                "speakers": snap["speakers"],
-            }
-        result = {
-            "ok": True,
-            "imported": copy.deepcopy(imported),
-            "clips": self._public_clips(snap["clips"]),
-            "speakers": snap["speakers"],
-        }
-        if blocked_names:
-            names = ", ".join(blocked_names[:5])
-            result["warnings"] = [f"Instale o FFmpeg para importar este formato: {names}"]
-        return result
+        warnings = [f"{Path(item['source']).name}: {message}"
+                    for item in results for message in item["warnings"] + ([item["error"]] if item["error"] else [])]
+        return {"ok": bool(imported), "imported": copy.deepcopy(imported), "results": results,
+                **({"warnings": warnings} if warnings else {}), "error": None if imported else ("; ".join(warnings) or "Nenhum áudio importado"),
+                "clips": self._public_clips(snap["clips"]), "speakers": snap["speakers"]}
 
     def import_folder_or_separados(
         self,
@@ -1043,7 +1482,7 @@ class SoundboardAPI:
         if not skip_speaker_id and (target / "mapa_de_falas.json").exists():
             try:
                 def _fast_analyzer(fp, existing_transcript="", existing_speaker_id="", speaker_name=""):
-                    return self._ai.analyze_file(
+                    return self._analyze_audio(
                         fp,
                         existing_transcript=existing_transcript,
                         existing_speaker_id=existing_speaker_id,
@@ -1085,7 +1524,7 @@ class SoundboardAPI:
     def _capture_replay_analysis(self, out_dir: Path, last_seconds: float = None) -> dict:
         """Captures the replay buffer, runs AI and returns a clip payload (not persisted)."""
         secs = float(last_seconds or self._store.state["settings"].get("replay_seconds", 15))
-        out_name = f"replay_{time.strftime('%Y%m%d_%H%M%S')}.wav"
+        out_name = f"replay_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}.wav"
         out_path = str(Path(out_dir) / out_name)
 
         self._emit_progress(True, 1, 3, f"Capturando últimos {int(secs)}s da call...", out_name)
@@ -1094,11 +1533,27 @@ class SoundboardAPI:
             return {"ok": False, "error": "Nenhum áudio recente tocado no fone/sistema nos últimos 15s"}
 
         self._emit_progress(True, 2, 3, "Identificando vozes e transcrevendo com IA...", out_name)
-        res = self._ai.analyze_file(
-            saved,
-            speaker_names=self._get_speaker_names_map(),
-            use_llm=bool(self._store.state["settings"].get("use_local_llm", True)),
-        )
+        deferred = None
+        try:
+            res = self._analyze_audio(
+                saved,
+                speaker_names=self._get_speaker_names_map(),
+                use_llm=bool(self._store.state["settings"].get("use_local_llm", True)),
+            )
+        except AnalysisPausedError:
+            # Captura é independente da IA. Validar PCM sem chamar modelo ou LLM.
+            import soundfile as sf
+            import numpy as np
+            try:
+                audio, rate = sf.read(saved, dtype='float32', always_2d=True)
+                if rate <= 0 or not len(audio) or not np.isfinite(audio).all():
+                    raise ValueError('PCM vazio ou inválido')
+            except (OSError, ValueError, RuntimeError) as exc:
+                return {'ok': False, 'error_code': 'decode_error', 'error': f'Falha ao validar a captura: {exc}'}
+            deferred = {'status': 'deferred', 'reason': 'analysis_paused',
+                        'message': 'Áudio preservado. A análise foi adiada porque a IA estava pausada; edite manualmente ou retome a IA e solicite uma etapa.'}
+            res = {'duration': len(audio)/rate, 'acoustic_mood': 'Não analisado',
+                   'analysis_status': 'deferred', 'warnings': [deferred['message']]}
         spk_id = res.get("speaker_id", "")
         spk_ids = res.get("speaker_ids") or ([spk_id] if spk_id else [])
         for sid in spk_ids:
@@ -1106,6 +1561,8 @@ class SoundboardAPI:
 
         return {
             "ok": True,
+            "analysis_status": res.get('analysis_status', 'ok'),
+            "warnings": list(res.get('warnings') or []),
             "clip": {
                 "title": res.get("title") or f"Replay {time.strftime('%H:%M:%S')}",
                 "file_path": saved,
@@ -1120,6 +1577,10 @@ class SoundboardAPI:
                 "tags": res.get("tags") or ["replay"],
                 "duration": res.get("duration") or secs,
                 "created_at": time.time(),
+                **({'capture_analysis': deferred, 'field_provenance': {
+                    'title': 'capture_default', 'category': 'capture_default',
+                    'transcript': 'not_analyzed', 'speaker_id': 'not_analyzed',
+                    'speaker_ids': 'not_analyzed', 'acoustic_mood': 'not_analyzed'}} if deferred else {}),
             },
         }
 
@@ -1143,9 +1604,12 @@ class SoundboardAPI:
                 "clip": copy.deepcopy(clip),
                 "clips": self._public_clips(snap["clips"]),
                 "speakers": snap["speakers"],
+                "warnings": captured.get('warnings', []),
             })
             result = {
                 "ok": True,
+                "analysis_status": captured.get('analysis_status', 'ok'),
+                "warnings": captured.get('warnings', []),
                 "clip": copy.deepcopy(clip),
                 "clips": self._public_clips(snap["clips"]),
                 "speakers": snap["speakers"],
@@ -1168,6 +1632,8 @@ class SoundboardAPI:
             snap = self._store.snapshot()
             return {
                 "ok": True,
+                "analysis_status": captured.get('analysis_status', 'ok'),
+                "warnings": captured.get('warnings', []),
                 "clip": copy.deepcopy(clip),
                 "clips": self._public_clips(snap["clips"]),
                 "speakers": snap["speakers"],
@@ -1324,7 +1790,7 @@ class SoundboardAPI:
                 "skipped": 0,
             }
         try:
-            res = packs.write_pack(tmp, clips, snap["speakers"])
+            res = packs.write_pack(tmp, [self._store.render_context(c["id"]) for c in clips], snap["speakers"])
             os.replace(tmp, out)
         except packs.PackError as exc:
             _unlink_quiet(tmp)
@@ -1387,13 +1853,7 @@ class SoundboardAPI:
             for c in self._public_clips(existing["clips"])
             if c.get("hotkey")
         }
-        known_hashes = {}
-        for clip in self._public_clips(existing["clips"]):
-            fp = str(clip.get("file_path") or "")
-            try:
-                known_hashes[packs.sha256_file(fp)] = clip["id"]
-            except OSError:
-                continue
+        known_identities = {c.get('pack_identity') for c in existing['clips'] if c.get('pack_identity')}
 
         imported, warnings = [], []
         skipped = 0
@@ -1432,13 +1892,14 @@ class SoundboardAPI:
                         copied_names.add(name)
                         remaining -= size
 
-                        if digest in known_hashes:
+                        identity = packs.entry_identity(entry, digest)
+                        if identity in known_identities:
                             skipped += 1
                             warnings.append(f"{label}: já existe na biblioteca.")
                             continue
 
                         os.replace(part, final)
-                        known_hashes[digest] = new_id
+
 
                         try:
                             duration = float(sf.info(str(final)).duration or 0.0)
@@ -1472,8 +1933,10 @@ class SoundboardAPI:
                         raw_tags = entry.get("tags")
 
                         try:
-                            clip = self._store.add_or_update_clip({
+                            clip = self._store.add_imported_clip({
                                 "id": new_id,
+                                "pack_identity": identity,
+                                "montage_identity": entry.get('montage_identity'),
                                 "title": str(entry.get("title") or "Áudio importado")[:60],
                                 "file_path": str(final),
                                 "category": str(entry.get("category") or "Call"),
@@ -1493,12 +1956,13 @@ class SoundboardAPI:
                                 "duration": duration,
                                 "created_at": time.time(),
                                 "pending": False,
-                            })
+                            }, rendered=entry.get("rendered") is True)
                         except Exception:
                             # Never leave a file the library does not reference.
                             _unlink_quiet(final)
                             raise
                         imported.append(clip)
+                        known_identities.add(identity)
                     finally:
                         # The part file is gone after os.replace; on any failure it is
                         # removed here so a bad pack never leaves orphans behind.

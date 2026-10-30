@@ -35,7 +35,12 @@ def api(tmp_path):
 def _devices():
     return {
         "outputs": [
-            {"id": 7, "name": "CABLE Input (VB-Audio Virtual Cable)", "hostapi": "Windows WASAPI"}
+            {
+                "id": 7,
+                "name": "CABLE Input (VB-Audio Virtual Cable)",
+                "hostapi": "Windows WASAPI",
+                "is_cable": True,
+            }
         ],
         "inputs": [{"id": 9, "name": "Mic", "hostapi": "Windows WASAPI"}],
         "detected_cable_id": None,
@@ -204,10 +209,36 @@ def test_auto_bind_stores_names_for_default_devices(api, monkeypatch):
 
     # No cable detected, so nothing may be routed to the generic output.
     assert settings["cable_device_id"] is None
-    assert settings["monitor_device_id"] == 7
-    assert settings["monitor_device_name"] == "CABLE Input (VB-Audio Virtual Cable)"
+    # The default output is the cable itself: monitoring there is inaudible,
+    # so the "fone" route must stay unset instead of pointing at the cable.
+    assert settings["monitor_device_id"] is None
+    assert settings["monitor_device_name"] == ""
     assert settings["mic_device_id"] == 9
     assert settings["mic_device_name"] == "Mic"
+
+
+def test_auto_bind_adopts_default_output_only_when_it_is_not_the_cable(api, monkeypatch):
+    _patch_devices(monkeypatch, api, {
+        "outputs": [
+            {"id": 7, "name": "CABLE Input (VB-Audio Virtual Cable)", "hostapi": "Windows WASAPI", "is_cable": True},
+            {"id": 12, "name": "Fones de ouvido (EDIFIER)", "hostapi": "Windows WASAPI", "is_cable": False},
+        ],
+        "inputs": [{"id": 9, "name": "Mic", "hostapi": "Windows WASAPI"}],
+        "detected_cable_id": 7,
+        "default_output_id": 12,
+        "default_input_id": 9,
+    })
+    settings = api._store.state["settings"]
+    for key in ("cable_device_id", "monitor_device_id", "mic_device_id"):
+        settings[key] = None
+    for key in ("cable_device_name", "monitor_device_name", "mic_device_name"):
+        settings[key] = ""
+
+    api._auto_bind_devices()
+
+    assert settings["cable_device_id"] == 7
+    assert settings["monitor_device_id"] == 12
+    assert settings["monitor_device_name"] == "Fones de ouvido (EDIFIER)"
 
 
 def test_legacy_install_migrates_empty_names_to_role_defaults(api, monkeypatch, tmp_path):

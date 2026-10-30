@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import json
+import math
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import sys
@@ -11,6 +13,14 @@ import threading
 MAX_LOG_BYTES = 5 * 1024 * 1024  # 5 MB
 BACKUP_COUNT = 3
 LOG_FORMAT = "%(asctime)s [%(levelname)s] [%(threadName)s] %(name)s: %(message)s"
+
+
+def log_analysis_metric(code, **metrics):
+    """Allowlist explícita: transcrição, prompt, nome e caminho nunca são logados."""
+    allowed = {'duration_ms', 'cache_hits', 'cache_misses', 'cache_bytes', 'queue_depth'}
+    clean = {k:v for k,v in metrics.items() if k in allowed and isinstance(v,(int,float)) and math.isfinite(v)}
+    clean['code'] = code if code in ('ready','no_speech','failed','cancelled') else 'analysis_metric'
+    logging.getLogger('soundboard.analysis').info(json.dumps(clean,sort_keys=True))
 
 
 def setup_logging(data_dir: Path, debug: bool = False) -> Path:
@@ -50,6 +60,8 @@ def setup_logging(data_dir: Path, debug: bool = False) -> Path:
     # Suppress verbose third-party debug spam in console and log files
     for noisy in ("PIL", "urllib3", "pystray", "comtypes"):
         logging.getLogger(noisy).setLevel(logging.INFO)
+    for personal in ('faster_whisper', 'sherpa_onnx'):
+        logging.getLogger(personal).setLevel(logging.WARNING)
 
     _install_exception_hooks(root_logger)
     return log_file

@@ -19,3 +19,5 @@ data/config.json
 .DS_Store
 Thumbs.db
 .worktrees/
+build/evaluation/
+build/measurements/

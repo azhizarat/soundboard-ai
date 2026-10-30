@@ -296,6 +296,7 @@ def test_save_clip_edits_on_draft_keeps_pending_and_updates_trim(api, monkeypatc
 
 
 def test_draft_rejects_destructive_analysis_actions(api, monkeypatch):
+    monkeypatch.setattr(api, '_capability_error', lambda *args: None)
     _fake_capture(api, monkeypatch)
     clip = api.capture_replay_draft(5)["clip"]
     expected = {"ok": False, "error": "Rascunhos de replay não podem ser alterados assim."}

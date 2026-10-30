@@ -70,6 +70,8 @@ def test_load_audio_fallback_uses_configured_ffmpeg(monkeypatch, tmp_path):
     monkeypatch.setattr(soundfile, "read", fake_read)
     monkeypatch.setattr(ai_analyzer.subprocess, "run", fake_run)
 
+    # O cache E6 identifica conteúdo antes de selecionar o decodificador.
+    (tmp_path / "clip.m4a").write_bytes(b"synthetic mocked compressed audio")
     data, duration = ai_analyzer.load_audio_mono_16k(str(tmp_path / "clip.m4a"))
 
     assert calls["run"], "ffmpeg fallback was not used"

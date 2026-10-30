@@ -1,0 +1,180 @@
+const test=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const path=require('node:path');
+const filename=path.join(__dirname,'../ui/sequences.js');
+function contract(){assert.ok(fs.existsSync(filename),'Editor de sequências ausente');return require(filename);}
+const clip={id:'clip',revision_id:'rev',samples:96000,title:'Pergunta',volume:1};
+function doc(){return {schema_version:1,id:'s',revision:1,name:'Diálogo',hotkey:'',blocks:[{id:'a',type:'play',clip_id:'clip',revision_id:'rev',interval:[0,48000],volume:1}]};}
+
+test('duplicar cria identidade própria e ajustes não alteram original, com undo redo',()=>{
+  const {createModel}=contract(), original=doc(), model=createModel(original);
+  model.command('duplicate',{id:'a'});
+  const duplicate=model.value().blocks[1];
+  assert.notEqual(duplicate.id,'a');
+  model.command('patch',{id:duplicate.id,changes:{volume:.3,interval:[12000,24000]}});
+  assert.deepEqual(model.value().blocks[0],original.blocks[0]);
+  assert.deepEqual(original,doc());
+  model.undo();assert.equal(model.value().blocks[1].volume,1);
+  model.redo();assert.equal(model.value().blocks[1].volume,.3);
+  model.command('move',{id:duplicate.id,direction:-1});
+  assert.equal(model.value().blocks[0].id,duplicate.id);
+  model.command('remove',{id:duplicate.id});assert.equal(model.value().blocks.length,1);
+});
+
+test('ramos editáveis, cópia profunda e IDs únicos inclusive dentro do grupo',()=>{
+  const {createModel}=contract(), model=createModel(doc());
+  model.command('add',{block:{id:'p',type:'parallel',branches:[[],[]]}});
+  model.command('add',{parent:'p',branch:0,block:{id:'w',type:'wait',ms:300}});
+  model.command('add',{parent:'p',branch:1,block:{id:'b',type:'play',clip_id:'clip',revision_id:'rev',interval:[0,48000],volume:1}});
+  model.command('duplicate',{id:'p'});
+  const p=model.value().blocks[1], q=model.value().blocks[2];
+  assert.notEqual(p.id,q.id);assert.notEqual(p.branches[0][0].id,q.branches[0][0].id);
+  model.command('patch',{id:q.branches[0][0].id,changes:{ms:100}});
+  assert.equal(model.value().blocks[1].branches[0][0].ms,300);
+});
+
+test('atualização explícita de revisão mantém volume e marca duração manual sem total fictício',()=>{
+  const {createModel,durationLabel}=contract(), model=createModel(doc());
+  model.command('reference',{id:'a',occurrence:{...doc().blocks[0],revision_id:'new',interval:[0,24000]}});
+  assert.equal(model.value().blocks[0].revision_id,'new');
+  assert.equal(model.value().blocks[0].id,'a');
+  assert.match(durationLabel({known_duration_ms:2300,duration_ms:null,manual_count:1}),/2.30 s.*acionamento/);
+  assert.doesNotMatch(durationLabel({known_duration_ms:2300,duration_ms:null,manual_count:1}),/total/i);
+  model.undo();assert.equal(model.value().blocks[0].revision_id,'rev');
+});
+
+test('salvar mantém histórico mas atualiza revisão otimista; abrir descarta histórico anterior',()=>{
+  const {createModel}=contract(), model=createModel(doc());
+  model.command('metadata',{name:'Alterada'});
+  model.saved({...model.value(),revision:2});
+  model.undo();assert.equal(model.value().name,'Diálogo');assert.equal(model.value().revision,2);
+  model.redo();assert.equal(model.value().name,'Alterada');
+  model.load(doc());assert.equal(model.canUndo(),false);
+});
+
+test('montagem inválida não corrompe undo nem permite editar identidade por patch',()=>{
+  const {createModel}=contract(), model=createModel(doc());
+  assert.throws(()=>model.command('patch',{id:'a',changes:{id:'changed'}}));
+  assert.equal(model.canUndo(),false);
+  assert.throws(()=>model.command('add',{parent:'missing',branch:1,block:{id:'x',type:'wait',ms:0}}));
+  assert.deepEqual(model.value(),doc());
+});
+
+test('UI integrada expõe controles e não agenda áudio por timer frontend',()=>{
+  const {create}=contract();assert.equal(typeof create,'function');
+  const html=fs.readFileSync(path.join(__dirname,'../ui/index.html'),'utf8');
+  for(const id of ['btnSequences','sequencePanel','sequenceBlocks','sequenceLibrary','sequenceStatus','btnSequenceAdvance','btnSequencePreview','btnSequenceRestart'])assert.match(html,new RegExp('id="'+id+'"'));
+  const js=fs.readFileSync(filename,'utf8');
+  assert.match(js,/get_sequence_status/);assert.match(js,/preview_sequence/);
+  assert.doesNotMatch(js,/setTimeout\([^\n]*(start_sequence|play_clip|advance_sequence)/);
+});
+
+function deferred(){let resolve;const promise=new Promise(done=>{resolve=done;});return {promise,resolve};}
+function fakeDocument(){
+  class Element{
+    constructor(tag='div'){this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.value='';this.isConnected=true;this.classList={add(){},remove(){},toggle(){}};}
+    append(...items){this.children.push(...items);}
+    replaceChildren(...items){this.children=items;}
+    get firstChild(){return this.children[0];}
+    setAttribute(){} addEventListener(){} focus(){}
+  }
+  const elements=new Map();
+  return {getElementById(id){if(!elements.has(id))elements.set(id,new Element());return elements.get(id);},
+    createElement:tag=>new Element(tag),querySelectorAll:()=>[]};
+}
+function setup(){
+  const documents={A:{...doc(),id:'A',name:'A',revision:4},B:{...doc(),id:'B',name:'B',revision:1}};
+  const snapshot=()=>({ok:true,sequences:Object.values(documents).map(document=>({document:structuredClone(document)})),clips:[clip],capabilities:{groups:true},status:{state:'idle'}});
+  const bridge={get_sequences:async()=>snapshot(),validate_sequence:async()=>({ok:true,known_duration_ms:1000,duration_ms:1000,manual_count:0})};
+  const dom=fakeDocument(),controller=contract().create(dom,()=>bridge);
+  return {documents,snapshot,bridge,dom,controller};
+}
+
+test('Iniciar A mantém identidade ao abrir B enquanto salvar A está pendente',async()=>{
+  const {documents,bridge,controller}=setup(),pending=deferred(),started=[];
+  bridge.save_sequence=()=>pending.promise;
+  bridge.start_sequence=async id=>{started.push(id);return {ok:true,status:{state:'completed'}};};
+  await controller.open('A');const a=controller.model();
+  const starting=controller.start();
+  await controller.open('B');const b=controller.model();
+  documents.A={...documents.A,revision:5};pending.resolve({ok:true,document:structuredClone(documents.A)});
+  await starting;
+  assert.deepEqual(started,['A']);
+  assert.equal(controller.model(),b);assert.equal(b.value().revision,1);assert.equal(a.value().revision,5);
+});
+
+test('edições durante salvar ficam locais e segunda gravação concorrente é recusada',async()=>{
+  const {documents,bridge,controller}=setup(),pending=deferred(),writes=[];
+  bridge.save_sequence=document=>{writes.push(document);return pending.promise;};
+  await controller.open('A');controller.model().command('metadata',{name:'Enviada'});
+  const saving=controller.save();
+  controller.model().command('metadata',{name:'Ainda local'});
+  const concurrent=controller.save();
+  // Resolve antes de aguardar para o comportamento antigo não bloquear o teste.
+  documents.A={...writes[0],revision:5};pending.resolve({ok:true,document:structuredClone(documents.A)});
+  const results=await Promise.allSettled([saving,concurrent]);
+  assert.equal(results[0].status,'fulfilled');assert.equal(results[1].status,'rejected');assert.equal(writes.length,1);
+  assert.equal(controller.model().value().name,'Ainda local');assert.equal(controller.model().value().revision,5);
+  assert.equal(controller.model().isDirty(),true);assert.equal(documents.A.name,'Enviada');
+});
+
+test('reload explícito recupera revisão atual e exige descarte explícito do rascunho dirty',async()=>{
+  const {documents,controller}=setup();await controller.open('A');
+  documents.A={...documents.A,revision:5,name:'Remota'};
+  await controller.reload();assert.equal(controller.model().value().revision,5);assert.equal(controller.model().value().name,'Remota');
+  controller.model().command('metadata',{name:'Local'});
+  documents.A={...documents.A,revision:6,name:'Outra remota'};
+  await assert.rejects(()=>controller.reload(),/altera|local/i);
+  assert.equal(controller.model().value().name,'Local');assert.equal(controller.model().value().revision,5);
+  await controller.open('B');await controller.open('A');assert.equal(controller.model().value().name,'Local');
+  await controller.reload({discardLocal:true});
+  assert.equal(controller.model().value().name,'Outra remota');assert.equal(controller.model().value().revision,6);
+  assert.equal(controller.model().isDirty(),false);assert.equal(controller.model().canUndo(),false);
+});
+
+test('abrir cache limpo atualiza revisão mas não adota resposta de abertura obsoleta',async()=>{
+  const {documents,bridge,snapshot,controller}=setup();await controller.open('A');await controller.open('B');
+  documents.A={...documents.A,revision:7};await controller.open('A');assert.equal(controller.model().value().revision,7);
+  const pending=deferred();let calls=0;
+  bridge.get_sequences=()=>++calls===1?pending.promise:Promise.resolve(snapshot());
+  const openingA=controller.open('A');await controller.open('B');pending.resolve(snapshot());await openingA;
+  assert.equal(controller.model().value().id,'B');
+});
+
+test('reload pendente não descarta edição feita depois do clique nem muda outro modelo',async()=>{
+  const {documents,bridge,snapshot,controller}=setup();await controller.open('A');
+  const a=controller.model(),pending=deferred();let calls=0;
+  bridge.get_sequences=()=>++calls===1?pending.promise:Promise.resolve(snapshot());
+  const reloading=controller.reload({discardLocal:true});
+  a.command('metadata',{name:'Digitada durante reload'});
+  await controller.open('B');documents.A={...documents.A,revision:8};pending.resolve(snapshot());
+  await assert.rejects(()=>reloading,/mud|edi|local/i);
+  assert.equal(a.value().name,'Digitada durante reload');assert.equal(controller.model().value().id,'B');assert.equal(controller.model().value().revision,1);
+});
+
+function findAction(element,action){
+  if(element.dataset?.action===action)return element;
+  for(const child of element.children||[]){const found=findAction(child,action);if(found)return found;}
+  return null;
+}
+
+test('adicionar clipe pendente pertence ao modelo clicado mesmo depois de abrir outro',async()=>{
+  const {bridge,dom,controller}=setup(),pending=deferred();bridge.pin_sequence_clip=()=>pending.promise;
+  await controller.open('A');const a=controller.model();
+  const adding=dom.getElementById('sequenceLibrary').children[0].onclick();
+  await controller.open('B');const b=controller.model();
+  pending.resolve({ok:true,occurrence:{...doc().blocks[0],id:'added'}});await adding;
+  assert.equal(a.value().blocks.length,2);assert.equal(b.value().blocks.length,1);assert.equal(controller.model(),b);
+});
+
+test('atualização assíncrona de referência nunca modifica ocorrência homônima de outro modelo',async()=>{
+  const {documents,bridge,dom,controller}=setup(),pending=deferred();
+  documents.A.blocks=[{...doc().blocks[0],revision_id:'old'}];bridge.pin_sequence_clip=()=>pending.promise;
+  await controller.open('A');const a=controller.model();
+  const updating=findAction(dom.getElementById('sequenceBlocks'),'reference').onclick();
+  await controller.open('B');const b=controller.model();
+  pending.resolve({ok:true,occurrence:{...doc().blocks[0],revision_id:'new',interval:[0,24000]}});await updating;
+  assert.equal(a.value().blocks[0].revision_id,'new');assert.equal(b.value().blocks[0].revision_id,'rev');
+  assert.deepEqual(b.value().blocks[0].interval,[0,48000]);
+});

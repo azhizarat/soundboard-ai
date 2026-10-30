@@ -218,7 +218,6 @@ def test_ai_endpoints_blocked_without_models(api, monkeypatch):
     results = (
         api.reanalyze_clip_ai("qualquer"),
         api.split_clip_by_speakers("qualquer"),
-        api.enroll_speaker_from_clip("qualquer", "interlocutor_1"),
     )
 
     for result in results:
