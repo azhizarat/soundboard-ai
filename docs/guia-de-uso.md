@@ -70,20 +70,24 @@ A ferramenta `tools/evaluate_audio_pipeline.py` compara configurações com cada
 
 ## Montar um diálogo com vários sons
 
-Abra **Sequências**, dê um nome e adicione os blocos na ordem desejada. Clique em um clipe da biblioteca para acrescentá-lo ao fim ou arraste para um ramo. O seletor de clipe também alimenta os botões **+ Clipe** de cada posição.
+Abra **Sequências** para entrar no canvas **Fluxos de sons**. Pesquise na biblioteca à esquerda por título, frase, pessoa ou categoria, mesmo sem acentos. Cada áudio mostra sua frase, pessoa e duração; ▶ permite ouvir no monitor sem adicioná-lo.
+
+Arraste um áudio até um conector **+** para inseri-lo naquela posição, inclusive entre dois blocos ou dentro de um ramo. Também é possível clicar num conector e depois num áudio da biblioteca. Sem um conector escolhido, o clique adiciona ao fim do fluxo principal. Arraste um nó entre conectores para mudar sua ordem ou ramo. **Esc** cancela o gesto e fecha a janela, preservando a montagem local.
+
+Arraste o fundo para navegar, use a roda para percorrer o canvas, Ctrl+roda ou +/− para zoom e **Enquadrar** para ver o conjunto. A seleção pelo teclado traz o bloco para a área visível. As setas nas conexões mostram a ordem; os ramos se juntam antes da continuação.
 
 - **Tocar:** uma ocorrência de clipe com início, fim e volume próprios. Esses controles não alteram o clipe da biblioteca.
-- **Esperar:** uma pausa em milissegundos.
-- **Paralelo:** ramos iniciados juntos; o fluxo só continua quando todos terminam, incluindo suas pausas finais. Os ramos aceitam clipes e esperas.
-- **Aguardar acionamento:** pausa até **Avançar** ou um novo acionamento do atalho. Manter a tecla pressionada não deve pular etapas.
+- **Pausa:** uma espera em milissegundos.
+- **Juntos:** ramos iniciados juntos; o fluxo só continua quando todos terminam, incluindo suas pausas finais. Os ramos aceitam clipes e esperas.
+- **Aguardar:** pausa até **Avançar** ou um novo acionamento do atalho. Manter a tecla pressionada não deve pular etapas.
 
 Por exemplo: pergunta → espera de 300 ms → resposta e risada em dois ramos paralelos → aguardar acionamento → conclusão. A duração mostra o tempo calculável e a quantidade de acionamentos manuais; a espera pelo operador não recebe uma duração fictícia.
 
-Selecione um bloco para editar suas propriedades no inspetor. ↑/↓ navegam, Alt+↑/↓ reordenam, Ctrl+D duplica, Delete remove, Ctrl+Z/Y desfaz/refaz e Ctrl+S salva, inclusive um campo ainda em edição. Os demais atalhos não interferem na digitação em campos. Use **Duplicar** para repetir um trecho com ajustes independentes e **Desfazer/Refazer** para recuperar alterações da sessão. **Salvar sequência** persiste a montagem. Cada ocorrência fixa a revisão do clipe usada ao adicioná-la. Se o clipe mudar, **Atualizar referência** permite adotar explicitamente a nova versão; o corte é reiniciado para essa versão e o volume local é mantido.
+Selecione um nó para editar somente suas propriedades no inspetor. Volume usa um slider; **Recortar só este bloco** expõe início/fim quando necessário. **Juntos** permite adicionar ramos e remover os vazios excedentes. As ações Juntos e Aguardar são inseridas no fluxo principal; os ramos recebem áudios e pausas. ↑/↓ navegam, Alt+↑/↓ reordenam, Ctrl+D duplica, Delete remove, Ctrl+Z/Y desfaz/refaz e Ctrl+S salva, inclusive um campo ainda em edição. Os demais atalhos não interferem na digitação em campos. Use **Duplicar** para repetir um trecho com ajustes independentes e **Desfazer/Refazer** para recuperar alterações da sessão. **Salvar** persiste a montagem. Os fluxos existentes ficam em **Meus fluxos**; o menu **•••** reúne atalho global, recarga, exclusão e reinício explícito. Cada ocorrência fixa a revisão do clipe usada ao adicioná-la. Se o clipe mudar, **Atualizar referência** permite adotar explicitamente a nova versão; o corte é reiniciado para essa versão e o volume local é mantido.
 
 **Atualizar biblioteca** atualiza as opções sem apagar seu rascunho. **Recarregar documento salvo** recupera a definição persistida; se houver alterações locais, use **Descartar alterações e recarregar** somente quando quiser abandoná-las. Salvar ou iniciar continua vinculado à sequência escolhida no clique, mesmo se você abrir outra enquanto a resposta estiver em andamento.
 
-**Ouvir no monitor** testa um bloco, grupo ou sequência pelas saídas de monitor. **Iniciar** usa as saídas configuradas. O app permite uma execução de sequência por vez; **Reiniciar/substituir** é a ação explícita para trocar a execução atual. O rodapé mostra estado, próximo bloco e andamento dos ramos. **Parar sequência** cancela esse fluxo; **Parar tudo** também cancela suas esperas e qualquer reprodução futura. Uma sequência interrompida não retoma áudio automaticamente ao reabrir o aplicativo.
+O ▶ de um nó testa aquele áudio; o inspetor permite ouvir também grupos. **Ouvir fluxo** testa a sequência no monitor. **Transmitir** usa as saídas configuradas. Nós ativos ficam destacados durante a execução. O app permite uma execução de sequência por vez; **Reiniciar/substituir** é a ação explícita para trocar a execução atual. O rodapé mostra estado, próximo bloco e andamento dos ramos. **Parar** cancela esse fluxo e a prévia da biblioteca; **Parar tudo** também cancela suas esperas e qualquer reprodução futura. Uma sequência interrompida não retoma áudio automaticamente ao reabrir o aplicativo.
 
 Sequências salvas aparecem como cartões e podem receber atalho global. Para excluir um clipe ainda usado por uma sequência, remova primeiro as referências da montagem ou exclua a sequência.
 

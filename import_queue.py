@@ -536,5 +536,18 @@ class ImportAPI:
 
     def _bind_native_drop(self):
         from webview.dom import DOMEventHandler
+        # dragover é frequente: serializá-lo no bridge percorre o documento inteiro.
+        # O filtro roda antes do listener nativo, na fase de bolha, preservando
+        # handlers dos alvos internos e os caminhos completos dos arquivos reais.
+        self._window.run_js("""(() => {
+            if (document._soundboardFileDropGuard) return;
+            document._soundboardFileDropGuard = true;
+            const hasFiles = event => Array.from(event.dataTransfer?.types || []).includes('Files');
+            document.addEventListener('dragover', event => {
+                if (hasFiles(event)) event.preventDefault();
+            });
+            document.addEventListener('drop', event => {
+                if (!hasFiles(event)) event.stopImmediatePropagation();
+            });
+        })();""")
         self._window.dom.document.events.drop += DOMEventHandler(self._on_native_drop, prevent_default=True)
-        self._window.dom.document.events.dragover += DOMEventHandler(lambda event: None, prevent_default=True)

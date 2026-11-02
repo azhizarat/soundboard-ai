@@ -167,9 +167,32 @@ class SequenceStore:
 
     def sequence_clip_choices(self):
         with self._lock:
-            return [{'id': clip['id'], 'title': clip.get('title', ''), 'revision_id': clip.get('revision_id'),
-                     'samples': output_samples(sum(b-a for a,b in self.state['revisions'].get(clip.get('revision_id'), {}).get('spans', [])), self.state['revisions'].get(clip.get('revision_id'), {}).get('variant', {})),
-                     'volume': clip.get('volume', 1)} for clip in self.state['clips'] if not clip.get('pending')]
+            choices = []
+            for clip in self.state['clips']:
+                if clip.get('pending'):
+                    continue
+                revision = self.state['revisions'].get(clip.get('revision_id'))
+                if revision:
+                    samples = output_samples(sum(b - a for a, b in revision['spans']), revision.get('variant', {}))
+                else:
+                    # Estimativa legada pelos metadados; listar nunca promove nem decodifica áudio.
+                    duration = max(0, float(clip.get('duration') or 0))
+                    start = max(0, min(duration, float(clip.get('trim_start') or 0)))
+                    end = max(start, min(duration, float(clip.get('trim_end') or duration)))
+                    samples = round((end - start) * 48000)
+                speaker_ids = list(clip.get('speaker_ids') or [])
+                if clip.get('speaker_id') and clip['speaker_id'] not in speaker_ids:
+                    speaker_ids.insert(0, clip['speaker_id'])
+                names = [self.state['speakers'].get(sid, {}).get('name', '') for sid in dict.fromkeys(speaker_ids)]
+                names = [name for name in names if name]
+                transcript = clip.get('transcript') or ''
+                choices.append({'id': clip['id'], 'title': clip.get('title', ''),
+                    'revision_id': clip.get('revision_id'), 'samples': samples, 'volume': clip.get('volume', 1),
+                    'transcript': transcript, 'text': transcript, 'speaker_name': ', '.join(names),
+                    'speaker_names': names, 'category': clip.get('category') or '',
+                    'emoji': clip.get('emoji') or '🔊', 'color': clip.get('color') or '#3b82f6',
+                    'duration': samples / 48000})
+            return choices
 
 
 def new_document(name='Nova sequência'):

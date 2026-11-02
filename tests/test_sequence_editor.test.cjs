@@ -74,15 +74,15 @@ function deferred(){let resolve;const promise=new Promise(done=>{resolve=done;})
 function fakeDocument(){
   let activeElement=null;
   class Element{
-    constructor(tag='div'){this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.value='';this.isConnected=true;this.classList={add(){},remove(){},toggle(){}};}
+    constructor(tag='div'){this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.value='';this.style={};this.clientWidth=800;this.clientHeight=600;this.isConnected=true;this.classList={add(){},remove(){},toggle(){}};}
     append(...items){for(const item of items){item.parentElement=this;this.children.push(item);}}
     replaceChildren(...items){this.children=items;}
     get firstChild(){return this.children[0];}
-    setAttribute(name,value){this[name]=value;} addEventListener(){} focus(){activeElement=this;}
+    setAttribute(name,value){this[name]=value;} getAttribute(name){return this[name];} remove(){} addEventListener(){} focus(){activeElement=this;}
   }
   const elements=new Map();
-  return {getElementById(id){if(!elements.has(id))elements.set(id,new Element());return elements.get(id);},
-    createElement:tag=>new Element(tag),querySelectorAll:()=>[],get activeElement(){return activeElement;}};
+  return {getElementById(id){for(const root of elements.values()){const found=descendants(root).find(e=>e.id===id);if(found)return found;}if(!elements.has(id))elements.set(id,new Element());return elements.get(id);},
+    addEventListener(){},removeEventListener(){},createElement:tag=>new Element(tag),createElementNS:(_,tag)=>new Element(tag),body:new Element('body'),querySelectorAll:()=>[],get activeElement(){return activeElement;}};
 }
 function setup(){
   const documents={A:{...doc(),id:'A',name:'A',revision:4},B:{...doc(),id:'B',name:'B',revision:1}};
@@ -163,7 +163,7 @@ function findAction(element,action){
 test('adicionar clipe pendente pertence ao modelo clicado mesmo depois de abrir outro',async()=>{
   const {bridge,dom,controller}=setup(),pending=deferred();bridge.pin_sequence_clip=()=>pending.promise;
   await controller.open('A');const a=controller.model();
-  const adding=dom.getElementById('sequenceLibrary').children[0].onclick();
+  const adding=findAction(dom.getElementById('sequenceLibrary'),'library-clip').onclick();
   await controller.open('B');const b=controller.model();
   pending.resolve({ok:true,occurrence:{...doc().blocks[0],id:'added'}});await adding;
   assert.equal(a.value().blocks.length,2);assert.equal(b.value().blocks.length,1);assert.equal(controller.model(),b);
@@ -191,7 +191,7 @@ test('roteiro longo mantém inserção antes dos blocos e edita apenas a seleç�
   assert.equal(nodes.filter(node=>node.dataset.field==='start').length,1);
   assert.equal(nodes.filter(node=>node.dataset.field==='ms').length,0);
   await findAction(host,'select-block').onclick();
-  assert.equal(dom.activeElement.dataset.action,'select-block','Clique mantém foco no roteiro para usar atalhos');
+  assert.equal(controller.selection(),'a');
   controller.select('wait');
   assert.equal(descendants(host).filter(node=>node.dataset.field==='start').length,0);
   assert.equal(descendants(host).find(node=>node.dataset.field==='ms').value,120);
@@ -222,4 +222,38 @@ test('Ctrl+S inclui campo ainda em edição e não depende de blur para salvar',
   const input={tagName:'INPUT',value:'Nome digitado',onchange(event){controller.model().command('metadata',{name:event.target.value});}};
   const event=key('s',{ctrlKey:true,target:input});await controller.handleKeydown(event);
   assert.equal(writes[0].name,'Nome digitado');assert.equal(event.prevented,true);assert.equal(event.stopped,true);
+});
+
+test('inserção e movimentação respeitam conector do meio e undo',()=>{
+ const {createModel}=contract(),model=createModel(doc());
+ model.command('add',{block:{id:'w',type:'wait',ms:100},before:'a'});
+ assert.deepEqual(model.value().blocks.map(b=>b.id),['w','a']);
+ model.command('relocate',{id:'a',before:'w'});
+ assert.deepEqual(model.value().blocks.map(b=>b.id),['a','w']);
+ model.undo();assert.deepEqual(model.value().blocks.map(b=>b.id),['w','a']);
+ assert.throws(()=>model.command('add',{block:{id:'lost',type:'wait',ms:1},before:'missing'}),/destino|conector/i);
+ assert.deepEqual(model.value().blocks.map(b=>b.id),['w','a']);
+});
+
+test('busca de biblioteca inclui frase e pessoa sem depender de acentos',()=>{
+ const {matches}=contract();assert.equal(matches({title:'Outro',transcript:'Não acredito',speaker_name:'João'},'nao acredito'),true);
+ assert.equal(matches({speaker_name:'João'},'joao'),true);assert.equal(matches({title:'Risada'},'pausa'),false);
+});
+test('prévia da biblioteca preserva clique mais recente durante parada pendente',async()=>{
+ const {bridge,dom,controller,snapshot}=setup(),pending=deferred(),played=[],stopped=[];
+ const clips=[{...clip,id:'a'},{...clip,id:'b'},{...clip,id:'c'}];
+ bridge.get_sequences=async()=>({...snapshot(),clips});
+ bridge.play_clip=async(id,monitor)=>{assert.equal(monitor,true);played.push(id);return {ok:true,play_id:id};};
+ bridge.stop_editor_preview=async id=>{stopped.push(id);if(id==='a')return pending.promise;return {ok:true};};
+ await controller.open('A');
+ const hear=id=>findAction(dom.getElementById('sequenceLibrary').children.find(e=>e.dataset.clipId===id),'preview-library').onclick();
+ await hear('a');const b=hear('b');await hear('c');pending.resolve({ok:true});await b;
+ assert.deepEqual(played,['a','c']);controller.close();
+});
+test('fechar durante preparação de prévia para só a reprodução tardia própria',async()=>{
+ const {bridge,dom,controller}=setup(),pending=deferred(),stopped=[];
+ bridge.play_clip=()=>pending.promise;bridge.stop_editor_preview=async id=>{stopped.push(id);return {ok:true};};
+ await controller.open('A');const listening=findAction(dom.getElementById('sequenceLibrary'),'preview-library').onclick();
+ await new Promise(resolve=>setImmediate(resolve));controller.close();pending.resolve({ok:true,play_id:'owned'});await listening;
+ assert.deepEqual(stopped,['owned']);assert.equal(controller.model().value().blocks.length,1);
 });

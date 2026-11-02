@@ -1,5 +1,8 @@
 (function(root){
   'use strict';
+  const canvasAPI=root.SequenceCanvas||(typeof require==='function'?require('./sequence-canvas.js'):null);
+  const normalize=value=>String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+  const matches=(clip,query)=>normalize([clip.title,clip.transcript,clip.speaker_name,clip.category].join(' ')).includes(normalize(query).trim());
   const clone=value=>JSON.parse(JSON.stringify(value));
   const content=value=>JSON.stringify({...value,revision:0});
   const uid=()=>root.crypto?.randomUUID?.()||'seq-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
@@ -29,7 +32,10 @@
         if(payload.hotkey!==undefined)next.hotkey=String(payload.hotkey);
       }else if(action==='add'){
         if(payload.parent&&['manual','parallel'].includes(payload.block.type))throw Error('Ramos aceitam apenas clipes e esperas');
-        target(next,payload.parent,payload.branch).push(clone(payload.block));
+        const list=target(next,payload.parent,payload.branch);
+        const index=payload.before==null?list.length:list.findIndex(b=>b.id===payload.before);
+        if(index<0)throw Error('O conector de destino mudou; escolha novamente');
+        list.splice(index,0,clone(payload.block));
       }else if(action==='patch'){
         const allowed=found.block.type==='play'?['volume','interval']:found.block.type==='wait'?['ms']:[];
         if(Object.keys(payload.changes).some(key=>!allowed.includes(key)))throw Error('Campo local inválido');
@@ -48,7 +54,11 @@
       }else if(action==='relocate'){
         if(payload.parent&&['manual','parallel'].includes(found.block.type))throw Error('Ramos aceitam apenas clipes e esperas');
         const destination=target(next,payload.parent,payload.branch);
-        found.list.splice(found.index,1);destination.push(found.block);
+        if(payload.before===payload.id)return;
+        if(payload.before!=null&&!destination.some(b=>b.id===payload.before))throw Error('O conector de destino mudou; escolha novamente');
+        found.list.splice(found.index,1);
+        const index=payload.before==null?destination.length:destination.findIndex(b=>b.id===payload.before);
+        destination.splice(index,0,found.block);
       }else if(action==='branch'){
         if(found.block.type!=='parallel')throw Error('Grupo não encontrado');
         if(payload.remove!==undefined){
@@ -75,12 +85,13 @@
     return details.manual_count?seconds+' calculáveis + '+details.manual_count+' acionamento(s) manual(is)':seconds;
   }
   const stateLabels={idle:'Pronta',preparing:'Preparando todos os sons…',playing:'Tocando',waiting:'Esperando',manual:'Aguardando você',completed:'Concluída',cancelled:'Parada',failed:'Falha'};
-  const typeLabels={play:'Tocar',wait:'Esperar',parallel:'Paralelo',manual:'Aguardar acionamento'};
+  const typeLabels={play:'Tocar áudio',wait:'Pausa',parallel:'Tocar juntos',manual:'Aguardar você'};
   function create(doc,bridge){
     const el=id=>doc.getElementById(id),node=(tag,text)=>{const n=doc.createElement(tag);if(text!==undefined)n.textContent=text;return n;};
     let model=createModel(),library=[],sequences=[],capabilities={},status={state:'idle'},opened=false,timer=null,validation=0,initialized=false,selectionTicket=0,refreshTicket=0;
-    const drafts=new Map(),saving=new WeakSet(),blockButtons=new Map();
-    let selectedId=null;
+    const drafts=new Map(),saving=new WeakSet(),blockButtons=new Map(),previewButtons=new Map();
+    let selectedId=null,flowCanvas=null,insertion=null,previewId=null,previewClipId=null,previewTicket=0,previewPending=false;
+    const insertionTarget=()=>insertion?{...insertion}:{parent:null,branch:null,before:null};
     const message=text=>{el('sequenceMessage').textContent=text||'';};
     async function checked(promise){const result=await promise;if(!result?.ok)throw Error(result?.error||'A ação não está disponível neste estado');return result;}
     function button(label,run,action){
@@ -100,7 +111,7 @@
         const restoreFocus=opened&&doc.activeElement?.tagName==='BUTTON';
         if(action==='add')selectedId=payload.block.id;
         if(action==='duplicate'){const original=locate(target.value().blocks,payload.id);selectedId=original.list[original.index+1].id;}
-        render();if(restoreFocus)blockButtons.get(selectedId)?.focus();message('Alterações locais — Ctrl+S para salvar.');
+        render();if(['add','duplicate','move','relocate'].includes(action))flowCanvas?.reveal(selectedId);if(restoreFocus)blockButtons.get(selectedId)?.focus({preventScroll:true});message('Alterações locais — Ctrl+S para salvar.');
       }
     }
     async function validate(){
@@ -109,6 +120,7 @@
       el('sequenceDuration').textContent=result.ok?durationLabel(result):result.error;
     }
     async function add(kind,parent,branch){
+      const destination=parent?{parent,branch,before:null}:insertionTarget();
       const target=model;
       let block={id:uid(),type:kind};
       if(kind==='play'){
@@ -117,12 +129,12 @@
         block=(await checked(bridge().pin_sequence_clip(clipId))).occurrence;
       }else if(kind==='wait')block.ms=300;
       else if(kind==='parallel')block.branches=[[],[]];
-      mutate('add',{block,parent,branch},target);
+      mutate('add',{block,...destination},target);
     }
-    async function addClip(clipId,parent,branch){
+    async function addClip(clipId,destination=insertionTarget()){
       const target=model;
       const result=await checked(bridge().pin_sequence_clip(clipId));
-      mutate('add',{block:result.occurrence,parent,branch},target);
+      mutate('add',{block:result.occurrence,...destination},target);
     }
     function blockLabel(block){
       const clip=library.find(item=>item.id===block.clip_id);
@@ -133,8 +145,8 @@
     }
     function selectBlock(id,focus=false){
       if(!locate(model.value().blocks,id))return;
-      selectedId=id;render();
-      if(focus){const item=blockButtons.get(id);item?.focus();item?.scrollIntoView?.({block:'nearest'});}
+      selectedId=id;insertion=null;render();
+      if(focus){flowCanvas?.reveal(id);blockButtons.get(id)?.focus({preventScroll:true});}
     }
     function summary(block){
       if(block.type==='play')return ((block.interval[1]-block.interval[0])/48000).toFixed(2)+' s · '+Math.round(block.volume*100)+'%';
@@ -142,51 +154,39 @@
       if(block.type==='parallel')return block.branches.length+' ramos simultâneos';
       return 'Avançar para continuar';
     }
-    function adders(parent,branch){
+    function adders(){
       const bar=node('div');bar.className='sequence-adders';
-      bar.append(button('+ Clipe',()=>add('play',parent,branch),'add-play'),button('+ Espera',()=>add('wait',parent,branch),'add-wait'));
-      if(!parent)bar.append(button('+ Paralelo',()=>add('parallel'),'add-parallel'),button('+ Acionamento',()=>add('manual'),'add-manual'));
+      bar.append(button('+ Áudio',()=>{el('sequenceSearch').focus();message('Escolha um áudio à esquerda ou arraste até um conector +.');},'add-play'),
+        button('◷ Pausa',()=>add('wait'),'add-wait'),button('⑂ Juntos',()=>add('parallel'),'add-parallel'),button('⚡ Aguardar',()=>add('manual'),'add-manual'));
+      const zoom=node('span');zoom.className='sequence-zoom';
+      zoom.append(button('−',()=>flowCanvas.zoom(.85),'zoom-out'),button('Enquadrar',()=>flowCanvas.fit(),'fit'),button('+',()=>flowCanvas.zoom(1.15),'zoom-in'));bar.append(zoom);
       return bar;
     }
-    function renderList(blocks,parent,branch){
-      const list=node('div');list.className='sequence-block-list';list.dataset.parent=parent||'';if(branch!==undefined)list.dataset.branch=branch;
-      list.ondragover=event=>{event.preventDefault();event.stopPropagation();};
-      list.ondrop=async event=>{
-        event.preventDefault();event.stopPropagation();
-        try{const blockId=event.dataTransfer.getData('application/x-sequence-block'),clipId=event.dataTransfer.getData('application/x-soundboard-clip');
-          if(blockId)mutate('relocate',{id:blockId,parent,branch});else if(clipId)await addClip(clipId,parent,branch);
-        }catch(error){message(error.message);}
-      };
-      if(!blocks.length){const empty=node('p',parent?'Arraste um clipe ou adicione abaixo.':'Seu roteiro começa aqui. Adicione um clipe da biblioteca ou use os botões acima.');empty.className='sequence-empty';list.append(empty);}
-      blocks.forEach((block,index)=>{
-        const card=node('article');card.className='sequence-block sequence-row';card.dataset.blockId=block.id;card.draggable=true;
-        card.classList.toggle('sequence-selected',selectedId===block.id);
-        card.ondragstart=event=>{event.stopPropagation();event.dataTransfer.setData('application/x-sequence-block',block.id);};
-        const choose=button('',()=>selectBlock(block.id,true),'select-block');choose.className='sequence-select';
-        choose.setAttribute('aria-pressed',String(selectedId===block.id));choose.setAttribute('aria-label',(index+1)+'. '+blockLabel(block)+'. '+summary(block));
-        choose.tabIndex=selectedId===block.id?0:-1;
-        const number=node('span',String(index+1));number.className='sequence-order';
-        const text=node('span');text.className='sequence-row-copy';text.append(node('strong',blockLabel(block)),node('small',summary(block)));
-        choose.append(number,text);blockButtons.set(block.id,choose);card.append(choose);
-        if(block.type==='play'){
-          const clip=library.find(item=>item.id===block.clip_id);
-          if(clip?.revision_id&&clip.revision_id!==block.revision_id){const badge=node('span','Revisão anterior');badge.className='sequence-revision-badge';badge.title='Selecione o bloco para atualizar a referência, se desejar.';card.append(badge);}
-        }
-        if(block.type==='parallel'){
-          const branches=node('div');branches.className='sequence-branches';
-          block.branches.forEach((items,i)=>{const panel=node('section');panel.className='sequence-branch';panel.dataset.branchIndex=i;
-            const title=node('div','Ramo '+(i+1));title.className='sequence-branch-title';
-            if(block.branches.length>2&&!items.length)title.append(button('Remover ramo vazio',()=>mutate('branch',{id:block.id,remove:i}),'remove-branch'));
-            panel.append(title,renderList(items,block.id,i),adders(block.id,i));branches.append(panel);
-          });card.append(branches);
-        }
-        list.append(card);
-      });return list;
+    async function drop(payload,destination){
+      try{if(payload.blockId)mutate('relocate',{id:payload.blockId,...destination});else await addClip(payload.clipId,destination);}
+      catch(error){message(error.message);}
+    }
+    function renderNode(block){
+      const card=node('article');card.className='sequence-block flow-'+block.type;card.dataset.blockId=block.id;
+      card.classList.toggle('sequence-selected',selectedId===block.id);card.setAttribute('aria-label',blockLabel(block));
+      const choose=button('',()=>selectBlock(block.id,true),'select-block');choose.className='sequence-select';
+      choose.setAttribute('aria-pressed',String(selectedId===block.id));choose.tabIndex=selectedId===block.id?0:-1;
+      const clip=library.find(item=>item.id===block.clip_id);
+      const icon=node('span',block.type==='play'?(clip?.emoji||'♫'):{wait:'◷',parallel:'⑂',manual:'⚡'}[block.type]);icon.className='flow-icon';
+      const text=node('span');text.className='sequence-row-copy';
+      text.append(node('small',block.type==='parallel'?'TOCAR JUNTOS':block.type==='manual'?'ESPERAR VOCÊ':block.type==='wait'?'PAUSA':'ÁUDIO'),node('strong',blockLabel(block)),node('small',summary(block)));
+      choose.append(icon,text);const original=choose.onclick;choose.onclick=event=>{if(card.dataset.suppressClick)return;return original(event);};
+      blockButtons.set(block.id,choose);card.append(choose);
+      if(block.type==='play'){
+        const hear=button('▶',()=>preview(block.id),'preview-node');hear.className='flow-node-preview';hear.title='Ouvir este bloco no monitor';hear.setAttribute('aria-label','Ouvir '+blockLabel(block));hear.dataset.noDrag='true';card.append(hear);
+        if(clip?.revision_id&&clip.revision_id!==block.revision_id)card.title='Usa uma revisão anterior. Atualize no inspetor se desejar.';
+      }
+      return card;
     }
     function renderInspector(){
       const panel=node('aside');panel.className='sequence-inspector';panel.setAttribute('aria-label','Propriedades do bloco selecionado');
       const found=selectedId&&locate(model.value().blocks,selectedId);
-      if(!found){panel.append(node('h3','Bloco selecionado'),node('p','Selecione um bloco para ajustar corte, volume ou duração.'));return panel;}
+      if(!found){panel.append(node('h3','Seu fluxo, bloco a bloco'),node('p','Arraste um áudio até um +. Clique em um bloco para ouvir e ajustar. O fundo pode ser arrastado para navegar.'));return panel;}
       const block=found.block;
       panel.append(node('small',typeLabels[block.type]),node('h3',blockLabel(block)));
       const actions=node('div');actions.className='sequence-inspector-actions';
@@ -196,12 +196,13 @@
       const remove=button('Remover',()=>mutate('remove',{id:block.id}),'remove');remove.title='Delete';
       actions.append(up,down,duplicate,remove);panel.append(actions);
       if(block.type==='play'){
+        panel.append(field('Volume · '+Math.round(block.volume*100)+'%',Math.round(block.volume*100),value=>mutate('patch',{id:block.id,changes:{volume:Number(value)/100}}),{type:'range',step:1,max:300,key:'volume'}),button('▶ Ouvir este áudio',()=>preview(block.id),'preview'));
+        const trim=node('details');trim.className='sequence-trim';trim.append(node('summary','Recortar só este bloco'));
         const controls=node('div');controls.className='sequence-fields';
         controls.append(field('Início (s)',block.interval[0]/48000,value=>mutate('patch',{id:block.id,changes:{interval:[Math.round(value*48000),block.interval[1]]}}),{key:'start'}),
-          field('Fim (s)',block.interval[1]/48000,value=>mutate('patch',{id:block.id,changes:{interval:[block.interval[0],Math.round(value*48000)]}}),{key:'end'}),
-          field('Volume',block.volume,value=>mutate('patch',{id:block.id,changes:{volume:value}}),{max:3,key:'volume'}));
-        panel.append(controls,node('p','Corte desta ocorrência. O clipe original permanece intacto.'),button('▶ Ouvir bloco no monitor',()=>preview(block.id),'preview'));
-        const reference=node('div');reference.className='sequence-reference';reference.append(node('small','Revisão fixada · '+block.revision_id.slice(0,8)));
+          field('Fim (s)',block.interval[1]/48000,value=>mutate('patch',{id:block.id,changes:{interval:[block.interval[0],Math.round(value*48000)]}}),{key:'end'}));
+        trim.append(controls,node('p','O áudio original permanece intacto.'));panel.append(trim);
+        const reference=node('div');reference.className='sequence-reference';reference.append(node('small','Áudio original preservado'));
         const clip=library.find(item=>item.id===block.clip_id);
         if(clip?.revision_id&&clip.revision_id!==block.revision_id){
           reference.append(node('p','Há uma revisão mais recente. Atualizar reinicia o corte e mantém o volume.'),button('Atualizar referência',async()=>{
@@ -212,7 +213,10 @@
         }panel.append(reference);
       }else if(block.type==='wait')panel.append(field('Espera (ms)',block.ms,value=>mutate('patch',{id:block.id,changes:{ms:value}}),{step:'1',key:'ms'}),node('p','Pausa antes do próximo bloco.'),button('▶ Ouvir bloco no monitor',()=>preview(block.id),'preview'));
       else if(block.type==='manual')panel.append(node('p','A sequência espera até você clicar Avançar ou pressionar novamente seu atalho global.'),button('▶ Testar no monitor',()=>preview(block.id),'preview'));
-      else if(block.type==='parallel')panel.append(node('p','Os ramos tocam juntos. A sequência continua quando todos terminam.'),button('+ Adicionar ramo',()=>mutate('branch',{id:block.id}),'branch'),button('▶ Ouvir grupo no monitor',()=>preview(block.id),'preview'));
+      else if(block.type==='parallel'){
+        panel.append(node('p','Os ramos tocam juntos. A sequência continua quando todos terminam.'),button('+ Adicionar ramo',()=>mutate('branch',{id:block.id}),'branch'),button('▶ Ouvir grupo no monitor',()=>preview(block.id),'preview'));
+        if(block.branches.length>2)block.branches.forEach((items,i)=>{if(!items.length)panel.append(button('Remover ramo '+(i+1),()=>mutate('branch',{id:block.id,remove:i}),'remove-branch'));});
+      }
       return panel;
     }
     async function handleKeydown(event){
@@ -236,16 +240,21 @@
         };
       }
       if(!run)return;event.preventDefault();event.stopPropagation();if(event.repeat&&command)return;
-      try{await run();if(!typing&&opened)blockButtons.get(selectedId)?.focus();}catch(error){message(error.message||String(error));}
+      try{await run();if(!typing&&opened)blockButtons.get(selectedId)?.focus({preventScroll:true});}catch(error){message(error.message||String(error));}
     }
     function render(){
       const document=model.value();el('sequenceName').value=document.name;el('sequenceHotkey').value=document.hotkey||'';
       if(!selectedId||!locate(document.blocks,selectedId))selectedId=document.blocks[0]?.id||null;
       blockButtons.clear();
-      const toolbar=adders(),hint=node('p','↑↓ selecionar · Alt+↑↓ mover · Ctrl+D duplicar · Delete remover · Ctrl+Z/Y desfazer/refazer · Ctrl+S salvar');
-      hint.className='sequence-keyboard-hint';
-      const composition=node('div');composition.className='sequence-composition';composition.append(renderList(document.blocks),renderInspector());
-      el('sequenceBlocks').replaceChildren(toolbar,hint,composition);
+      if(!flowCanvas){
+        const toolbar=adders(),composition=node('div'),canvasHost=node('div'),inspector=node('div');
+        composition.className='sequence-composition';canvasHost.id='sequenceCanvas';inspector.id='sequenceInspector';
+        composition.append(canvasHost,inspector);el('sequenceBlocks').replaceChildren(toolbar,composition);
+        flowCanvas=canvasAPI.mount(doc,canvasHost,{drop,message,insert(destination){insertion=destination;render();message('Ponto escolhido. Adicione um áudio, pausa ou ação.');},zoom(percent){el('sequenceZoom').textContent=percent+'%';}});
+      }
+      flowCanvas.render(document.blocks,renderNode,insertion);
+      el('sequenceInspector').replaceChildren(renderInspector());
+      for(const action of ['add-parallel','add-manual']){const control=doc.querySelector?.('[data-action="'+action+'"]');if(control){control.disabled=!!insertion?.parent;control.title=insertion?.parent?'Escolha um conector do fluxo principal para esta ação':'';}}
       el('btnSequenceUndo').disabled=!model.canUndo();el('btnSequenceRedo').disabled=!model.canRedo();
       el('btnSequenceDelete').disabled=!sequences.some(item=>item.document.id===document.id);
       el('btnSequenceDiscardReload').classList.toggle('hidden',!model.isDirty());
@@ -253,6 +262,8 @@
       for(const id of ['btnSequenceStart','btnSequenceRestart','btnSequencePreview'])el(id).disabled=!capabilities.groups||saving.has(model);
       el('btnSequenceSave').disabled=saving.has(model);
       validate().catch(error=>message(error.message));paintStatus();
+      // A biblioteca é renderizada separadamente para não perder busca durante seleção.
+      if(flowCanvas)for(const item of el('sequenceLibrary').children)if(item.dataset.clipId)flowCanvas.bindDrag(item,{clipId:item.dataset.clipId,title:library.find(c=>c.id===item.dataset.clipId)?.title});
     }
     function paintStatus(){
       const playingName=status.document?.name||'',next=status.next_block?blockLabel(status.next_block):'fim';
@@ -264,17 +275,47 @@
       for(const card of doc.querySelectorAll('#sequenceBlocks [data-block-id]'))card.classList.toggle('sequence-active',status.sequence_id===model.value().id&&(status.active_blocks||[]).includes(card.dataset.blockId));
     }
     async function refreshStatus(){
-      try{const result=await bridge().get_sequence_status();if(result.ok){status=result.status;paintStatus();}}
+      try{const result=await bridge().get_sequence_status();if(result.ok){status=result.status;paintStatus();}
+        const listening=previewId;if(listening){const audio=await bridge().get_editor_playback(listening);if(previewId===listening&&audio.ok&&!audio.status.playing){previewId=null;previewClipId=null;paintLibraryPreview();}}
+      }
       catch(error){if(opened)message(error.message);}
       timer=setTimeout(refreshStatus,300);
+    }
+    async function stopLibraryPreview(){
+      previewTicket++;const previous=previewId;previewId=null;previewClipId=null;previewPending=false;
+      if(previous)await bridge().stop_editor_preview(previous);
+    }
+    function paintLibraryPreview(){
+      for(const [id,button] of previewButtons){button.textContent=previewClipId===id?(previewPending?'…':'■'):'▶';button.title=previewClipId===id?'Parar prévia':'Ouvir no monitor';}
+    }
+    async function hearLibrary(clip){
+      if(previewClipId===clip.id){await stopLibraryPreview();paintLibraryPreview();return;}
+      const ticket=++previewTicket,previous=previewId;previewId=null;previewClipId=clip.id;previewPending=true;paintLibraryPreview();
+      try{
+        if(previous)await bridge().stop_editor_preview(previous);
+        if(ticket!==previewTicket||!opened)return;
+        const result=await checked(bridge().play_clip(clip.id,true));
+        if(ticket!==previewTicket||!opened){if(result.play_id)await bridge().stop_editor_preview(result.play_id);return;}
+        previewId=result.play_id;previewPending=false;paintLibraryPreview();
+      }catch(error){if(ticket===previewTicket){previewClipId=null;previewPending=false;paintLibraryPreview();message(error.message);}}
+    }
+    function renderLibrary(){
+      const list=el('sequenceLibrary'),query=el('sequenceSearch').value,shown=library.filter(clip=>matches(clip,query));list.replaceChildren();previewButtons.clear();
+      el('sequenceLibraryCount').textContent=shown.length+' sons';
+      for(const clip of shown){
+        const item=node('article');item.className='sequence-library-item';item.dataset.clipId=clip.id;
+        const body=button('',()=>{if(!item.dataset.suppressClick)return addClip(clip.id);},'library-clip');body.className='sequence-library-copy';body.title='Adicionar no conector escolhido; arraste para posicionar';
+        body.append(node('strong',(clip.emoji||'♫')+' '+(clip.title||'Áudio')),node('span',clip.transcript||'Sem transcrição'),node('small',[clip.speaker_name,((clip.samples||0)/48000).toFixed(1)+' s'].filter(Boolean).join(' · ')));
+        const hear=button(previewClipId===clip.id?(previewPending?'…':'■'):'▶',()=>hearLibrary(clip),'preview-library');hear.dataset.noDrag='true';hear.className='sequence-library-preview';hear.title=previewClipId===clip.id?'Parar prévia':'Ouvir no monitor';hear.setAttribute('aria-label',hear.title+': '+clip.title);item.append(body,hear);previewButtons.set(clip.id,hear);
+        flowCanvas?.bindDrag(item,{clipId:clip.id,title:clip.title});list.append(item);
+      }
+      if(!shown.length)list.append(node('p','Nenhum áudio encontrado.'));
     }
     function renderChoices(){
       const select=el('sequenceClipSelect'),selected=select.value;select.replaceChildren();
       select.append(node('option','Escolha um clipe…'));select.firstChild.value='';
       for(const clip of library){const option=node('option',clip.title||clip.id);option.value=clip.id;select.append(option);}select.value=selected;
-      const list=el('sequenceLibrary');list.replaceChildren();
-      for(const clip of library){const item=button(clip.title||clip.id,()=>addClip(clip.id),'library-clip');item.draggable=true;item.dataset.clipId=clip.id;
-        item.title='Clique para adicionar; arraste para um ramo';item.ondragstart=event=>event.dataTransfer.setData('application/x-soundboard-clip',clip.id);list.append(item);}
+      renderLibrary();
       const saved=el('sequenceSaved'),pads=el('sequencePads');saved.replaceChildren();pads.replaceChildren();
       for(const item of sequences){const document=item.document;
         saved.append(button(document.name,()=>load(document),'open-sequence'));
@@ -299,7 +340,8 @@
       return result;
     }
     function load(document){
-      selectionTicket++;drafts.set(model.value().id,model);model=drafts.get(document.id)||createModel(document);selectedId=null;
+      selectionTicket++;flowCanvas?.cancelDrag();drafts.set(model.value().id,model);model=drafts.get(document.id)||createModel(document);selectedId=null;insertion=null;
+      stopLibraryPreview().catch(error=>message(error.message));
       if(!model.isDirty()&&!saving.has(model)&&model.value().revision!==document.revision)model.load(document);
       render();message(model.isDirty()&&model.value().revision!==document.revision?'Há uma versão salva mais recente. Edições locais preservadas; recarregue explicitamente para resolver o conflito.':'');
     }
@@ -318,19 +360,21 @@
       }
     }
     async function start(replace=false){
-      const target=model,saved=await save(target);
+      const target=model;await stopLibraryPreview();paintLibraryPreview();
+      const saved=await save(target);
       const result=await checked(bridge().start_sequence(saved.document.id,replace));status=result.status;paintStatus();
     }
     async function preview(blockId=null){
-      const result=await checked(bridge().preview_sequence(model.value(),blockId));status=result.status;paintStatus();
+      const document=model.value();await stopLibraryPreview();paintLibraryPreview();
+      const result=await checked(bridge().preview_sequence(document,blockId));status=result.status;paintStatus();
     }
     async function open(sequenceId){
       const ticket=++selectionTicket,result=await refreshLibrary();
       if(ticket!==selectionTicket)return;
       opened=true;el('sequencePanel').classList.remove('hidden');
-      if(sequenceId){const item=result.sequences.find(item=>item.document.id===sequenceId);if(item)load(item.document);}render();el('sequenceName').focus();
+      if(sequenceId){const item=result.sequences.find(item=>item.document.id===sequenceId);if(item)load(item.document);}render();flowCanvas?.reset();el('sequenceName').focus();
     }
-    function close(){selectionTicket++;opened=false;el('sequencePanel').classList.add('hidden');el('btnSequences').focus();}
+    function close(){selectionTicket++;opened=false;flowCanvas?.cancelDrag();stopLibraryPreview().catch(error=>message(error.message));el('sequencePanel').classList.add('hidden');el('btnSequences').focus();}
     async function initialize(){
       if(initialized)return;initialized=true;
       const bind=(id,action)=>{el(id).onclick=async()=>{try{await action();}catch(error){message(error.message);}};};
@@ -338,7 +382,7 @@
       bind('btnSequenceNew',()=>{load(fresh());message('Adicione clipes, esperas, ramos e acionamentos.');});
       bind('btnSequenceSave',save);bind('btnSequenceStart',()=>start());bind('btnSequenceRestart',()=>start(true));
       bind('btnSequencePreview',()=>preview());bind('btnSequenceAdvance',async()=>{const result=await checked(bridge().advance_sequence(status.execution_id,false));status=result.status;paintStatus();});
-      bind('btnSequenceStop',async()=>{const result=await checked(bridge().stop_sequence(status.execution_id));status=result.status;paintStatus();});
+      bind('btnSequenceStop',async()=>{await stopLibraryPreview();paintLibraryPreview();const result=await checked(bridge().stop_sequence(status.execution_id));status=result.status;paintStatus();});
       bind('btnSequenceUndo',()=>{model.undo();render();});bind('btnSequenceRedo',()=>{model.redo();render();});
       bind('btnSequenceDelete',async()=>{
         const target=model,id=target.value().id;
@@ -350,14 +394,15 @@
       bind('btnSequenceRefreshLibrary',async()=>{await refreshLibrary();render();});
       bind('btnSequenceReload',()=>reload());
       bind('btnSequenceDiscardReload',()=>reload({discardLocal:true}));
+      el('sequenceSearch').oninput=renderLibrary;
       el('sequenceName').onchange=event=>mutate('metadata',{name:event.target.value});
       el('sequenceHotkey').onchange=event=>mutate('metadata',{hotkey:event.target.value.trim().toLowerCase()});
       el('sequencePanel').addEventListener('keydown',handleKeydown);
       await refreshLibrary();render();refreshStatus();
     }
-    return {initialize,open,close,reload,refreshLibrary,render,save,start,preview,select:selectBlock,selection:()=>selectedId,handleKeydown,model:()=>model,status:()=>clone(status),destroy(){clearTimeout(timer);}};
+    return {initialize,open,close,reload,refreshLibrary,render,save,start,preview,select:selectBlock,selection:()=>selectedId,handleKeydown,model:()=>model,status:()=>clone(status),destroy(){clearTimeout(timer);stopLibraryPreview();flowCanvas?.destroy();}};
   }
-  const exported={createModel,create,durationLabel,fresh};
+  const exported={createModel,create,durationLabel,fresh,matches};
   if(typeof module!=='undefined'&&module.exports)module.exports=exported;
   root.SoundSequences=exported;
 })(typeof globalThis!=='undefined'?globalThis:this);

@@ -734,20 +734,44 @@
 
   <div id="sequencePanel" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="sequenceHeading">
     <section class="sequence-modal">
-      <header><h2 id="sequenceHeading">⇶ Sequências</h2><button id="btnSequenceNew" class="btn">Nova sequência</button><button id="btnCloseSequences" class="btn" aria-label="Fechar sequências">✕</button></header>
+      <header>
+        <h2 id="sequenceHeading">⑂ Fluxos de sons</h2>
+        <input id="sequenceName" maxlength="200" aria-label="Nome da sequência" placeholder="Nome do fluxo" />
+        <button id="btnSequenceNew" class="btn">+ Novo</button>
+        <button id="btnSequenceSave" class="btn btn-primary" title="Ctrl+S">Salvar</button>
+        <details class="sequence-options"><summary title="Opções do fluxo">•••</summary><div>
+          <label>Atalho global<input id="sequenceHotkey" placeholder="ctrl+shift+1" /></label>
+          <button id="btnSequenceReload" class="btn btn-xs">Recarregar salvo</button>
+          <button id="btnSequenceDiscardReload" class="btn btn-xs hidden">Descartar alterações e recarregar</button>
+          <button id="btnSequenceRestart" class="btn btn-xs">Reiniciar / substituir execução</button>
+          <button id="btnSequenceDelete" class="btn btn-xs">Excluir sequência</button>
+        </div></details>
+        <button id="btnCloseSequences" class="btn" aria-label="Fechar sequências">✕</button>
+      </header>
       <div class="sequence-workspace">
-        <aside class="sequence-library-panel"><h3>Sequências salvas</h3><div id="sequenceSaved"></div><button id="btnSequenceReload" class="btn btn-xs">Recarregar documento salvo</button><button id="btnSequenceDiscardReload" class="btn btn-xs hidden">Descartar alterações e recarregar</button><h3>Biblioteca</h3><small>Clique adiciona ao fim. Arraste para um ramo.</small><button id="btnSequenceRefreshLibrary" class="btn btn-xs">Atualizar biblioteca</button><div id="sequenceLibrary"></div></aside>
+        <aside class="sequence-library-panel">
+          <details class="sequence-saved"><summary>Meus fluxos</summary><div id="sequenceSaved"></div></details>
+          <div class="sequence-library-heading"><h3>Seus sons</h3><button id="btnSequenceRefreshLibrary" class="btn btn-xs" aria-label="Atualizar biblioteca" title="Atualizar biblioteca">↻</button></div>
+          <input id="sequenceSearch" type="search" placeholder="Buscar frase, título ou pessoa" aria-label="Buscar áudios" />
+          <small id="sequenceLibraryCount"></small>
+          <div id="sequenceLibrary"></div>
+          <small class="sequence-library-help">▶ para ouvir · clique para adicionar<br>Arraste até um + para posicionar</small>
+        </aside>
         <div class="sequence-editor-area">
-          <div class="sequence-metadata"><label>Nome<input id="sequenceName" maxlength="200" /></label><label>Atalho global<input id="sequenceHotkey" placeholder="Ex.: ctrl+shift+1" /></label></div>
-          <p id="sequenceCapability"></p><p id="sequenceDuration"></p>
-          <label for="sequenceClipSelect">Clipe para adicionar aos blocos</label><select id="sequenceClipSelect"></select>
-          <div><button id="btnSequenceUndo" class="btn btn-xs">Desfazer</button> <button id="btnSequenceRedo" class="btn btn-xs">Refazer</button> <button id="btnSequenceSave" class="btn btn-primary">Salvar sequência</button> <button id="btnSequenceDelete" class="btn btn-xs">Excluir sequência</button></div>
-          <p id="sequenceMessage" role="status"></p><div id="sequenceBlocks"></div>
+          <div class="sequence-canvas-top"><span id="sequenceDuration"></span><span id="sequenceZoom">100%</span><button id="btnSequenceUndo" class="btn btn-xs" title="Ctrl+Z" aria-label="Desfazer">↶</button><button id="btnSequenceRedo" class="btn btn-xs" title="Ctrl+Y" aria-label="Refazer">↷</button></div>
+          <select id="sequenceClipSelect" hidden aria-label="Clipe selecionado"></select>
+          <div id="sequenceBlocks"></div>
+          <p id="sequenceMessage" role="status"></p>
+          <div class="sequence-keyboard-hint">Arraste o fundo para navegar · Ctrl+roda: zoom · Alt+↑↓: mover · Ctrl+D: duplicar · Delete: remover</div>
         </div>
       </div>
       <footer>
-        <button id="btnSequenceStart" class="btn btn-primary">Iniciar</button><button id="btnSequenceAdvance" class="btn" disabled>Avançar</button><button id="btnSequenceStop" class="btn">Parar sequência</button><button id="btnSequenceRestart" class="btn">Reiniciar / substituir</button><button id="btnSequencePreview" class="btn">Ouvir tudo no monitor</button>
-        <div class="sequence-execution"><span id="sequenceStatus" role="status"></span><span id="sequenceNext"></span><span id="sequenceBranchesStatus"></span></div>
+        <button id="btnSequencePreview" class="btn btn-primary">▶ Ouvir fluxo</button>
+        <button id="btnSequenceStart" class="btn">Transmitir</button>
+        <button id="btnSequenceAdvance" class="btn" disabled>⚡ Avançar</button>
+        <button id="btnSequenceStop" class="btn">■ Parar</button>
+        <span id="sequenceStatus" role="status"></span>
+        <div class="sequence-execution"><span id="sequenceNext"></span><span id="sequenceBranchesStatus"></span><span id="sequenceCapability"></span></div>
       </footer>
     </section>
   </div>
@@ -758,6 +782,7 @@
   <script src="editor-timeline.js"></script>
   <script src="editor.js"></script>
   <script src="voice-profiles.js"></script>
+  <script src="sequence-canvas.js"></script>
   <script src="sequences.js"></script>
   <script src="collections.js"></script>
   <script src="imports.js"></script>
