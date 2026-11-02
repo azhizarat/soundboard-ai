@@ -177,7 +177,7 @@
         <button id="btnImportVinheta" class="btn btn-vinheta" title="Importar efeitos/músicas direto para a categoria 'Vinhetas' (sem associar a nenhuma pessoa)">
           🎵<span class="btn-extra-text"> +</span> Vinheta
         </button>
-        <label for="folderImportMode" class="folder-import-mode"><span class="field-caption">Pasta como</span>
+        <label for="folderImportMode" class="folder-import-mode"><span class="field-caption">Pasta:</span>
           <select id="folderImportMode" title="Modo usado ao importar pastas">
             <option value="audio">Áudios com IA</option>
             <option value="vinheta">Vinhetas sem pessoa</option>
@@ -192,6 +192,10 @@
         <select id="editDraftSelect" title="Edições preservadas" aria-label="Edições preservadas"><option value="">Edições preservadas</option></select>
         <button id="btnResumeEdit" class="btn">Retomar edição</button>
       </div>
+    <div id="quickImportBar" class="quick-import-bar hidden">
+      <span>Pastas detectadas:</span>
+      <div id="quickImportChips" class="quick-chips"></div>
+    </div>
     </section>
     <nav class="operation-bar" aria-label="Área de trabalho e saída">
       <div class="workspace-tabs" role="group" aria-label="Área de trabalho">
@@ -202,11 +206,29 @@
       <button id="btnCollectionEdit" class="btn">Editar coleções</button>
       <label class="toggle-chip" title="Mudar o modo interrompe sons e preparações anteriores."><input id="rehearsalToggle" type="checkbox"> Ensaio · só monitor</label>
       <button id="btnOperationStop" class="btn btn-danger" hidden>Parar tudo agora</button>
-      <div class="operation-feedback">
-      <span id="operationStatus" class="operation-status" role="status">Verificando saída…</span>
-      <span id="collectionConflicts" role="alert"></span>
-      <span id="collectionMessage" role="status"></span>
+    <details id="importQueue" class="import-results">
+      <summary id="importQueueToggle" title="Abrir fila e histórico de importação">Importações <span id="importQueueCount"></span><span aria-hidden="true">⌄</span></summary>
+      <div class="import-queue-content">
+      <div class="queue-panel-heading"><strong>Fila de importação</strong><button type="button" id="btnCloseImportQueue" class="btn-clear" aria-label="Fechar fila de importação">✕</button></div>
+      <p id="importDropHint">Arraste arquivos ou pastas para esta janela.</p>
+      <div class="import-job-actions">
+        <label for="importQueueMode">Importar como</label><select id="importQueueMode"><option value="audio">Áudios / falas</option><option value="vinheta">Vinhetas / sons</option></select>
+        <button id="btnQueueAddFiles" class="btn btn-secondary btn-xs">Adicionar arquivos…</button>
+        <button id="btnQueueAddFolder" class="btn btn-secondary btn-xs">Adicionar pasta…</button>
       </div>
+      <label><input id="importAutoAnalyze" type="checkbox" checked> Analisar com IA após importar</label>
+      <details class="import-batch-panel"><summary>Editar metadados em lote</summary>
+      <div class="import-batch">
+        <label>Categoria <input id="importBatchCategory" placeholder="Sem alteração"></label>
+        <label>Título <input id="importBatchTitle" placeholder="Sem alteração"></label>
+        <label>Tags <input id="importBatchTags" placeholder="Separadas por vírgula"></label>
+        <button id="btnImportBatchApply" class="btn btn-xs btn-secondary">Aplicar aos selecionados</button>
+      </div>
+      </details>
+      <p id="importQueueMessage" role="status"></p><div id="importQueueItems"></div>
+      </div>
+    </details>
+
     </nav>
     <details id="collectionEditor" class="collection-editor">
       <summary>Organizar coleções <span class="disclosure-hint">Clique para recolher</span></summary>
@@ -260,33 +282,11 @@
     </div>
 
     <!-- Discovered 'separados' quick-import banner -->
-    <details id="importQueue" class="import-results">
-      <summary>Importações <span id="importQueueCount"></span><span class="disclosure-hint">Ver fila e histórico</span></summary>
-      <p id="importDropHint">Arraste arquivos ou pastas para esta janela.</p>
-      <div class="import-job-actions">
-        <label for="importQueueMode">Importar como</label><select id="importQueueMode"><option value="audio">Áudios / falas</option><option value="vinheta">Vinhetas / sons</option></select>
-        <button id="btnQueueAddFiles" class="btn btn-secondary btn-xs">Adicionar arquivos…</button>
-        <button id="btnQueueAddFolder" class="btn btn-secondary btn-xs">Adicionar pasta…</button>
-      </div>
-      <label><input id="importAutoAnalyze" type="checkbox" checked> Analisar com IA após importar</label>
-      <details class="import-batch-panel"><summary>Editar metadados em lote</summary>
-      <div class="import-batch">
-        <label>Categoria <input id="importBatchCategory" placeholder="Sem alteração"></label>
-        <label>Título <input id="importBatchTitle" placeholder="Sem alteração"></label>
-        <label>Tags <input id="importBatchTags" placeholder="Separadas por vírgula"></label>
-        <button id="btnImportBatchApply" class="btn btn-xs btn-secondary">Aplicar aos selecionados</button>
-      </div>
-      </details>
-      <p id="importQueueMessage" role="status"></p><div id="importQueueItems"></div>
-    </details>
     <details id="importResults" class="import-results hidden">
       <summary>Resultado da importação</summary>
       <pre id="importResultsText"></pre>
     </details>
-    <div id="quickImportBar" class="quick-import-bar hidden">
-      <span>✨ Pastas do separador de vozes detectadas em <b>Videos</b>:</span>
-      <div id="quickImportChips" class="quick-chips"></div>
-    </div>
+
 
     <!-- Main Workspace -->
     <div class="workspace">
@@ -332,10 +332,10 @@
             <label class="sort-wrap" title="Escolha a ordem em que os botões aparecem no grid">
               <span class="sort-label">Ordenar:</span>
               <select id="sortSelect">
-                <option value="newest" selected>🕒 Mais Recentes Primeiro</option>
-                <option value="most_played">🔥 Mais Tocados</option>
-                <option value="alpha">🔤 Nome (A → Z)</option>
-                <option value="shortest">⏱️ Duração (Menor → Maior)</option>
+                <option value="newest" selected>Mais recentes</option>
+                <option value="most_played">Mais tocados</option>
+                <option value="alpha">Nome (A → Z)</option>
+                <option value="shortest">Menor duração</option>
               </select>
             </label>
             <span id="clipCountBadge">0 áudios</span>
@@ -372,6 +372,11 @@
           <input type="range" id="npLiveVolume" min="0.1" max="2.5" step="0.05" value="1" />
           <span id="npLiveVolVal" class="np-vol-label">100%</span>
         </div>
+      </div>
+      <div class="operation-feedback">
+      <span id="operationStatus" class="operation-status" role="status">Verificando saída…</span>
+      <span id="collectionConflicts" role="alert"></span>
+      <span id="collectionMessage" role="status"></span>
       </div>
       <div class="np-shortcuts">
         <span>Parar tudo: <b>Ctrl+Shift+S</b></span>

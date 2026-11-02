@@ -20,7 +20,8 @@
         if(previous&&previous.status===job.status&&job.status==='awaiting_window'&&previous.row.contains(dom.activeElement))continue;
         const row=element('article',undefined,'import-job');row.dataset.importId=job.id;
         const head=element('div',undefined,'import-job-heading'),check=element('input');check.type='checkbox';check.checked=selected.has(job.id);check.setAttribute('aria-label',`Selecionar ${job.source}`);check.onchange=()=>select(job.id,check.checked);
-        head.append(check,element('strong',job.source),element('span',labels[job.status]||job.status));row.append(head);
+        const source=String(job.source||''),name=element('strong',source.split(/[\\/]/).filter(Boolean).pop()||source);name.title=source;
+        head.append(check,name,element('span',labels[job.status]||job.status));row.append(head);
         const progress=element('progress');progress.max=100;progress.value=job.progress||0;progress.setAttribute('aria-label','Progresso de importação');row.append(progress);
         const actions=element('div',undefined,'import-job-actions');
         if(['queued','probing','running','awaiting_window'].includes(job.status))actions.append(button('Cancelar','cancel',()=>cancel(job.id)));
@@ -41,7 +42,7 @@
         }
         if(job.error)row.append(element('p',job.error,'import-job-error'));
         for(const warning of job.warnings||[])row.append(element('small',warning));
-        const history=element('details'),summary=element('summary','Histórico');history.append(summary,element('p',(job.history||[]).map(item=>`${new Date(item.at*1000).toLocaleTimeString()} ${labels[item.status]||item.status}`).join(' → ')));row.append(history);
+        const history=element('details'),summary=element('summary','Histórico e origem');history.append(summary,element('p',source),element('p',(job.history||[]).map(item=>`${new Date(item.at*1000).toLocaleTimeString()} ${labels[item.status]||item.status}`).join(' → ')));row.append(history);
         history.open=previous?.history.open||false;
         if(previous)previous.row.replaceWith(row);else list.append(row);
         rows.set(job.id,{row,history,signature,status:job.status});
@@ -73,6 +74,11 @@
       options.updated?.();
     }
     async function initialize(){
+      const dismiss=()=>{$('importQueue').open=false;$('importQueueToggle')?.focus();};
+      $('btnCloseImportQueue').onclick=dismiss;
+      $('importQueue').addEventListener('keydown',event=>{if(event.key==='Escape'){
+        event.preventDefault();event.stopPropagation();dismiss();
+      }});
       $('btnImportBatchApply').onclick=batch;
       $('importAutoAnalyze').onchange=()=>operation('set_import_options',$('importAutoAnalyze').checked);
       const admit=folder=>{const vinheta=$('importQueueMode').value==='vinheta';return operation('enqueue_import',null,vinheta,vinheta?'Vinhetas':null,folder,$('importAutoAnalyze').checked);};

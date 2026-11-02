@@ -118,6 +118,7 @@
           `TRANSMISSÃO · Saída: ${status.cable_device_name||status.cable_device_id||'não selecionada'} · Monitor: ${status.monitor_device_name||status.monitor_device_id||'não selecionado'}`;
         const states={idle:'Pronto',playing:'Tocando',waiting:'Em espera',manual:'Aguardando avanço',preparing:'Preparando',completed:'Concluído',cancelled:'Parado',failed:'Falhou'};
         $('operationStatus').textContent=status.route_error||`${route} · ${status.instances.length} disparo(s) de coleção · ${states[status.sequence?.state]||'Pronto'}${status.isolated?'':' · Sem isolamento real entre monitor e transmissão'}`;
+        $('operationStatus').title=$('operationStatus').textContent;
         $('operationStatus').classList.toggle('operation-error',!!status.route_error);
         const active=$('operationInstances');active.replaceChildren();
         for(const instance of status.instances){const doc=snapshot.collections.find(c=>c.id===instance.collection_id), pad=doc?.pads.find(p=>p.id===instance.pad_id);
