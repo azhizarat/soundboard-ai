@@ -31,7 +31,8 @@ function fixture() {
   function node() {
     return {value:'',textContent:'',children:[],dataset:{},clientWidth:900,checked:false,
       classList:{toggle(){}},replaceChildren(){this.children=[];},appendChild(child){this.children.push(child);},
-      get options(){return this.children;},getContext(){return null;}};
+      get options(){return this.children;},getContext(){return null;},focus(){},setPointerCapture(){},
+      getBoundingClientRect(){return {left:0,top:0,width:900,height:154};},style:{}};
   }
   const document={getElementById:id=>elements[id]||=(node()),createElement:node};
   let model={source_samples:96000,spans:[[0,96000]],source_transcript:{alignment:'aligned',words:[
@@ -57,6 +58,34 @@ function fixture() {
   const controller=editor.create(document,()=>api,{persist:async()=>({ok:true}),transcriptChanged:text=>synced.push(text)});
   return {elements,controller,calls,synced,api,setFail:value=>{fail=value;}};
 }
+
+function pointer(x,y=75,extra={}) {return {clientX:x,clientY:y,pointerId:1,button:0,preventDefault(){},...extra};}
+test('wave click and scrub position cursor without destroying selection; handles adjust only one edge',async()=>{
+ const f=fixture();await f.controller.open('one');f.controller.setSelection([24000,72000]);
+ const c=f.elements.editorWaveform;
+ c.onpointerdown(pointer(450));c.onpointerup(pointer(450));
+ assert.deepEqual(f.controller.selection,[24000,72000]);
+ assert.equal(f.controller.cursor,48000);
+ c.onpointerdown(pointer(225));c.onpointermove(pointer(270));c.onpointerup(pointer(270));
+ assert.deepEqual(f.controller.selection,[28800,72000]);assert.equal(f.controller.cursor,48000);
+ c.onpointerdown(pointer(450));c.onpointermove(pointer(540));c.onpointerup(pointer(540));
+ assert.equal(f.controller.cursor,57600);assert.deepEqual(f.controller.selection,[28800,72000]);f.controller.close();
+});
+test('shift drag selects and alt drag moves selection relatively without changing its length',async()=>{
+ const f=fixture();await f.controller.open('one');const c=f.elements.editorWaveform;
+ c.onpointerdown(pointer(225,75,{shiftKey:true}));c.onpointermove(pointer(450));c.onpointerup(pointer(450));
+ assert.deepEqual(f.controller.selection,[24000,48000]);
+ c.onpointerdown(pointer(330,75,{altKey:true}));c.onpointermove(pointer(420));c.onpointerup(pointer(420));
+ assert.deepEqual(f.controller.selection,[33600,57600]);f.controller.close();
+});
+test('cursor keyboard and I/O marks work without resetting cursor; input arrows stay native',async()=>{
+ const f=fixture();await f.controller.open('one');
+ const key=(key,extra={})=>f.elements.integratedEditor.onkeydown({key,target:{tagName:'CANVAS'},preventDefault(){},stopPropagation(){},...extra});
+ key('ArrowRight');assert.equal(f.controller.cursor,480);
+ key('i');assert.equal(f.controller.selection[0],480);
+ key('ArrowRight',{shiftKey:true});key('o');assert.equal(f.controller.selection[1],5280);
+ assert.equal(f.controller.cursor,5280);f.controller.close();
+});
 
 test('text click only selects; corrected block is selected as whole on subsequent edits',async()=>{
   const f=fixture();await f.controller.open('one');
@@ -112,21 +141,21 @@ test('montage mutation stops only owned preview and ignores its late poll',async
   await f.controller.run('remove',{interval:[0,48000]});
   f.finishPoll();await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(f.stopped,['own-monitor']);
-  f.elements.editorMarkStart.onclick();assert.equal(f.controller.selection[0],0);
+  f.elements.integratedEditor.onkeydown({key:'i',target:{tagName:'CANVAS'},preventDefault(){}});assert.equal(f.controller.selection[0],0);
 });
 
 test('failed montage command keeps preview on original mapping; explicit stop ignores late poll',async t=>{
   const f=await playbackFixture(t);f.setFail(true);
   assert.equal((await f.controller.run('remove',{interval:[0,48000]})).ok,false);
   assert.deepEqual(f.stopped,[]);f.finishPoll();await new Promise(resolve=>setImmediate(resolve));
-  f.elements.editorMarkStart.onclick();assert.equal(f.controller.selection[0],12000);
+  f.elements.integratedEditor.onkeydown({key:'i',target:{tagName:'CANVAS'},preventDefault(){}});assert.equal(f.controller.selection[0],12000);
   await f.elements.editorStop.onclick();assert.deepEqual(f.stopped,['own-monitor']);
 });
 
 test('explicit stop invalidates an already outstanding poll',async t=>{
   const f=await playbackFixture(t);await f.elements.editorStop.onclick();
   f.finishPoll();await new Promise(resolve=>setImmediate(resolve));
-  f.elements.editorMarkStart.onclick();assert.equal(f.controller.selection[0],0);
+  f.elements.integratedEditor.onkeydown({key:'i',target:{tagName:'CANVAS'},preventDefault(){}});assert.equal(f.controller.selection[0],0);
   assert.deepEqual(f.stopped,['own-monitor']);
 });
 
@@ -149,4 +178,75 @@ test('preview that starts after closing is stopped by its own id',async()=>{
   while(!resolvePreview)await new Promise(resolve=>setImmediate(resolve));
   f.controller.close();resolvePreview({ok:true,play_id:'old-preview',ranges:[[0,24000]]});
   await pending;assert.deepEqual(stopped,['old-preview']);
+});
+
+
+test('agulha faz seek só na própria sessão, com offset relativo após corte e preserva seleção',async()=>{
+ const f=fixture();await f.controller.open('one');const seeks=[],stops=[];
+ await f.controller.run('remove',{interval:[0,48000]});
+ f.api.preview_clip_edit=async()=>({ok:true,play_id:'editor-only',ranges:[[0,48000]]});
+ f.api.stop_editor_preview=async id=>{stops.push(id);};
+ f.api.seek_playback=async (position,id)=>{seeks.push([position,id]);return {ok:true};};
+ f.api.get_editor_playback=async()=>({playing:false});
+ f.controller.setSelection([48000,96000]);
+ const c=f.elements.editorWaveform;c.onpointerdown(pointer(675));c.onpointerup(pointer(675));
+ await f.controller.preview('result',true);await f.controller.settleSeek();
+ assert.deepEqual(seeks,[[.5,'editor-only']]);assert.deepEqual(f.controller.selection,[48000,96000]);
+ c.onpointerdown(pointer(810));c.onpointerup(pointer(810));await f.controller.settleSeek();
+ assert.deepEqual(seeks.at(-1),[.8,'editor-only']);f.controller.close();
+ assert.deepEqual(stops,['editor-only']);
+});
+
+test('seek pendente não vaza para outro clipe nem usa sessão global após fechar',async()=>{
+ const f=fixture();await f.controller.open('one');const seeks=[];let finish;
+ f.api.preview_clip_edit=async()=>({ok:true,play_id:'old',ranges:[[0,96000]]});
+ f.api.stop_editor_preview=async()=>({ok:true});
+ f.api.get_editor_playback=async()=>({playing:false});
+ f.api.seek_playback=(position,id)=>{seeks.push([position,id]);return new Promise(resolve=>finish=resolve);};
+ await f.controller.preview();const c=f.elements.editorWaveform;
+ c.onpointerdown(pointer(400));c.onpointerup(pointer(400));
+ await new Promise(resolve=>setImmediate(resolve));
+ c.onpointerdown(pointer(600));c.onpointerup(pointer(600));
+ f.controller.close();await f.controller.open('two');finish({ok:true});await f.controller.settleSeek();
+ assert.equal(seeks.length,1);assert.equal(seeks[0][1],'old');f.controller.close();
+});
+
+test('atualizar transcrição alinhada revela palavras sem apagar correção em digitação',async()=>{
+ const f=fixture();await f.controller.open('one');
+ assert.equal(f.elements.editorWords.hidden,false);assert.equal(f.elements.editorCorrectionRow.hidden,true);
+ f.elements.editorEditText.onclick();f.elements.editorCorrection.value='correção pendente';f.elements.editorCorrection.oninput();
+ await f.controller.refresh();assert.equal(f.elements.editorCorrection.value,'correção pendente');
+ assert.equal(f.elements.editorCorrectionRow.hidden,false);assert.equal(f.elements.editorWords.hidden,true);
+ f.controller.close();
+});
+
+
+test('resposta tardia ao parar prévia antiga não perde ownership da prévia mais nova',async()=>{
+ const f=fixture();await f.controller.open('one');let pendingStop;const stops=[];let serial=0;
+ f.api.preview_clip_edit=async()=>({ok:true,play_id:'p'+(++serial),ranges:[[0,96000]]});
+ f.api.stop_editor_preview=id=>{stops.push(id);return id==='p1'?new Promise(resolve=>pendingStop=resolve):Promise.resolve({ok:true});};
+ f.api.get_editor_playback=async()=>({playing:false});
+ await f.controller.preview();const older=f.controller.preview();await new Promise(resolve=>setImmediate(resolve));
+ await f.controller.preview();pendingStop({ok:true});await older;await f.elements.editorStop.onclick();
+ assert.equal(serial,2);assert.deepEqual(stops,['p1','p2']);f.controller.close();
+});
+
+test('poll iniciado durante seek não move agulha para status anterior recebido depois',async()=>{
+ const f=fixture();await f.controller.open('one');let finishSeek,finishPoll;
+ f.api.preview_clip_edit=async()=>({ok:true,play_id:'own',ranges:[[0,96000]]});
+ f.api.stop_editor_preview=async()=>({ok:true});
+ f.api.seek_playback=()=>new Promise(resolve=>finishSeek=resolve);
+ f.api.get_editor_playback=()=>new Promise(resolve=>finishPoll=resolve);
+ await f.controller.preview();f.elements.editorWaveform.onpointerdown(pointer(675));f.elements.editorWaveform.onpointerup(pointer(675));
+ while(!finishPoll)await new Promise(resolve=>setTimeout(resolve,5));
+ finishSeek({ok:true});await f.controller.settleSeek();finishPoll({playing:true,position:.1});
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(f.controller.cursor,72000);f.controller.close();
+});
+
+
+test('selecionar palavra preserva seu elemento para duplo clique e não reconstrói texto a cada gesto',async()=>{
+ const f=fixture();await f.controller.open('one');const word=f.elements.editorWords.children[0];
+ word.onclick({shiftKey:false});assert.equal(f.elements.editorWords.children[0],word);
+ word.ondblclick();assert.equal(f.elements.editorCorrectionRow.hidden,false);assert.equal(f.elements.editorCorrection.value,'um');
+ f.controller.close();
 });

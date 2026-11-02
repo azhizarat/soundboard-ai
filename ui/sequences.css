@@ -12,3 +12,103 @@
 .sequence-adders{display:flex;gap:6px;flex-wrap:wrap;padding:6px 0}.sequence-branches{display:flex;gap:10px;overflow-x:auto;margin:8px 0}.sequence-branch{flex:1;min-width:250px;border:1px dashed #52698a;border-radius:8px;padding:10px;background:#171e2c}.sequence-branch>.sequence-block-list{margin-top:10px}.sequence-branch .sequence-block-heading strong{flex-basis:100%}.sequence-active{border-color:#49d4b4;box-shadow:0 0 0 2px #49d4b455}.sequence-warning{color:#ffd17c;font-size:12px;margin-top:8px}
 #sequenceMessage{min-height:22px;color:#ffd17c;margin:8px 0}#sequenceCapability,#sequenceDuration{font-size:12px;color:#b8c8df;margin:7px 0}.sequence-execution{flex-basis:100%;display:flex;flex-wrap:wrap;gap:10px;font-size:13px}#sequenceStatus{font-weight:700;color:#65e1c3}#sequenceBranchesStatus,#sequenceNext{color:#b9c6dc}
 @media(max-width:800px){.sequence-workspace{grid-template-columns:150px minmax(0,1fr)}.sequence-modal{width:98vw;height:96vh}.sequence-branch{min-width:210px}.sequence-library-panel{padding:8px}}
+
+/* Roteiro compacto e um único inspetor, sem repetir formulários por ocorrência. */
+#sequencePanel .sequence-workspace { grid-template-columns: 190px minmax(0, 1fr); min-height: 0; }
+#sequencePanel .sequence-editor-area { min-width: 0; scroll-padding-top: 48px; }
+#sequencePanel .sequence-library-panel { gap: 9px; }
+#sequencePanel .sequence-library-panel h3 { font-size: 12px; }
+#sequencePanel .sequence-metadata { gap: 12px; }
+#sequencePanel .sequence-metadata label { min-width: 120px; }
+#sequencePanel .sequence-metadata label:first-child { flex: 2; }
+#sequencePanel #sequenceMessage { min-height: 0; font-size: 11px; line-height: 1.5; }
+#sequencePanel #sequenceMessage:empty { display: none; }
+#sequencePanel #sequenceCapability, #sequencePanel #sequenceDuration { display: inline-block; margin: 6px 12px 8px 0; font-size: 11px; }
+#sequencePanel .sequence-editor-area > label { display: block; font-size: 11px; color: var(--text-muted); }
+#sequencePanel #sequenceClipSelect { margin: 5px 0 10px; font-size: 12px; }
+#sequenceBlocks { margin-top: 12px; }
+#sequenceBlocks > .sequence-adders { position: sticky; top: -1px; z-index: 3; margin: 0 0 10px; padding: 8px 0; background: var(--bg-panel, #171b27); border-bottom: 1px solid var(--border-subtle, #394055); }
+#sequenceBlocks .sequence-adders .btn { min-height: 29px; padding: 5px 9px; font-size: 11px; }
+#sequenceBlocks .sequence-composition { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 14px; align-items: start; }
+#sequenceBlocks .sequence-block-list { gap: 7px; min-height: 42px; padding: 0; }
+#sequenceBlocks .sequence-row { position: relative; padding: 0; border-radius: 8px; min-width: 0; background: var(--bg-card, #232b3b); border: 1px solid var(--border-subtle, #46506a); }
+#sequenceBlocks .sequence-row.sequence-selected { border-color: #719ada; box-shadow: 0 0 0 1px #719ada55; }
+#sequenceBlocks .sequence-row.sequence-active { border-color: #49d4b4; box-shadow: inset 3px 0 #49d4b4; }
+#sequenceBlocks .sequence-select { display: flex; gap: 10px; align-items: center; width: 100%; min-width: 0; padding: 11px 12px; border: 0; border-radius: 7px; background: transparent; color: var(--text-main, #edf2fd); text-align: left; cursor: pointer; }
+#sequenceBlocks .sequence-select:hover { background: #ffffff05; }
+#sequenceBlocks .sequence-select:focus-visible { outline: 2px solid #8ebcff; outline-offset: -3px; }
+#sequenceBlocks .sequence-order { flex: 0 0 23px; font-size: 11px; color: var(--text-muted, #a9b8d2); text-align: center; }
+#sequenceBlocks .sequence-row-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+#sequenceBlocks .sequence-row-copy strong { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+#sequenceBlocks .sequence-row-copy small { font-size: 10px; color: var(--text-muted, #a9b8d2); }
+#sequenceBlocks .sequence-revision-badge { display: inline-block; font-size: 10px; color: #d9bc83; margin: -3px 10px 9px 45px; }
+#sequenceBlocks .sequence-branches { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; padding: 0 8px 8px; gap: 7px; overflow: visible; }
+#sequenceBlocks .sequence-branch { min-width: 0; padding: 8px; background: var(--bg-dark, #171e2c); border: 1px solid var(--border-subtle, #46506a); border-radius: 7px; }
+#sequenceBlocks .sequence-branch-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; color: var(--text-muted, #a9b8d2); font-size: 10px; }
+#sequenceBlocks .sequence-branch .sequence-select { padding: 8px 5px; gap: 4px; }
+#sequenceBlocks .sequence-branch .sequence-order { flex-basis: 17px; }
+#sequenceBlocks .sequence-branch .sequence-revision-badge { margin-left: 26px; }
+#sequenceBlocks .sequence-branch .sequence-adders { margin-top: 7px; padding: 0; gap: 4px; }
+#sequenceBlocks .sequence-branch .sequence-adders .btn { font-size: 10px; padding: 4px 6px; min-height: 25px; }
+#sequenceBlocks .sequence-empty { padding: 18px 12px; font-size: 12px; line-height: 1.6; color: var(--text-muted, #a9b8d2); border: 1px dashed var(--border-subtle, #46506a); border-radius: 7px; }
+#sequenceBlocks .sequence-branch .sequence-empty { font-size: 10px; padding: 10px 6px; }
+#sequenceBlocks .sequence-inspector { position: sticky; top: 49px; min-width: 0; padding: 14px; border: 1px solid var(--border-subtle, #46506a); border-radius: 9px; background: var(--bg-dark, #171e2c); }
+#sequenceBlocks .sequence-inspector > small { color: var(--text-muted, #a9b8d2); font-size: 10px; }
+#sequenceBlocks .sequence-inspector h3 { font-size: 13px; line-height: 1.5; margin: 5px 0 12px; overflow-wrap: anywhere; }
+#sequenceBlocks .sequence-inspector p { font-size: 11px; line-height: 1.6; margin: 10px 0; color: var(--text-muted, #a9b8d2); }
+#sequenceBlocks .sequence-inspector-actions { display: flex; flex-wrap: wrap; gap: 5px; padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle, #46506a); }
+#sequenceBlocks .sequence-inspector .btn { min-height: 28px; font-size: 11px; padding: 5px 8px; white-space: normal; }
+#sequenceBlocks .sequence-inspector-actions .btn { flex: 1 1 42%; }
+#sequenceBlocks .sequence-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0; }
+#sequenceBlocks .sequence-inspector label { display: flex; flex-direction: column; gap: 5px; color: var(--text-muted, #a9b8d2); font-size: 11px; }
+#sequenceBlocks .sequence-inspector input { width: 100%; min-width: 0; font-size: 12px; padding: 7px; }
+#sequenceBlocks .sequence-reference { border-top: 1px solid var(--border-subtle, #46506a); margin-top: 14px; padding-top: 12px; }
+#sequenceBlocks .sequence-reference small { color: var(--text-muted, #a9b8d2); font-size: 10px; }
+#sequenceBlocks .sequence-keyboard-hint { font-size: 10px; line-height: 1.7; margin: 12px 0 2px; color: var(--text-muted, #a9b8d2); }
+@media (max-width: 1000px) {
+  #sequencePanel .sequence-workspace { grid-template-columns: 155px minmax(0, 1fr); }
+  #sequenceBlocks .sequence-composition { grid-template-columns: minmax(0, 1fr) 220px; gap: 10px; }
+  #sequenceBlocks .sequence-branches { grid-template-columns: minmax(0, 1fr); }
+  #sequenceBlocks .sequence-inspector { padding: 11px; }
+}
+@media (max-width: 720px) {
+  #sequencePanel .sequence-workspace { grid-template-columns: 130px minmax(0, 1fr); }
+  #sequenceBlocks .sequence-composition { grid-template-columns: minmax(0, 1fr); }
+  #sequenceBlocks .sequence-inspector { position: static; }
+  #sequenceBlocks .sequence-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  #sequenceBlocks .sequence-inspector-actions .btn { flex: 0 1 auto; }
+}
+
+/* Metadados e comandos cabem em três linhas; o roteiro começa imediatamente abaixo. */
+#sequencePanel .sequence-editor-area { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-content: start; align-items: center; column-gap: 12px; row-gap: 5px; padding: 12px 16px; }
+#sequencePanel .sequence-metadata { grid-column: 1 / -1; gap: 12px; }
+#sequencePanel .sequence-metadata label { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 7px; font-size: 11px; }
+#sequencePanel .sequence-metadata input { padding: 6px 8px; font-size: 12px; }
+#sequencePanel #sequenceCapability, #sequencePanel #sequenceDuration { margin: 0; font-size: 10px; line-height: 1.5; }
+#sequencePanel #sequenceDuration { text-align: right; }
+#sequencePanel label[for="sequenceClipSelect"] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+#sequencePanel #sequenceClipSelect { margin: 0; min-height: 30px; font-size: 11px; }
+#sequencePanel #sequenceClipSelect + div { display: flex; flex-wrap: wrap; gap: 5px; }
+#sequencePanel #sequenceClipSelect + div .btn { min-height: 30px; padding: 5px 8px; font-size: 11px; }
+#sequencePanel #sequenceMessage, #sequencePanel #sequenceBlocks { grid-column: 1 / -1; }
+#sequencePanel #sequenceMessage { margin: 3px 0; }
+#sequencePanel #sequenceBlocks { margin-top: 1px; }
+#sequenceBlocks > .sequence-adders { margin-bottom: 0; padding: 6px 0; }
+#sequenceBlocks .sequence-keyboard-hint { position: sticky; top: 42px; z-index: 2; margin: 0 0 9px; padding: 4px 0 6px; background: var(--bg-panel, #171b27); font-size: 10px; line-height: 1.5; }
+#sequenceBlocks .sequence-inspector { top: 72px; }
+#sequenceBlocks .sequence-select { padding: 8px 10px; }
+#sequenceBlocks .sequence-row-copy { gap: 2px; width: 100%; }
+#sequenceBlocks .sequence-row-copy strong { line-height: 1.4; }
+#sequenceBlocks .sequence-row-copy small { line-height: 1.4; }
+#sequenceBlocks .sequence-revision-badge { position: absolute; right: 9px; top: 30px; margin: 0; font-size: 9px; max-width: 90px; line-height: 1.4; }
+#sequenceBlocks .sequence-row:has(> .sequence-revision-badge) > .sequence-select small { padding-right: 92px; }
+#sequenceBlocks .sequence-branch .sequence-revision-badge { right: 5px; top: 28px; margin: 0; max-width: 78px; font-size: 8px; }
+#sequenceBlocks .sequence-branch .sequence-row:has(> .sequence-revision-badge) > .sequence-select small { padding-right: 80px; }
+@media(max-width:900px) {
+  #sequencePanel .sequence-editor-area { column-gap: 7px; padding: 10px; }
+  #sequencePanel .sequence-metadata label { display: flex; flex-direction: column; align-items: stretch; gap: 3px; }
+  #sequencePanel #sequenceClipSelect, #sequencePanel #sequenceClipSelect + div { grid-column: 1 / -1; }
+  #sequencePanel #sequenceCapability, #sequencePanel #sequenceDuration { grid-column: 1 / -1; text-align: left; }
+  #sequencePanel #sequenceDuration { margin-bottom: 2px; }
+  #sequenceBlocks .sequence-keyboard-hint { position: static; }
+}

@@ -5,9 +5,20 @@
     const el = id => document.getElementById(id);
     const schedule = callbacks.schedule || setTimeout;
     const unschedule = callbacks.unschedule || clearTimeout;
-    let clipId = null, jobId = null, timer = null, epoch = 0, proposal = null;
+    let clipId = null, jobId = null, timer = null, epoch = 0, proposal = null, lastJob = null;
+    const notified = new Set();
     const labels = {queued: 'Na fila', running: 'Analisando', ready: 'Concluído', no_speech: 'Nenhuma fala detectada', failed: 'Falhou', cancelled: 'Cancelado'};
     const status = text => {el('analysisStatus').textContent = text;};
+    async function notifyApplied(job, force = false) {
+      if (!callbacks.applied) return false;
+      const id = job?.analysis_id || jobId;
+      if (!force && notified.has(id)) return true;
+      notified.add(id);
+      try {
+        await callbacks.applied({clipId, analysisId: id, stage: job?.stage || job?.result?.stage || el('analysisStage').value});
+      } catch (error) {notified.delete(id); throw error;}
+      return true;
+    }
     async function poll() {
       const opened = epoch;
       if (!jobId || !clipId) return;
@@ -15,6 +26,7 @@
         const job = await bridge().get_analysis_job(jobId);
         if (opened !== epoch) return;
         if (!job.ok) {status(job.error); return;}
+        lastJob = job;
         const result = job.result || {};
         status(`${labels[job.status] || job.status}${job.error ? ': ' + (job.error.message || job.error) : ''}`);
         el('analysisRuntime').textContent = [result.model, result.model_version, result.device, result.compute_type,
@@ -28,6 +40,11 @@
           el('btnAcceptAnalysis').hidden = true;
           if (job.application?.state === 'obsolete') status('Resultado obsoleto: a edição ou o pedido mudou. Solicite outra análise.');
           el('btnLoadAnalysis').hidden = job.application?.state !== 'applied';
+          if (job.application?.state === 'applied') {
+            // Atualiza somente a projeção do editor; polling nunca grava campos humanos.
+            await notifyApplied(job);
+            if (opened !== epoch) return;
+          }
         }
         if (['queued', 'running'].includes(job.status)) timer = schedule(poll, 500);
       } catch (error) { if (opened === epoch) status(error.message || String(error)); }
@@ -37,11 +54,12 @@
       const opened = epoch, target = clipId;
       const saved = await callbacks.persist?.();
       if (opened !== epoch || saved?.ok === false) return;
-      const selected = el('analysisSelection').checked;
+      const stage = el('analysisStage').value || 'transcription';
+      const selected = stage === 'transcription' && el('analysisSelection').checked;
       if (el('analysisCurrent')) el('analysisCurrent').textContent = callbacks.currentText?.() ?? el('editTranscript')?.value ?? '';
-      const interval = selected ? [Math.round(Number(el('analysisStart').value) * 48000), Math.round(Number(el('analysisEnd').value) * 48000)] : null;
+      const interval = selected ? [...(callbacks.selection?.() || [Math.round(Number(el('analysisStart').value) * 48000), Math.round(Number(el('analysisEnd').value) * 48000)])] : null;
       try {
-        const result = await bridge().request_clip_analysis(target, el('analysisStage').value || 'transcription', interval, Number(el('analysisContext').value || 0), true);
+        const result = await bridge().request_clip_analysis(target, stage, interval, Number(el('analysisContext').value || 0), true);
         if (opened !== epoch) return;
         if (!result.ok) {status(result.error); return;}
         jobId = result.analysis_id;
@@ -54,14 +72,15 @@
         timer = schedule(poll, 0);
       } catch (error) {if (opened === epoch) status(error.message || String(error));}
     }
-    async function open(id, config = {}) {
+    async function open(id) {
       close();
       clipId = id;
       const opened = epoch;
-      for (const [key, element] of [['model', 'asrModel'], ['device', 'asrDevice'], ['beam_size', 'asrBeam'], ['hotwords', 'asrHotwords'], ['initial_prompt', 'asrPrompt']]) {
-        el(element).value = config['asr_' + key] ?? ({model: 'base', device: 'cuda', beam_size: 3}[key] || '');
-      }
       el('btnStartAnalysis').onclick = start;
+      for (const [id, stage] of [['analysisTranscribe', 'transcription'], ['analysisSpeakers', 'speakers'], ['analysisMetadata', 'metadata']]) {
+        const button = el(id);
+        if (button) button.onclick = () => {el('analysisStage').value = stage; return start();};
+      }
       el('btnCancelAnalysis').onclick = async () => {await bridge().cancel_analysis_job(jobId); await poll();};
       el('btnLoadAnalysis').onclick = async () => {
         try {
@@ -71,7 +90,7 @@
             status(saved?.error || 'Falha ao preservar a edição. O formulário foi mantido.');
             return;
           }
-          await callbacks.refresh?.();
+          if (!await notifyApplied(lastJob, true)) await callbacks.refresh?.();
         } catch (error) {if (opened === epoch) status(error.message || String(error));}
       };
       el('btnAcceptAnalysis').onclick = async () => {
@@ -80,15 +99,11 @@
         if (opened !== epoch || saved?.ok === false || !consent) return;
         const accepted = await bridge().accept_analysis_result(clipId, selectedJob, consent.accept_token);
         if (opened !== epoch) return;
-        if (accepted.ok) await callbacks.refresh?.();
+        if (accepted.ok) {
+          if (!await notifyApplied(lastJob)) await callbacks.refresh?.();
+          if (opened === epoch) {proposal = null; el('btnAcceptAnalysis').hidden = true; status('Resultado aplicado ao editor.');}
+        }
         else status(accepted.error || 'A edição mudou; solicite outra análise antes de substituir.');
-      };
-      el('btnSaveAsr').onclick = async () => {
-        const result = await bridge().save_app_config({asr_model: el('asrModel').value, asr_device: el('asrDevice').value,
-          asr_beam_size: Number(el('asrBeam').value), asr_hotwords: el('asrHotwords').value, asr_initial_prompt: el('asrPrompt').value});
-        if (opened !== epoch) return;
-        if (result.ok) {callbacks.configChanged?.(result.config); status('Configuração local salva. Nenhum modelo é baixado automaticamente.');}
-        else status(result.error);
       };
       el('btnAcceptAnalysis').hidden = true;
       el('btnLoadAnalysis').hidden = true;
@@ -108,7 +123,7 @@
         if (latest) {jobId = latest.analysis_id; await poll();}
       } catch (error) {if (opened === epoch) status(error.message || String(error));}
     }
-    function close() {epoch++; unschedule(timer); clipId = jobId = proposal = null;}
+    function close() {epoch++; unschedule(timer); clipId = jobId = proposal = lastJob = null; notified.clear();}
     return {open, close, start, poll};
   }
   if (typeof module !== 'undefined' && module.exports) module.exports = {create};

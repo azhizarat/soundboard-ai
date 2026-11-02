@@ -72,16 +72,17 @@ test('UI integrada expõe controles e não agenda áudio por timer frontend',()=
 
 function deferred(){let resolve;const promise=new Promise(done=>{resolve=done;});return {promise,resolve};}
 function fakeDocument(){
+  let activeElement=null;
   class Element{
     constructor(tag='div'){this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.value='';this.isConnected=true;this.classList={add(){},remove(){},toggle(){}};}
-    append(...items){this.children.push(...items);}
+    append(...items){for(const item of items){item.parentElement=this;this.children.push(item);}}
     replaceChildren(...items){this.children=items;}
     get firstChild(){return this.children[0];}
-    setAttribute(){} addEventListener(){} focus(){}
+    setAttribute(name,value){this[name]=value;} addEventListener(){} focus(){activeElement=this;}
   }
   const elements=new Map();
   return {getElementById(id){if(!elements.has(id))elements.set(id,new Element());return elements.get(id);},
-    createElement:tag=>new Element(tag),querySelectorAll:()=>[]};
+    createElement:tag=>new Element(tag),querySelectorAll:()=>[],get activeElement(){return activeElement;}};
 }
 function setup(){
   const documents={A:{...doc(),id:'A',name:'A',revision:4},B:{...doc(),id:'B',name:'B',revision:1}};
@@ -177,4 +178,48 @@ test('atualização assíncrona de referência nunca modifica ocorrência homôn
   pending.resolve({ok:true,occurrence:{...doc().blocks[0],revision_id:'new',interval:[0,24000]}});await updating;
   assert.equal(a.value().blocks[0].revision_id,'new');assert.equal(b.value().blocks[0].revision_id,'rev');
   assert.deepEqual(b.value().blocks[0].interval,[0,48000]);
+});
+
+function key(key,options={}){return {key,ctrlKey:false,metaKey:false,altKey:false,shiftKey:false,target:{tagName:'DIV'},preventDefault(){this.prevented=true;},stopPropagation(){this.stopped=true;},...options};}
+function descendants(element){return [element,...(element.children||[]).flatMap(descendants)];}
+test('roteiro longo mantém inserção antes dos blocos e edita apenas a seleção',async()=>{
+  const {documents,dom,controller}=setup();
+  documents.A.blocks.push({id:'wait',type:'wait',ms:120},{id:'manual',type:'manual'});
+  await controller.open('A');
+  const host=dom.getElementById('sequenceBlocks'),nodes=descendants(host);
+  assert.ok(nodes.indexOf(findAction(host,'add-play'))<nodes.findIndex(node=>node.dataset.blockId==='a'));
+  assert.equal(nodes.filter(node=>node.dataset.field==='start').length,1);
+  assert.equal(nodes.filter(node=>node.dataset.field==='ms').length,0);
+  await findAction(host,'select-block').onclick();
+  assert.equal(dom.activeElement.dataset.action,'select-block','Clique mantém foco no roteiro para usar atalhos');
+  controller.select('wait');
+  assert.equal(descendants(host).filter(node=>node.dataset.field==='start').length,0);
+  assert.equal(descendants(host).find(node=>node.dataset.field==='ms').value,120);
+  await findAction(host,'duplicate').onclick();
+  assert.equal(controller.model().value().blocks.length,4);
+  assert.notEqual(controller.selection(),'wait');
+  assert.equal(controller.model().value().blocks.find(block=>block.id===controller.selection()).ms,120);
+});
+test('atalhos do roteiro navegam, movem, duplicam e desfazem sem roubar edição nativa ou combos globais',async()=>{
+  const {documents,controller}=setup();documents.A.blocks.push({id:'wait',type:'wait',ms:120});
+  await controller.open('A');
+  let event=key('ArrowDown');await controller.handleKeydown(event);assert.equal(controller.selection(),'wait');assert.equal(event.prevented,true);
+  event=key('ArrowUp',{altKey:true});await controller.handleKeydown(event);assert.equal(controller.model().value().blocks[0].id,'wait');
+  event=key('d',{ctrlKey:true});await controller.handleKeydown(event);assert.equal(controller.model().value().blocks.length,3);
+  await controller.handleKeydown(key('z',{ctrlKey:true}));assert.equal(controller.model().value().blocks.length,2);
+  await controller.handleKeydown(key('y',{ctrlKey:true}));assert.equal(controller.model().value().blocks.length,3);
+  for(const tagName of ['INPUT','TEXTAREA','SELECT']){
+    event=key('z',{ctrlKey:true,target:{tagName}});await controller.handleKeydown(event);assert.equal(event.prevented,undefined);
+    await controller.handleKeydown(key('Delete',{target:{tagName}}));assert.equal(controller.model().value().blocks.length,3);
+  }
+  event=key('s',{ctrlKey:true,shiftKey:true});await controller.handleKeydown(event);assert.equal(event.prevented,undefined);
+  controller.close();event=key('Delete');await controller.handleKeydown(event);assert.equal(event.prevented,undefined);
+});
+test('Ctrl+S inclui campo ainda em edição e não depende de blur para salvar',async()=>{
+  const {documents,bridge,controller}=setup();const writes=[];
+  bridge.save_sequence=async document=>{writes.push(document);documents.A={...document,revision:5};return {ok:true,document:documents.A};};
+  await controller.open('A');
+  const input={tagName:'INPUT',value:'Nome digitado',onchange(event){controller.model().command('metadata',{name:event.target.value});}};
+  const event=key('s',{ctrlKey:true,target:input});await controller.handleKeydown(event);
+  assert.equal(writes[0].name,'Nome digitado');assert.equal(event.prevented,true);assert.equal(event.stopped,true);
 });

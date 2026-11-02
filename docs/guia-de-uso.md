@@ -7,14 +7,18 @@ Este guia descreve os recursos implementados. O estado de revisão e os limites 
 Abra o editor de um clipe capturado ou importado. A captura contínua existente permanece como entrada do fluxo.
 
 1. Se houver transcrição alinhada, selecione uma palavra. Use Shift ao selecionar outra para ampliar o intervalo. Blocos corrigidos manualmente ou sem alinhamento por palavra são selecionados como um bloco.
-2. Arraste na waveform ou ajuste Início/Fim para refinar o trecho. As setas alteram a borda escolhida em 10 ms; Shift + seta usa 100 ms. Dentro de campos de texto, as teclas continuam editando o texto normalmente.
-3. Use **Manter seleção** para conservar apenas a parte selecionada da montagem atual. Use **Remover trecho** para retirar o meio e juntar o que restou. **Restaurar trecho** recupera áudio selecionado que havia sido removido.
-4. Confira com **Ouvir seleção**, **Ouvir resultado** ou a prévia de junção. Essas prévias usam o monitor. **Parar** encerra a prévia própria; não interrompe uma transmissão externa ao editor.
-5. Use **Salvar** para atualizar o clipe ou **Criar outro clipe** para publicar outra montagem da mesma gravação. A origem é preservada.
+2. Arraste as alças verde (início) e laranja (fim) na waveform. Clique ou arraste no áudio para mover a agulha sem apagar a seleção. Shift+arraste cria uma seleção; Alt+arraste move a seleção inteira. As setas movem a agulha em 10 ms; Shift+seta usa 100 ms. I e O marcam início e fim na agulha. A roda aproxima ou afasta o ponto sob o mouse. Dentro de campos de texto, as teclas continuam editando o texto normalmente.
+3. Use **Recortar** para conservar apenas a parte selecionada da montagem atual. Use **Remover trecho** para retirar o meio e juntar o que restou. **Restaurar trecho** recupera áudio selecionado que havia sido removido.
+4. Confira com **Seleção** (Espaço), **Resultado**, **Da agulha** (Shift+Espaço) ou clicando num marcador laranja de junção no pé da waveform. Essas prévias usam o monitor. **Parar** encerra a prévia própria; não interrompe uma transmissão externa ao editor.
+5. Use **Salvar** para atualizar o clipe ou **Criar clipe da seleção** para publicar outra montagem da mesma gravação. A origem é preservada.
 
 **Desfazer/Refazer** cobre os comandos de áudio e texto da sessão. Fechar o editor guarda o rascunho para retomada; isso é diferente de publicar as alterações com Salvar.
 
-Corrigir a transcrição não corta áudio. Digite no campo de correção e use **Aplicar correção**. Para retirar som, use o comando de áudio correspondente. Se uma retranscrição produzir uma proposta, compare os textos e aceite explicitamente a substituição. Resultados antigos não devem sobrescrever uma correção humana feita durante a análise.
+Corrigir a transcrição não corta áudio. Dê duplo clique numa palavra ou use o lápis para corrigir. Ctrl+Enter ou ✓ aplica a correção; Salvar também preserva o texto. Sem alinhamento, a transcrição aparece diretamente numa caixa editável, sem painel vazio ou texto de resultado duplicado. Para retirar som, use o comando de áudio correspondente. Se uma retranscrição produzir uma proposta, compare os textos e aceite explicitamente a substituição. Resultados antigos não devem sobrescrever uma correção humana feita durante a análise.
+
+As abas organizam transcrição, título/aparência, vozes, efeitos e tarefas de IA, mantendo waveform e reprodução disponíveis. **Analisar com IA** oferece Transcrever áudio, Identificar vozes e Sugerir título/categoria. Resultados aplicados atualizam o editor; propostas protegidas exigem aceite.
+
+Modelo, dispositivo, beam size, vocabulário, contexto e política de recursos ficam na engrenagem **Configurações**, valem globalmente e não são propriedades do clipe.
 
 ## Importar arquivos, pastas e vídeo
 
@@ -30,7 +34,7 @@ Selecione itens para aplicar categoria, título e tags em lote. Campos modificad
 
 ## Corrigir a pessoa e aprender sua voz
 
-No editor, escolha a pessoa e habilite **Aprender com minhas correções** quando quiser aproveitar os exemplos confirmados. Selecione a fala pertinente antes de salvar. **Cadastrar voz** permite solicitar o cadastro explicitamente.
+Na aba **Vozes** do editor, escolha a pessoa e habilite **Aprender com minhas correções** quando quiser aproveitar os exemplos confirmados. Selecione a fala pertinente antes de salvar. **Cadastrar voz** permite solicitar o cadastro explicitamente.
 
 A atribuição da pessoa e o aprendizado têm resultados separados. Se o modelo falhar ou o trecho não for adequado, a pessoa corrigida continua salva. O exemplo pode ficar pendente e não participar do reconhecimento.
 
@@ -54,7 +58,7 @@ Os testes desta entrega usam dados sintéticos. Eles verificam os fluxos e a rev
 
 ## Controlar a IA local
 
-No editor, abra **Análise local → Qualidade local e recursos**. **Revisando** permite processar a fila normalmente. **Jogando** adia trabalhos em segundo plano e mantém os pedidos explícitos disponíveis. A inferência continua serializada; esses perfis não prometem uma taxa de quadros específica no jogo.
+Na engrenagem **Configurações**, abra **Qualidade local e recursos**. **Revisando** permite processar a fila normalmente. **Jogando** adia trabalhos em segundo plano e mantém os pedidos explícitos disponíveis. A inferência continua serializada; esses perfis não prometem uma taxa de quadros específica no jogo.
 
 **Pausar novas análises** impede o início dos trabalhos aguardando. Uma inferência já ativa termina sua execução; cancelá-la impede a aplicação do resultado, sem fingir que o modelo foi interrompido imediatamente. Os trabalhos da fila podem ser cancelados ou priorizados individualmente no painel. Priorizar um trabalho não ignora a pausa.
 
@@ -75,7 +79,7 @@ Abra **Sequências**, dê um nome e adicione os blocos na ordem desejada. Clique
 
 Por exemplo: pergunta → espera de 300 ms → resposta e risada em dois ramos paralelos → aguardar acionamento → conclusão. A duração mostra o tempo calculável e a quantidade de acionamentos manuais; a espera pelo operador não recebe uma duração fictícia.
 
-Use as setas para reordenar, **Duplicar** para repetir um trecho com ajustes independentes e **Desfazer/Refazer** para recuperar alterações da sessão. **Salvar sequência** persiste a montagem. Cada ocorrência fixa a revisão do clipe usada ao adicioná-la. Se o clipe mudar, **Atualizar referência** permite adotar explicitamente a nova versão; o corte é reiniciado para essa versão e o volume local é mantido.
+Selecione um bloco para editar suas propriedades no inspetor. ↑/↓ navegam, Alt+↑/↓ reordenam, Ctrl+D duplica, Delete remove, Ctrl+Z/Y desfaz/refaz e Ctrl+S salva, inclusive um campo ainda em edição. Os demais atalhos não interferem na digitação em campos. Use **Duplicar** para repetir um trecho com ajustes independentes e **Desfazer/Refazer** para recuperar alterações da sessão. **Salvar sequência** persiste a montagem. Cada ocorrência fixa a revisão do clipe usada ao adicioná-la. Se o clipe mudar, **Atualizar referência** permite adotar explicitamente a nova versão; o corte é reiniciado para essa versão e o volume local é mantido.
 
 **Atualizar biblioteca** atualiza as opções sem apagar seu rascunho. **Recarregar documento salvo** recupera a definição persistida; se houver alterações locais, use **Descartar alterações e recarregar** somente quando quiser abandoná-las. Salvar ou iniciar continua vinculado à sequência escolhida no clique, mesmo se você abrir outra enquanto a resposta estiver em andamento.
 

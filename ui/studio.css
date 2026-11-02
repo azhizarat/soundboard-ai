@@ -361,3 +361,70 @@ body.mini-overlay .preparation-toolbar, body.mini-overlay .operation-bar, body.m
   .now-playing-deck:has(.np-controls:not(.hidden)) .np-controls { order: 2; flex: 1 1 100%; }
   .now-playing-deck:has(.np-controls:not(.hidden)) .operation-feedback { flex: 0 1 42%; }
 }
+/* Editor: a waveform é a superfície principal; ferramentas compartilham um inspetor. */
+#editModal .modal-card { width: min(1160px, 96vw); max-height: 96vh; }
+#editModal .modal-body { padding: 10px 16px; gap: 6px; }
+#editModal .edit-session-bar { min-height: 24px; gap: 10px; }
+#editModal .edit-session-bar p { margin: 0; }
+#editModal .editor-transport { position: static; padding: 4px 0 8px; gap: 6px; }
+#editModal .editor-transport .btn { min-height: 32px; padding: 6px 10px; font-size: 12px; }
+#editModal kbd { font: 10px inherit; opacity: .7; margin-left: 8px; }
+#editModal #editorMetrics { font-size: 11px; color: var(--text-muted); }
+#editModal #editorSelectionLength { font-size: 11px; margin-left: auto; font-variant-numeric: tabular-nums; }
+#editModal .editor-audio { padding: 0; border: 0; background: transparent; }
+#editModal #editorWaveform { height: 154px; border-radius: 6px; }
+#editModal .editor-wave-tools, #editModal .editor-seek-row, #editModal .editor-editbar { display: flex; align-items: center; gap: 6px; min-width: 0; }
+#editModal .editor-wave-tools { margin-top: 6px; flex-wrap: wrap; }
+#editModal .editor-wave-tools .btn { min-height: 25px; font-size: 11px; padding: 3px 8px; }
+#editModal #editorViewport { margin: 0 auto 0 4px; font-size: 11px; }
+#editModal #editorCursor { min-width: 105px; font-variant-numeric: tabular-nums; }
+#editModal .editor-seek-row { margin: 7px 0; font-size: 11px; color: var(--text-muted); }
+#editModal #editorSeek { flex: 1; width: 60px; min-width: 40px; accent-color: var(--accent); }
+#editModal #editorSeekTime { min-width: 115px; font-variant-numeric: tabular-nums; }
+#editModal #editorVolumeMount { flex: 0 0 180px; margin: 0 0 0 12px; }
+#editModal #editorVolumeMount .form-group { margin: 0; display: flex; flex-direction: row; align-items: center; gap: 5px; }
+#editModal #editorVolumeMount .label-with-num { flex: 0 0 40px; margin: 0; }
+#editModal #editorVolumeMount label { display: none; }
+#editModal #editorVolumeMount input { width: 100%; min-width: 50px; accent-color: var(--accent); }
+#editModal .editor-editbar { border-top: 1px solid var(--border-subtle); padding-top: 8px; flex-wrap: wrap; }
+#editModal .editor-editbar .btn { min-height: 30px; padding: 6px 10px; font-size: 12px; }
+#editModal .editor-history { display: flex; gap: 4px; margin-left: auto; }
+#editModal .editor-shortcuts { margin: 6px 0 10px; font-size: 10px; color: var(--text-muted); line-height: 1.5; }
+#editModal .editor-shortcuts b { font-weight: 500; color: #c6d2df; }
+#editModal .editor-dock { border: 1px solid var(--border-subtle); border-radius: 7px; overflow: hidden; background: var(--field-bg); }
+#editModal .editor-tabs { display: flex; gap: 4px; padding: 4px 6px; border-bottom: 1px solid var(--border-subtle); overflow-x: auto; }
+#editModal .editor-tabs button { border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); font: inherit; font-size: 12px; padding: 7px 10px; white-space: nowrap; cursor: pointer; }
+#editModal .editor-tabs button[aria-selected="true"] { background: #293b50; color: #e9f3ff; }
+#editModal .editor-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#editModal .editor-inspector { display: block; border: 0; border-radius: 0; margin: 0; padding: 10px 12px; background: transparent; min-height: 130px; max-height: 240px; overflow-y: auto; }
+#editModal .editor-inspector > summary { display: none; }
+#editModal .editor-inspector p { margin: 5px 0; font-size: 12px; }
+#editModal .editor-inspector label { font-size: 12px; }
+#editModal .editor-inspector .form-row { margin: 0 0 8px; }
+#editModal .editor-inspector .form-group { margin: 0; }
+#editModal .editor-inspector .btn { font-size: 11px; padding: 5px 8px; }
+#editModal .editor-text-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+#editModal #editorAlignment { flex: 1; margin: 0; font-size: 11px; }
+#editModal #editorWords { min-height: 0; max-height: 95px; padding: 5px 7px; border: 0; font-size: 14px; line-height: 1.7; }
+#editModal #editorTextHint { margin: 4px 0; font-size: 10px; }
+#editModal .editor-correction-row { display: flex; align-items: start; gap: 6px; }
+#editModal #editorCorrection { min-height: 54px; margin: 0; flex: 1; width: 0; resize: vertical; font-size: 14px; }
+#editModal .editor-correction-row > div { display: flex; gap: 4px; }
+#editModal #editorStatus { margin: 5px 0 0; padding: 0; font-size: 11px; }
+#editModal .analysis-tasks { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+#editModal .analysis-scope { display: inline-flex; gap: 5px; align-items: center; }
+#editModal #analysisRuntime { color: var(--text-muted); font-size: 10px; }
+#editModal #analysisProposal { max-height: 80px; }
+#editModal .modal-footer { flex-shrink: 0; }
+#envModal { z-index: 1100; }
+#envModal [hidden] { display: none !important; }
+#envModal #aiSettingsPanel input, #envModal #aiSettingsPanel select { width: 100%; }
+@media(max-width:800px) {
+  #editModal .modal-body { padding: 8px 10px; }
+  #editModal #editorMetrics { display: none; }
+  #editModal #editorVolumeMount { flex-basis: 100px; margin-left: 0; }
+  #editModal .editor-seek-row > label { font-size: 0; }
+  #editModal .editor-inspector { max-height: 210px; }
+  #editModal .editor-transport { flex-wrap: wrap; }
+  #editModal .editor-tabs button { padding: 7px 6px; }
+}

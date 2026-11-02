@@ -79,7 +79,8 @@
   function create(doc,bridge){
     const el=id=>doc.getElementById(id),node=(tag,text)=>{const n=doc.createElement(tag);if(text!==undefined)n.textContent=text;return n;};
     let model=createModel(),library=[],sequences=[],capabilities={},status={state:'idle'},opened=false,timer=null,validation=0,initialized=false,selectionTicket=0,refreshTicket=0;
-    const drafts=new Map(),saving=new WeakSet();
+    const drafts=new Map(),saving=new WeakSet(),blockButtons=new Map();
+    let selectedId=null;
     const message=text=>{el('sequenceMessage').textContent=text||'';};
     async function checked(promise){const result=await promise;if(!result?.ok)throw Error(result?.error||'A ação não está disponível neste estado');return result;}
     function button(label,run,action){
@@ -95,7 +96,12 @@
     }
     function mutate(action,payload,target=model){
       target.command(action,payload);drafts.set(target.value().id,target);
-      if(model===target){render();message('Alterações locais — salve para aplicar aos próximos disparos.');}
+      if(model===target){
+        const restoreFocus=opened&&doc.activeElement?.tagName==='BUTTON';
+        if(action==='add')selectedId=payload.block.id;
+        if(action==='duplicate'){const original=locate(target.value().blocks,payload.id);selectedId=original.list[original.index+1].id;}
+        render();if(restoreFocus)blockButtons.get(selectedId)?.focus();message('Alterações locais — Ctrl+S para salvar.');
+      }
     }
     async function validate(){
       const ticket=++validation,result=await bridge().validate_sequence(model.value());
@@ -122,6 +128,26 @@
       const clip=library.find(item=>item.id===block.clip_id);
       return block.type==='play'?(clip?.title||'Clipe indisponível'):typeLabels[block.type];
     }
+    function ordered(blocks=model.value().blocks){
+      return blocks.flatMap(block=>[block,...(block.branches||[]).flatMap(items=>ordered(items))]);
+    }
+    function selectBlock(id,focus=false){
+      if(!locate(model.value().blocks,id))return;
+      selectedId=id;render();
+      if(focus){const item=blockButtons.get(id);item?.focus();item?.scrollIntoView?.({block:'nearest'});}
+    }
+    function summary(block){
+      if(block.type==='play')return ((block.interval[1]-block.interval[0])/48000).toFixed(2)+' s · '+Math.round(block.volume*100)+'%';
+      if(block.type==='wait')return block.ms+' ms';
+      if(block.type==='parallel')return block.branches.length+' ramos simultâneos';
+      return 'Avançar para continuar';
+    }
+    function adders(parent,branch){
+      const bar=node('div');bar.className='sequence-adders';
+      bar.append(button('+ Clipe',()=>add('play',parent,branch),'add-play'),button('+ Espera',()=>add('wait',parent,branch),'add-wait'));
+      if(!parent)bar.append(button('+ Paralelo',()=>add('parallel'),'add-parallel'),button('+ Acionamento',()=>add('manual'),'add-manual'));
+      return bar;
+    }
     function renderList(blocks,parent,branch){
       const list=node('div');list.className='sequence-block-list';list.dataset.parent=parent||'';if(branch!==undefined)list.dataset.branch=branch;
       list.ondragover=event=>{event.preventDefault();event.stopPropagation();};
@@ -131,51 +157,95 @@
           if(blockId)mutate('relocate',{id:blockId,parent,branch});else if(clipId)await addClip(clipId,parent,branch);
         }catch(error){message(error.message);}
       };
-      if(!blocks.length)list.append(node('p','Arraste um clipe para cá ou adicione abaixo.'));
+      if(!blocks.length){const empty=node('p',parent?'Arraste um clipe ou adicione abaixo.':'Seu roteiro começa aqui. Adicione um clipe da biblioteca ou use os botões acima.');empty.className='sequence-empty';list.append(empty);}
       blocks.forEach((block,index)=>{
-        const card=node('article');card.className='sequence-block';card.dataset.blockId=block.id;card.draggable=true;
+        const card=node('article');card.className='sequence-block sequence-row';card.dataset.blockId=block.id;card.draggable=true;
+        card.classList.toggle('sequence-selected',selectedId===block.id);
         card.ondragstart=event=>{event.stopPropagation();event.dataTransfer.setData('application/x-sequence-block',block.id);};
-        const header=node('div');header.className='sequence-block-heading';header.append(node('strong',(index+1)+'. '+blockLabel(block)));
-        header.append(button('↑',()=>mutate('move',{id:block.id,direction:-1}),'up'),button('↓',()=>mutate('move',{id:block.id,direction:1}),'down'),
-          button('Duplicar',()=>mutate('duplicate',{id:block.id}),'duplicate'),button('Remover',()=>mutate('remove',{id:block.id}),'remove'),
-          button('Ouvir no monitor',()=>preview(block.id),'preview'));
-        card.append(header);
+        const choose=button('',()=>selectBlock(block.id,true),'select-block');choose.className='sequence-select';
+        choose.setAttribute('aria-pressed',String(selectedId===block.id));choose.setAttribute('aria-label',(index+1)+'. '+blockLabel(block)+'. '+summary(block));
+        choose.tabIndex=selectedId===block.id?0:-1;
+        const number=node('span',String(index+1));number.className='sequence-order';
+        const text=node('span');text.className='sequence-row-copy';text.append(node('strong',blockLabel(block)),node('small',summary(block)));
+        choose.append(number,text);blockButtons.set(block.id,choose);card.append(choose);
         if(block.type==='play'){
-          const clip=library.find(item=>item.id===block.clip_id),controls=node('div');controls.className='sequence-fields';
-          controls.append(field('Início (s)',block.interval[0]/48000,value=>mutate('patch',{id:block.id,changes:{interval:[Math.round(value*48000),block.interval[1]]}}),{key:'start'}),
-            field('Fim (s)',block.interval[1]/48000,value=>mutate('patch',{id:block.id,changes:{interval:[block.interval[0],Math.round(value*48000)]}}),{key:'end'}),
-            field('Volume',block.volume,value=>mutate('patch',{id:block.id,changes:{volume:value}}),{max:3,key:'volume'}));
-          card.append(controls,node('small','Corte sobre o áudio da revisão fixada · '+block.revision_id.slice(0,8)));
-          if(clip?.revision_id&&clip.revision_id!==block.revision_id){
-            const warning=node('div','Há uma versão nova. ');warning.className='sequence-warning';
-            warning.append(button('Atualizar referência',async()=>{
-              const target=model,result=await checked(bridge().pin_sequence_clip(block.clip_id));
-              mutate('reference',{id:block.id,occurrence:result.occurrence},target);
-              if(model===target)message('Referência atualizada; corte reiniciado para a nova revisão. Volume mantido.');
-            },'reference'));
-            card.append(warning);
-          }
-        }else if(block.type==='wait')card.append(field('Espera (ms)',block.ms,value=>mutate('patch',{id:block.id,changes:{ms:value}}),{step:'1',key:'ms'}));
-        else if(block.type==='manual')card.append(node('p','Só continua ao clicar Avançar ou pressionar novamente o atalho.'));
-        else if(block.type==='parallel'){
+          const clip=library.find(item=>item.id===block.clip_id);
+          if(clip?.revision_id&&clip.revision_id!==block.revision_id){const badge=node('span','Revisão anterior');badge.className='sequence-revision-badge';badge.title='Selecione o bloco para atualizar a referência, se desejar.';card.append(badge);}
+        }
+        if(block.type==='parallel'){
           const branches=node('div');branches.className='sequence-branches';
           block.branches.forEach((items,i)=>{const panel=node('section');panel.className='sequence-branch';panel.dataset.branchIndex=i;
-            const title=node('div','Ramo '+(i+1));
-            if(block.branches.length>2)title.append(button('Remover ramo vazio',()=>mutate('branch',{id:block.id,remove:i})));
-            panel.append(title,renderList(items,block.id,i));branches.append(panel);
-          });
-          card.append(branches,button('+ Ramo',()=>mutate('branch',{id:block.id}),'branch'));
+            const title=node('div','Ramo '+(i+1));title.className='sequence-branch-title';
+            if(block.branches.length>2&&!items.length)title.append(button('Remover ramo vazio',()=>mutate('branch',{id:block.id,remove:i}),'remove-branch'));
+            panel.append(title,renderList(items,block.id,i),adders(block.id,i));branches.append(panel);
+          });card.append(branches);
         }
         list.append(card);
-      });
-      const adders=node('div');adders.className='sequence-adders';
-      adders.append(button('+ Clipe',()=>add('play',parent,branch),'add-play'),button('+ Espera',()=>add('wait',parent,branch),'add-wait'));
-      if(!parent)adders.append(button('+ Paralelo',()=>add('parallel'),'add-parallel'),button('+ Acionamento',()=>add('manual'),'add-manual'));
-      list.append(adders);return list;
+      });return list;
+    }
+    function renderInspector(){
+      const panel=node('aside');panel.className='sequence-inspector';panel.setAttribute('aria-label','Propriedades do bloco selecionado');
+      const found=selectedId&&locate(model.value().blocks,selectedId);
+      if(!found){panel.append(node('h3','Bloco selecionado'),node('p','Selecione um bloco para ajustar corte, volume ou duração.'));return panel;}
+      const block=found.block;
+      panel.append(node('small',typeLabels[block.type]),node('h3',blockLabel(block)));
+      const actions=node('div');actions.className='sequence-inspector-actions';
+      const up=button('↑ Mover',()=>mutate('move',{id:block.id,direction:-1}),'up'),down=button('↓ Mover',()=>mutate('move',{id:block.id,direction:1}),'down');
+      up.disabled=found.index===0;down.disabled=found.index===found.list.length-1;up.title='Alt+↑';down.title='Alt+↓';
+      const duplicate=button('Duplicar',()=>mutate('duplicate',{id:block.id}),'duplicate');duplicate.title='Ctrl+D';
+      const remove=button('Remover',()=>mutate('remove',{id:block.id}),'remove');remove.title='Delete';
+      actions.append(up,down,duplicate,remove);panel.append(actions);
+      if(block.type==='play'){
+        const controls=node('div');controls.className='sequence-fields';
+        controls.append(field('Início (s)',block.interval[0]/48000,value=>mutate('patch',{id:block.id,changes:{interval:[Math.round(value*48000),block.interval[1]]}}),{key:'start'}),
+          field('Fim (s)',block.interval[1]/48000,value=>mutate('patch',{id:block.id,changes:{interval:[block.interval[0],Math.round(value*48000)]}}),{key:'end'}),
+          field('Volume',block.volume,value=>mutate('patch',{id:block.id,changes:{volume:value}}),{max:3,key:'volume'}));
+        panel.append(controls,node('p','Corte desta ocorrência. O clipe original permanece intacto.'),button('▶ Ouvir bloco no monitor',()=>preview(block.id),'preview'));
+        const reference=node('div');reference.className='sequence-reference';reference.append(node('small','Revisão fixada · '+block.revision_id.slice(0,8)));
+        const clip=library.find(item=>item.id===block.clip_id);
+        if(clip?.revision_id&&clip.revision_id!==block.revision_id){
+          reference.append(node('p','Há uma revisão mais recente. Atualizar reinicia o corte e mantém o volume.'),button('Atualizar referência',async()=>{
+            const target=model,result=await checked(bridge().pin_sequence_clip(block.clip_id));
+            mutate('reference',{id:block.id,occurrence:result.occurrence},target);
+            if(model===target)message('Referência atualizada; corte reiniciado para a nova revisão. Volume mantido.');
+          },'reference'));
+        }panel.append(reference);
+      }else if(block.type==='wait')panel.append(field('Espera (ms)',block.ms,value=>mutate('patch',{id:block.id,changes:{ms:value}}),{step:'1',key:'ms'}),node('p','Pausa antes do próximo bloco.'),button('▶ Ouvir bloco no monitor',()=>preview(block.id),'preview'));
+      else if(block.type==='manual')panel.append(node('p','A sequência espera até você clicar Avançar ou pressionar novamente seu atalho global.'),button('▶ Testar no monitor',()=>preview(block.id),'preview'));
+      else if(block.type==='parallel')panel.append(node('p','Os ramos tocam juntos. A sequência continua quando todos terminam.'),button('+ Adicionar ramo',()=>mutate('branch',{id:block.id}),'branch'),button('▶ Ouvir grupo no monitor',()=>preview(block.id),'preview'));
+      return panel;
+    }
+    async function handleKeydown(event){
+      if(!opened||event.isComposing||event.defaultPrevented)return;
+      const tag=event.target?.tagName,typing=['INPUT','TEXTAREA','SELECT'].includes(tag)||event.target?.isContentEditable;
+      const command=event.ctrlKey||event.metaKey,key=event.key.toLowerCase();
+      if(event.repeat&&tag==='BUTTON'&&(key==='enter'||key===' ')){event.preventDefault();return;}
+      let run=null;
+      if(key==='escape'&&!event.ctrlKey&&!event.metaKey&&!event.altKey)run=close;
+      else if(command&&!event.altKey&&!event.shiftKey&&key==='s')run=()=>{if(typing)event.target.onchange?.({target:event.target});return save();};
+      else if(!typing){
+        if(command&&!event.altKey&&key==='z')run=()=>{event.shiftKey?model.redo():model.undo();render();};
+        else if(command&&!event.altKey&&!event.shiftKey&&key==='y')run=()=>{model.redo();render();};
+        else if(command&&!event.altKey&&!event.shiftKey&&key==='d'&&selectedId)run=()=>mutate('duplicate',{id:selectedId});
+        else if(!command&&!event.shiftKey&&event.altKey&&['arrowup','arrowdown'].includes(key)&&selectedId)run=()=>mutate('move',{id:selectedId,direction:key==='arrowup'?-1:1});
+        else if(!command&&!event.altKey&&!event.shiftKey&&key==='delete'&&selectedId)run=()=>mutate('remove',{id:selectedId});
+        else if(!command&&!event.altKey&&!event.shiftKey&&['arrowup','arrowdown','home','end'].includes(key))run=()=>{
+          const items=ordered(),index=items.findIndex(block=>block.id===selectedId);
+          const next=key==='home'?0:key==='end'?items.length-1:Math.max(0,Math.min(items.length-1,index+(key==='arrowup'?-1:1)));
+          if(items[next])selectBlock(items[next].id,true);
+        };
+      }
+      if(!run)return;event.preventDefault();event.stopPropagation();if(event.repeat&&command)return;
+      try{await run();if(!typing&&opened)blockButtons.get(selectedId)?.focus();}catch(error){message(error.message||String(error));}
     }
     function render(){
       const document=model.value();el('sequenceName').value=document.name;el('sequenceHotkey').value=document.hotkey||'';
-      el('sequenceBlocks').replaceChildren(renderList(document.blocks));
+      if(!selectedId||!locate(document.blocks,selectedId))selectedId=document.blocks[0]?.id||null;
+      blockButtons.clear();
+      const toolbar=adders(),hint=node('p','↑↓ selecionar · Alt+↑↓ mover · Ctrl+D duplicar · Delete remover · Ctrl+Z/Y desfazer/refazer · Ctrl+S salvar');
+      hint.className='sequence-keyboard-hint';
+      const composition=node('div');composition.className='sequence-composition';composition.append(renderList(document.blocks),renderInspector());
+      el('sequenceBlocks').replaceChildren(toolbar,hint,composition);
       el('btnSequenceUndo').disabled=!model.canUndo();el('btnSequenceRedo').disabled=!model.canRedo();
       el('btnSequenceDelete').disabled=!sequences.some(item=>item.document.id===document.id);
       el('btnSequenceDiscardReload').classList.toggle('hidden',!model.isDirty());
@@ -229,7 +299,7 @@
       return result;
     }
     function load(document){
-      selectionTicket++;drafts.set(model.value().id,model);model=drafts.get(document.id)||createModel(document);
+      selectionTicket++;drafts.set(model.value().id,model);model=drafts.get(document.id)||createModel(document);selectedId=null;
       if(!model.isDirty()&&!saving.has(model)&&model.value().revision!==document.revision)model.load(document);
       render();message(model.isDirty()&&model.value().revision!==document.revision?'Há uma versão salva mais recente. Edições locais preservadas; recarregue explicitamente para resolver o conflito.':'');
     }
@@ -282,14 +352,10 @@
       bind('btnSequenceDiscardReload',()=>reload({discardLocal:true}));
       el('sequenceName').onchange=event=>mutate('metadata',{name:event.target.value});
       el('sequenceHotkey').onchange=event=>mutate('metadata',{hotkey:event.target.value.trim().toLowerCase()});
-      el('sequencePanel').addEventListener('keydown',event=>{
-        if(event.repeat&&event.target?.tagName==='BUTTON'&&(event.key==='Enter'||event.key===' '))event.preventDefault();
-        if(event.key==='Escape')close();
-        if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='z'&&!['INPUT','TEXTAREA'].includes(event.target?.tagName)){event.preventDefault();event.shiftKey?model.redo():model.undo();render();}
-      });
+      el('sequencePanel').addEventListener('keydown',handleKeydown);
       await refreshLibrary();render();refreshStatus();
     }
-    return {initialize,open,close,reload,refreshLibrary,render,save,start,preview,model:()=>model,status:()=>clone(status),destroy(){clearTimeout(timer);}};
+    return {initialize,open,close,reload,refreshLibrary,render,save,start,preview,select:selectBlock,selection:()=>selectedId,handleKeydown,model:()=>model,status:()=>clone(status),destroy(){clearTimeout(timer);}};
   }
   const exported={createModel,create,durationLabel,fresh};
   if(typeof module!=='undefined'&&module.exports)module.exports=exported;

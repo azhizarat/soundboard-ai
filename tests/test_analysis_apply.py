@@ -61,6 +61,35 @@ def test_human_fields_require_proposal_acceptance_and_token_is_revalidated(edite
     assert store.accept_analysis(clip, again['analysis_id'], proposal['accept_token'])['state'] == 'obsolete'
 
 
+def test_api_accepted_proposal_stays_applied_after_editor_reopens(edited):
+    from main import SoundboardAPI
+    from analysis_jobs import AnalysisQueue
+    store, clip = edited
+    store.update_edit(clip, {'title': 'Humano'})
+    token = request(store, clip)
+    api = SoundboardAPI.__new__(SoundboardAPI)
+    api._store = store
+    api._analysis_queue = AnalysisQueue()
+    try:
+        api._analysis_queue.submit(lambda: {'status': 'ready', 'fields': {'title': 'Aceita'}},
+                                   apply=lambda result: store.apply_analysis(token, result), metadata=token)
+        api._analysis_queue.wait(token['analysis_id'], 3)
+        proposal = api.get_analysis_job(token['analysis_id'])['application']
+        assert proposal['state'] == 'proposal'
+        assert api.accept_analysis_result(clip, token['analysis_id'], proposal['accept_token'])['ok']
+        assert api.begin_clip_edit(clip)['ok']
+        refreshed = api.get_analysis_job(token['analysis_id'])
+        assert refreshed['application'] == {'state': 'applied'}
+        assert refreshed['status'] == 'ready'
+        assert store.render_context(clip, draft=True)['title'] == 'Aceita'
+        # O histórico de propostas é limitado: uma entrada removida não volta
+        # a oferecer o token inicial que ainda existe no histórico da fila.
+        store.get_clip(clip)['analysis_proposals'].pop(token['analysis_id'])
+        assert api.get_analysis_job(token['analysis_id'])['application'] == {'state': 'obsolete'}
+    finally:
+        api._analysis_queue.close()
+
+
 def test_manual_legacy_text_survives_projection_and_restart(edited):
     store, clip = edited
     store.update_edit(clip, {'transcript': 'corrigido sem alinhamento'})

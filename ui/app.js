@@ -324,6 +324,7 @@ async function initApp() {
   const bridge=api();
   const initial = await (bridge.get_bootstrap_state ? bridge.get_bootstrap_state() : bridge.get_initial_state());
   state.config = initial.config || {};
+  if(window.AISettings){state.aiSettings ||= window.AISettings.create(document,api,{configChanged: config=>{state.config=config;}});state.aiSettings.initialize(state.config);}
   state.settings = initial.settings || {};
   state.categories = initial.categories || [];
   state.speakers = initial.speakers || {};
@@ -1169,6 +1170,31 @@ async function prepareClipEdit(clip) {
   return opened;
 }
 
+async function refreshAppliedAnalysis({clipId, stage}) {
+  const epoch=state.editOpenEpoch;
+  if(document.getElementById('editClipId').value!==clipId)return;
+  const captured=currentClipEditPayload(true),baseline={...state.editFieldBaseline};
+  const refreshed=await state.integratedEditor?.refresh();
+  if(refreshed?.ok===false)throw new Error(refreshed.error||'Não foi possível atualizar a transcrição.');
+  if(stage==='transcription')return;
+  const response=await api().list_clip_edits();
+  if(state.editOpenEpoch!==epoch||document.getElementById('editClipId').value!==clipId)return;
+  if(!response.ok)throw new Error(response.error||'Não foi possível atualizar os dados analisados.');
+  const clip=response.clips.find(item=>item.id===clipId);if(!clip)return;
+  const fields=stage==='speakers'?{speaker_id:'editSpeaker'}:{title:'editTitle',category:'editCategory',emoji:'editEmoji',color:'editColor'};
+  const current=currentClipEditPayload(true);
+  for(const [field,id] of Object.entries(fields)){
+    // Uma resposta tardia nunca substitui digitação, nem um autosave mais recente.
+    if(clip[field]==null||current[field]!==captured[field]||captured[field]!==baseline[field]||state.editFieldBaseline[field]!==baseline[field])continue;
+    const element=document.getElementById(id),value=clip[field];
+    if(element.tagName==='SELECT'&&![...element.options].some(option=>option.value===value)){
+      const option=document.createElement('option');option.value=value;option.textContent=state.speakers?.[value]?.name||value;element.appendChild(option);
+    }
+    element.value=value;state.editFieldBaseline[field]=value;
+    if(field==='speaker_id')state.editFieldBaseline.speaker_ids=value?[value]:[];
+  }
+}
+
 async function openEditModal(clip) {
   if (state.durableEdit && !(await persistCurrentClipDraft())?.ok) return;
   const opened = await prepareClipEdit(clip);
@@ -1318,6 +1344,8 @@ async function openEditModal(clip) {
     state.analysisPanel ||= window.AnalysisPanel.create(document, api, {
       persist: persistCurrentClipDraft,
       currentText: () => document.getElementById('editTranscript').value,
+      selection: () => state.integratedEditor?.selection,
+      applied: refreshAppliedAnalysis,
       refresh: async () => {const id = document.getElementById('editClipId').value; await openEditModal({id});},
       configChanged: config => {state.config = config;},
     });
@@ -2638,8 +2666,7 @@ function bindEvents() {
   }
 
   document.getElementById("btnReanalyzeAI").onclick = async () => {
-    document.getElementById('analysisPanel').open = true;
-    await state.analysisPanel?.start();
+    state.integratedEditor?.showPanel('analysis');
   };
 
   document.getElementById("btnSplitSpeakers").onclick = async () => {

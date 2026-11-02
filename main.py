@@ -675,6 +675,17 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI, Imp
         job = self._analysis_queue.get(analysis_id)
         if not job:
             return {'ok': False, 'error': 'Análise não encontrada'}
+        if job.get('application') and job.get('clip_id'):
+            # A fila guarda o resultado inicial; o aceite posterior é persistido no store.
+            with self._store._lock:
+                clip = self._store.get_clip(job['clip_id']) or {}
+                application = clip.get('analysis_proposals', {}).get(analysis_id)
+                if application:
+                    job['application'] = {'state': application['state']}
+                    if application['state'] == 'proposal':
+                        job['application']['accept_token'] = application['accept_token']
+                elif job['application'].get('state') == 'proposal':
+                    job['application'] = {'state': 'obsolete'}
         error = job.get('error')
         return {'ok': True, **job, 'analysis_status': 'partial' if job['status'] == 'failed' else job['status'],
                 'warnings': [error['message']] if isinstance(error, dict) else []}
