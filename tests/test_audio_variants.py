@@ -184,3 +184,62 @@ def test_variant_preview_early_release_and_stop_all(operation, monkeypatch):
     result=api.preview_audio_variant(ident,{'reverse':True},token='epoch')
     assert not result['ok']
     assert not api._audio._sessions and not api._store._active_sources
+
+
+def test_accelerated_selection_without_output_samples_never_calls_playback(editor, monkeypatch):
+    api, ident = editor
+    assert api.save_clip_edits({'id': ident})['ok']
+    child = api.create_audio_variant(ident, {'speed': 2})['clip']
+    assert api.begin_clip_edit(child['id'])['ok']
+    calls = []
+    monkeypatch.setattr(api._audio, 'play_clip', lambda **kwargs: calls.append(kwargs) or 'unexpected')
+    monkeypatch.setattr(api._audio, 'get_session', lambda _: None)
+    result = api.preview_clip_edit(child['id'], 'selection', [0, 1])
+    assert not result['ok'], result
+    assert not calls and not api._store._active_sources
+
+
+def test_explicit_empty_preview_range_is_not_an_instruction_to_play_everything(editor):
+    api, ident = editor
+    context = api._store.render_context(ident, True)
+    context['_preview_ranges'] = []
+    with pytest.raises(ValueError):
+        api._audio.render_clip(context)
+
+
+def test_previous_revision_variant_projects_human_text_and_compact_pack_consistently(editor, tmp_path):
+    import json
+    import packs
+    import zipfile
+    api, ident = editor
+    temporal = {'alignment': 'aligned', 'words': [
+        {'id': 'first', 'text': 'primeira', 'start_sample': 0, 'end_sample': 48000},
+        {'id': 'second', 'text': 'segunda', 'start_sample': 48000, 'end_sample': 96000}],
+        'segments': [], 'corrections': []}
+    api._store.state['edit_drafts'][ident]['fields']['transcript_analysis'] = temporal
+    # Segmentos antigos não podem sobrescrever a correção textual ancorada.
+    api._store.state['edit_drafts'][ident]['fields']['segments'] = [
+        {'start': 0, 'end': 1, 'text': 'primeira', 'speaker_id': 'a'},
+        {'start': 1, 'end': 2, 'text': 'segunda', 'speaker_id': 'b'}]
+    api._store.update_edit(ident, {'spans': [[0, 48000]]})
+    first = api.save_clip_edits({'id': ident})['clip']
+    api.begin_clip_edit(ident)
+    api._store.update_edit(ident, {'spans': [[48000, 96000]]})
+    assert api.save_clip_edits({'id': ident})['clip']['transcript'] == 'segunda'
+    # Correção humana pertence à origem e é válida também na revisão anterior.
+    current = api._store.get_clip(ident)
+    current['transcript_analysis']['corrections'] = [
+        {'id': 'correction:first', 'word_ids': ['first'], 'text': 'primeira corrigida',
+         'start_sample': 0, 'end_sample': 48000, 'anchors': [[0, 48000]], 'provenance': 'human'}]
+    current['voice_source_evidence'] = {'multiple_voices': True, 'provenance': 'observed'}
+    before = copy.deepcopy(current)
+    child = api.create_audio_variant(ident, {'reverse': True}, first['revision_id'])['clip']
+    assert child['transcript'] == api._store.get_transcript(child['id'])['text'] == 'primeira corrigida'
+    assert child['voice_source_evidence'] == before['voice_source_evidence']
+    assert child['segments'] == before['segments']
+    assert api._store.get_clip(ident) == before
+    destination = tmp_path / 'variant.zip'
+    packs.write_pack(destination, [api._store.render_context(child['id'])], {})
+    with zipfile.ZipFile(destination) as archive:
+        manifest = json.loads(archive.read('manifest.json'))
+    assert manifest['clips'][0]['transcript'] == child['transcript']

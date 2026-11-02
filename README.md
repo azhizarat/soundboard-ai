@@ -4,6 +4,8 @@ Sistema de soundboard e roteamento de áudio digital para Windows com análise a
 
 O software envia áudio diretamente para o driver de cabo virtual (VB-Audio Virtual Cable) para transmissão em programas de comunicação (como Discord) ou transmissão ao vivo, enquanto mantém monitoramento simultâneo no dispositivo de áudio local do usuário.
 
+O [guia de uso](docs/guia-de-uso.md) cobre edição por transcrição, cortes internos, aprendizado por referências confirmadas, sequências de diálogos, coleções, variantes e fila de importação. Consulte o [plano de evolução](docs/superpowers/plans/2026-10-29-evolucao-consolidada.md) e o [registro de validação](docs/validation/2026-11-01-entrega-evolucao.md) para o estado das entregas e os limites dos testes sintéticos.
+
 ---
 
 ## 1. Descrição Geral
@@ -51,12 +53,12 @@ O Soundboard AI resolve a integração de reprodução de clipes de áudio em ch
 
 ### 2.2 Normalização de Loudness (EBU R128)
 - O sistema analisa cada arquivo de áudio segundo o algoritmo BS.1770-4 / EBU R128.
-- Mede o valor de Loudness Integrado (LUFS) e o Pico Verdadeiro (True Peak dBFS).
+- Mede loudness integrado (LUFS) e pico de amostras; não apresenta pico de amostras como medição de true peak.
 - Aplica ganho compensatório automático para atingir a meta operacional de -16.0 LUFS.
 - O usuário pode ajustar o ganho individual de cada clipe entre 0% e 200%.
 
 ### 2.3 Motor de Decisão Multimodal Local
-O sistema classifica e nomeia os arquivos importados em tempo inferior a 1 milissegundo. O motor opera localmente sem serviços externos de LLM ou conexão de rede:
+O sistema sugere categoria e título a partir do áudio e da transcrição. O tempo depende da duração, dos modelos e do equipamento; não há garantia de latência inferior a 1 ms. O motor opera localmente sem exigir serviços externos de LLM:
 - **Análise Acústica**: Mede frequência fundamental média e desvio padrão ($F_0$), energia RMS, relação pico/RMS e taxa de surtos de energia.
 - **Análise Léxica**: Processa transcrições com remoção de palavras vazias (stopwords) e correspondência de termos-chave em português.
 - **Taxonomia de Categorias**:
@@ -69,8 +71,8 @@ O sistema classifica e nomeia os arquivos importados em tempo inferior a 1 milis
 ### 2.4 Reconhecimento e Diarização de Interlocutores
 - **Segmentação**: Utiliza o modelo PyAnnote Segmentation 3.0 via ONNX Runtime para separar trechos de diferentes falantes.
 - **Embeddings de Voz**: Utiliza o modelo NVIDIA NeMo TitaNet Large via ONNX Runtime para gerar vetores de características vocais (192 dimensões).
-- **Classificação**: Calcula a similaridade por cosseno com centroides cadastrados no arquivo de referências (`referencias_vozes.npz`).
-- **Cadastro**: Permite registrar novos interlocutores diretamente a partir de trechos de áudio.
+- **Classificação**: Compara embeddings com protótipos dos exemplos confirmados, usando limiar e margem para distinguir pessoa identificada, caso duvidoso e desconhecido. Similaridade não é probabilidade calibrada.
+- **Cadastro**: Usa trechos originais confirmados e registra proveniência, dedupe e ações reversíveis. Arquivos legados de referências não substituem os perfis versionados; sua importação externa é explícita.
 
 ---
 
@@ -169,8 +171,8 @@ No modal de edição do clipe, o operador pode:
 - Associar uma tecla de atalho global específica ao clipe.
 
 ### 7.3 Exportação e Importação de Pacotes
-- **Exportar**: Salva os clipes selecionados, categorias e perfis de interlocutores em um único arquivo comprimido (`.sbpack` em formato ZIP com manifesto JSON).
-- **Importar**: Carrega arquivos `.sbpack` e integra os clipes ao banco existente sem duplicar arquivos idênticos.
+- **Exportar**: Gera `.zip` com manifesto versionado para clipes, coleções ou sequências e suas dependências. **Compacto** inclui somente o resultado selecionado; **Backup editável** inclui origens e revisões. Exemplos vocais locais não são exportados.
+- **Importar**: Valida o grafo, remapeia IDs e informa conflitos de atalhos, preservando roteamento e banco vocal do destinatário. Importação repetida é idempotente enquanto os nós da cópia anterior existem. A leitura do formato legado continua disponível.
 
 ---
 

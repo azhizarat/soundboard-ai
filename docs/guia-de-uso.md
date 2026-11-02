@@ -1,4 +1,4 @@
-# Editor, referências vocais e sequências
+# Edição, vozes, sequências e compartilhamento
 
 Este guia descreve os recursos implementados. O estado de revisão e os limites de validação estão no [registro de execução](validation/2026-10-29-execution.md).
 
@@ -15,6 +15,18 @@ Abra o editor de um clipe capturado ou importado. A captura contínua existente 
 **Desfazer/Refazer** cobre os comandos de áudio e texto da sessão. Fechar o editor guarda o rascunho para retomada; isso é diferente de publicar as alterações com Salvar.
 
 Corrigir a transcrição não corta áudio. Digite no campo de correção e use **Aplicar correção**. Para retirar som, use o comando de áudio correspondente. Se uma retranscrição produzir uma proposta, compare os textos e aceite explicitamente a substituição. Resultados antigos não devem sobrescrever uma correção humana feita durante a análise.
+
+## Importar arquivos, pastas e vídeo
+
+Em **Preparar**, use **Adicionar arquivos** ou **Adicionar pasta** na fila de importação, ou arraste arquivos/pastas para a janela. Escolha **Áudios / falas** ou **Vinhetas** para os botões da fila. Cada item informa seu estado e histórico; um arquivo inválido não impede os demais. A importação de áudio de vídeo fica disponível quando FFmpeg e ffprobe estão presentes.
+
+Mídia com mais de 120 segundos espera que você informe início e fim de uma janela de até 120 segundos. A análise começa com essa janela, evitando processar a gravação inteira. Arquivos com conteúdo idêntico e a mesma janela são reconhecidos como duplicatas, mesmo com nomes diferentes.
+
+**Analisar automaticamente após importar** vem marcado e respeita pausa e perfil de recursos. O áudio fica disponível antes de a IA terminar. **Abrir no editor** permite revisar os resultados, aceitar propostas e salvar a edição. Desmarque a opção para importar sem análise; **Analisar novamente** permite solicitá-la depois. A análise nunca confirma uma referência vocal por conta própria.
+
+**Cancelar** impede a publicação de uma importação ainda em andamento. Cancelar a análise de um áudio já importado mantém o clipe. Use **Tentar novamente** depois de reparar um arquivo ou uma falha. Ao reabrir o aplicativo, trabalhos incompletos aparecem interrompidos e não reiniciam inferência sozinhos.
+
+Selecione itens para aplicar categoria, título e tags em lote. Campos modificados depois da importação, inclusive em uma edição humana aberta, são preservados e aparecem na contagem de conflitos. O histórico visível é limitado aos 512 itens mais recentes; isso não remove os clipes já publicados.
 
 ## Corrigir a pessoa e aprender sua voz
 
@@ -82,3 +94,28 @@ Salve e ative a coleção, depois mude para **Tocar**. Atalhos da coleção ativ
 **Ensaio** envia os disparos ao monitor, incluindo atalhos e sequências. Escolha um monitor diferente da saída do cabo. Mudar o modo interrompe as execuções existentes; elas não são retomadas automaticamente. **Parar tudo** cancela também os sons que ainda estão em preparação. A parada de uma execução pode ser imediata ou usar a saída suave configurada.
 
 Se uma saída falhar, a operação bloqueia novos disparos e informa o problema. Reconectar o dispositivo não retoma áudio: selecione explicitamente a saída e faça um novo acionamento. Os testes automatizados verificam essa lógica com mixers e dispositivos simulados; confira o roteamento físico no seu ambiente antes de uma apresentação.
+
+## Sortear um grupo de sons
+
+No editor da coleção, escolha o primeiro clipe ou sequência e use **Grupo aleatório**. Marque os demais membros e configure o cooldown em milissegundos. O grupo percorre as escolhas em ordem embaralhada e evita repetir imediatamente quando existem alternativas. **Repetir última escolha** dispara explicitamente o alvo indicado abaixo do pad, respeitando o cooldown.
+
+As escolhas continuam usando o grupo de fala/trilha/efeito e as regras de reprodução do pad. Atualizar a biblioteca traz novos clipes e variantes às opções sem descartar a edição da coleção.
+
+## Criar variantes de um clipe
+
+Salve o clipe e abra **Variantes de velocidade, tom e reverso** no editor. Ajuste velocidade de 0,5 a 2x, tom de -12 a +12 semitons e, se desejar, reverso. Velocidade e tom são independentes. **Prévia no monitor** permite conferir; **Parar prévia** também cancela uma preparação ainda em andamento.
+
+**Salvar como variante** cria outro clipe, mantendo a gravação e a revisão escolhida. A operação usa a revisão publicada ao abrir o editor: salve e reabra para incluir cortes novos. É possível processar até 120 segundos da montagem; velocidade e tom exigem os filtros FFmpeg indicados pelo aplicativo. Para outra combinação, volte ao original em vez de encadear variantes.
+
+A waveform do editor mostra a gravação original para selecionar os trechos; a waveform da biblioteca mostra a saída processada. Duração, loudness e tempos da saída são recalculados. O cadastro vocal continua usando a fala original confirmada, sem os efeitos. Alterar depois o clipe original não muda a variante nem uma revisão já fixada numa sequência.
+
+## Compartilhar packs e guardar montagens editáveis
+
+No menu **Pack**, escolha o modo e exporte a biblioteca, os clipes filtrados, uma coleção ou uma sequência. Coleções e sequências levam suas dependências, incluindo revisões fixadas, regras, posições e ajustes locais.
+
+- **Compacto** leva o áudio reproduzível selecionado. Trechos removidos e transcrição fora dos intervalos exportados ficam de fora. Quem recebe não consegue recuperar os cortes anteriores por esse pack.
+- **Backup editável** leva as gravações de origem e o histórico de revisões necessário para continuar editando. Pode conter partes retiradas da montagem atual; confira esse modo antes de compartilhar.
+
+Nenhum desses modos leva o banco de exemplos vocais local. Pessoas recebidas são rótulos, não novas referências confirmadas. O resumo informa o conteúdo e os avisos. Uma sequência com acionamento manual permanece uma sequência, não um arquivo de áudio único.
+
+**Importar pack** também lê o formato antigo. Packs novos são validados integralmente antes de publicar o grafo. IDs recebem novos valores, configurações de microfone/cabo/monitor permanecem como estavam e atalhos conflitantes são retirados dos itens importados com aviso. Importar novamente o mesmo pack não duplica seus nós enquanto a cópia importada continua completa; alterações locais não são revertidas.

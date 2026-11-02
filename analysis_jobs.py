@@ -4,8 +4,21 @@ import heapq
 import threading
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 TERMINAL = frozenset(('ready', 'no_speech', 'failed', 'cancelled'))
+_APPLICATION_SCOPE = ContextVar('analysis_application_scope', default=None)
+
+
+@contextmanager
+def guard_analysis_scope(check, apply):
+    """Escopo interno de admissão/aplicação, capturado no submit sem alterar o bridge."""
+    token=_APPLICATION_SCOPE.set((check,apply))
+    try:
+        yield
+    finally:
+        _APPLICATION_SCOPE.reset(token)
 
 
 class AnalysisPausedError(ValueError):
@@ -80,6 +93,9 @@ class AnalysisQueue:
         with self._condition:
             if self._closed:
                 return {'ok': False, 'error_code': 'queue_closed', 'error': 'Fila encerrada'}
+            scope=_APPLICATION_SCOPE.get()
+            if scope and not scope[0]():
+                return {'ok':False,'error_code':'request_cancelled','error':'Solicitação cancelada antes da admissão'}
             if reservation is not None and reservation not in self._reservations:
                 return {'ok': False, 'error_code': 'invalid_reservation', 'error': 'Reserva de análise inválida'}
             if reservation is None and len(self._reservations) + sum('_run' in j for j in self._jobs.values()) >= self.capacity:
@@ -92,8 +108,13 @@ class AnalysisQueue:
                 if self._jobs[ident]['status'] in TERMINAL and '_run' not in self._jobs[ident]:
                     del self._jobs[ident]
             ident = (metadata or {}).get('analysis_id') or uuid.uuid4().hex
+            application=apply
+            if scope and apply is not None:
+                # Captura callbacks desta submissão; o contexto da thread é restaurado.
+                def application(result, callback=apply, guard=scope[1]):
+                    return guard(callback,result)
             job = {**copy.deepcopy(metadata or {}), 'analysis_id': ident, 'status': 'queued', 'error': None, 'priority': priority,
-                   '_run': run, '_apply': apply, '_cleanup': cleanup}
+                   '_run': run, '_apply': application, '_cleanup': cleanup}
             self._jobs[ident] = job
             heapq.heappush(self._pending, (priority, self._sequence, ident))
             self._sequence += 1

@@ -11,7 +11,7 @@
 .operation-error,#collectionConflicts {color:var(--warning);}
 .operation-panel {display:none;overflow:auto;min-height:0;flex:1;padding:16px;}
 .perform-mode .operation-panel {display:block;}
-.perform-mode .workspace,.perform-mode .sequence-strip,.perform-mode .collection-editor,.perform-mode #quickImportBar,.perform-mode #progressBanner,.perform-mode #importResults {display:none!important;}
+.perform-mode .workspace,.perform-mode .sequence-strip,.perform-mode .collection-editor,.perform-mode #quickImportBar,.perform-mode #progressBanner,.perform-mode #importResults,.perform-mode #importQueue {display:none!important;}
 .perform-mode #btnSequences,.perform-mode #editDraftSelect,.perform-mode #btnResumeEdit,.perform-mode #btnImportFiles,.perform-mode #btnImportVinheta,.perform-mode .folder-import-mode,.perform-mode #btnImportFolder,.perform-mode .pack-wrapper {display:none!important;}
 .collection-pads {display:grid;gap:12px;align-content:start;}
 .collection-pad {position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:9px;min-height:132px;padding:18px 12px 12px;background:var(--bg-card);color:var(--text-main);border:1px solid var(--border-subtle);border-radius:10px;cursor:pointer;touch-action:none;overflow-wrap:anywhere;min-width:0;}

@@ -40,3 +40,5 @@ Correção entregue: até três tentativas do mesmo `os.replace`, com esperas de
 - Smoke WebView2 real em 768 px: PASS, `.worktrees/e10-parent-x95cqwwq`; criação de variante, cancelamento de prévia durante render, novo alvo na coleção, shuffle/repetição explícita e ensaio monitor-only. Capturas `variant.png` e `shuffle.png`.
 
 A integração está validada para encerramento do merge. E10A continua sua revisão completa de requisitos/qualidade; E10B (importação ampliada e packs de grafo) permanece pendente. Esses estados não são confundidos com aprovação global de toda a evolução.
+
+Merge concluído em **`4deb17d`**, pais `6c0205b` e `4218e47`. `main` permaneceu em `4218e4797543cb4bf81fcd0e809afabb93353d0c`; checkout da evolução limpo após o commit. O diffcheck do índice apontou uma linha em branco final em `tests/test_api_state.py`, removida antes do commit sem alteração de comportamento. Trabalhos posteriores de E10 seguem nesta worktree C:.

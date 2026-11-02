@@ -165,8 +165,15 @@
               <button type="button" id="btnClosePackMenu" class="btn-clear" title="Fechar">✕</button>
             </div>
             <div class="popover-body">
+              <label for="packMode">Modo do pacote</label>
+              <select id="packMode"><option value="compact">Compacto — somente resultado</option><option value="editable">Backup editável — inclui origens</option></select>
+              <p id="packModeHint">Compacto preserva a reprodução e exclui cortes removidos. Backup inclui origens e revisões. Ambos excluem amostras vocais locais; pessoas importadas são apenas rótulos.</p>
               <button type="button" id="btnExportPackAll" class="btn btn-secondary">📤 Exportar biblioteca</button>
               <button type="button" id="btnExportPackFiltered" class="btn btn-secondary">🔎 Exportar filtro atual</button>
+              <label for="packCollection">Coleção e dependências</label><select id="packCollection"></select>
+              <button type="button" id="btnExportPackCollection" class="btn btn-secondary">Exportar coleção</button>
+              <label for="packSequence">Sequência e dependências</label><select id="packSequence"></select>
+              <button type="button" id="btnExportPackSequence" class="btn btn-secondary">Exportar sequência</button>
               <button type="button" id="btnImportPack" class="btn btn-secondary">📥 Importar pacote…</button>
             </div>
           </div>
@@ -239,6 +246,23 @@
     </div>
 
     <!-- Discovered 'separados' quick-import banner -->
+    <details id="importQueue" class="import-results" open>
+      <summary>Fila de importação <span id="importQueueCount"></span></summary>
+      <p id="importDropHint">Arraste arquivos ou pastas para esta janela.</p>
+      <div class="import-job-actions">
+        <label for="importQueueMode">Importar como</label><select id="importQueueMode"><option value="audio">Áudios / falas</option><option value="vinheta">Vinhetas / sons</option></select>
+        <button id="btnQueueAddFiles" class="btn btn-secondary btn-xs">Adicionar arquivos…</button>
+        <button id="btnQueueAddFolder" class="btn btn-secondary btn-xs">Adicionar pasta…</button>
+      </div>
+      <label><input id="importAutoAnalyze" type="checkbox" checked> Analisar automaticamente após importar (respeita pausa e perfil de recursos)</label>
+      <div class="import-batch">
+        <label>Categoria <input id="importBatchCategory" placeholder="Sem alteração"></label>
+        <label>Título <input id="importBatchTitle" placeholder="Sem alteração"></label>
+        <label>Tags <input id="importBatchTags" placeholder="Separadas por vírgula"></label>
+        <button id="btnImportBatchApply" class="btn btn-xs btn-secondary">Aplicar aos selecionados</button>
+      </div>
+      <p id="importQueueMessage" role="status"></p><div id="importQueueItems"></div>
+    </details>
     <details id="importResults" class="import-results hidden">
       <summary>Resultado da importação</summary>
       <pre id="importResultsText"></pre>
@@ -640,7 +664,7 @@
   <div id="packWarningsModal" class="modal-backdrop hidden">
     <div class="modal-card modal-sm">
       <div class="modal-header">
-        <h2>⚠️ Importação concluída com avisos</h2>
+          <h2>Resumo do pacote</h2>
         <button type="button" id="btnClosePackWarnings" class="btn-clear">✕</button>
       </div>
       <div class="modal-body">
@@ -709,6 +733,7 @@
   <script src="voice-profiles.js"></script>
   <script src="sequences.js"></script>
   <script src="collections.js"></script>
+  <script src="imports.js"></script>
   <script src="app.js"></script>
   <script src="local-quality.js"></script>
 </body>

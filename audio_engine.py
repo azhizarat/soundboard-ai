@@ -708,7 +708,7 @@ class AudioEngine:
         if clip.get('_revision'):
             from clip_renderer import render_revision
             rendered = render_revision(clip['_source'], clip['_revision'], self.ffmpeg_path)
-            if clip.get('_preview_ranges'):
+            if '_preview_ranges' in clip:
                 from clip_edits import validate_spans
                 ranges = validate_spans(clip['_preview_ranges'], len(rendered))
                 return np.concatenate([rendered[a:b] for a, b in ranges])

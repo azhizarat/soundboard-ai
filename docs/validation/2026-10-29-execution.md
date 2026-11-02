@@ -17,7 +17,7 @@ Workspace atual: `C:\Users\Hylex\.codex\worktrees\soundboard-evolution\soundboar
 | E8 | Concluída e revisada | SPEC_PASS Sol, QUALITY_PASS Astra; coordenador 540 Python + 54 JS, M2/WebView real |
 | E6 | Concluída e revisada | SPEC_PASS Sol, QUALITY_PASS Astra; coordenador 577 Python + 55 JS, smokes CLI/API/WebView |
 | E9 | Concluída e revisada | SPEC_PASS Sol, QUALITY_PASS Astra; coordenador 614 Python + 61 JS, smokes backend/WebView |
-| E10 | Em implementação | Lote A: shuffle/variantes; lote B: importação ampliada e packs |
+| E10 | Lotes A e B concluídos e revisados | SPEC_PASS Sol, QUALITY_PASS Astra; gate final 728 Python + 77 JS, API/FFmpeg/WebView sintéticos |
 | E11 | Condicional | Experimentos exigem critérios de entrada do plano |
 
 Implementação segue TDD e revisão de requisitos por Sol antes da revisão de qualidade por Astra. Alterações preexistentes são comparadas ao snapshot local, não atribuídas ao lote novo. Sem staging ou commits durante os lotes iniciais.
@@ -26,8 +26,8 @@ Implementação segue TDD e revisão de requisitos por Sol antes da revisão de 
 
 - Não houve validação em hardware ou corpus pessoal.
 - O usuário confirmou que não possui conjunto separado de exemplos e autorizou seguir com testes sintéticos. E6 entrega ferramentas/contratos e métricas sintéticas; calibração e afirmações de melhora real de ASR/voz permanecem pendentes de corpus, sem bloquear editor ou fluxos.
-- Worktree gerenciado não utilizável no sandbox; caminho efetivo é o workspace autorizado em D:.
-- A implementação completa não está concluída; os marcos permanecem abertos até seus critérios serem verificados.
+- A restrição inicial da worktree foi superada em 01/11: o workspace autorizado atual é a worktree C: indicada acima. O checkout pessoal em D: permanece separado.
+- E0–E10 concluídos no escopo funcional/sintético. [Entrega final](2026-11-01-entrega-evolucao.md) distingue evidência automatizada, incidentes, limites reais e experimentos E11 não iniciados.
 
 ## E1 — implementação e gates iniciais
 
@@ -262,3 +262,33 @@ Smoke independente `.worktrees/e10a-parent-smoke.py` **PASS** em `.worktrees/e10
 Smoke WebView em desenvolvimento criou variante e ouviu prévia isolada. Dois erros iniciais eram do harness (não bombear mixer para concluir fade após stop e seletor CSS sem aspas para `clip:id`), corrigidos. Execução seguinte identificou erro real na nova UI: `crypto.randomUUID` indisponível nesse contexto WebView2; também contraste inadequado dos botões de prévia/parada. Solicitadas correções e cancelamento de prévia ainda em processamento.
 
 Incidente de isolamento comunicado pelo implementer: um teste novo continuou mockando `play_clip` após migração da prévia para `prepare_group`; deixou chamada nativa passar e pytest encerrou com access violation. Não reiniciou o app pessoal. Fixture será corrigida para bloquear abertura nativa antes de repetir. Portanto não se afirma que todas as tentativas deste lote evitaram chamadas de hardware; os smokes do coordenador usam streams simulados.
+
+Em 01/11 o trabalho foi retomado em worktree C: e integrado à atualização do usuário, merge `4deb17d`. [Registro e gates da integração](2026-11-01-integracao-main.md): 660 Python + 71 JS, smokes API/WebView. Corrigidos refresh de variantes nas coleções, cancelamento de prévia durante preparo e UUID no contexto WebView. Sol **SPEC_PASS** E10A, 70 Python + 27 JS.
+
+Astra E10A retornou **QUALITY_CHANGES_REQUIRED**, dois P2 reproduzidos: seleção `[0,1]` em variante 2× mapeia para lista vazia e o renderer toca o clipe inteiro; variante de revisão anterior publica texto da montagem atual, divergindo de suas âncoras e contaminando o manifesto compacto. Repros `.worktrees/e10a-astra-review/test_review_edges.py`. Correções solicitadas, sem congelar histórico textual inexistente: texto humano continua ancorado à origem e deve ser reprojetado pelos spans escolhidos. Gate completo da integração antecede essas correções.
+
+Dois P2 corrigidos, RED 3 falhas/11 passes → GREEN 118 focados. Sol re-review **SPEC_PASS**, 71 focados; Astra re-review **QUALITY_PASS**, 88 focados incluindo repros independentes. Gate final pai **663 Python em 15,82 s**, sem delta JS desde os 71 aprovados; diffcheck limpo. Smoke ampliado com revisão antiga/texto e seleção mínima **PASS**, `.worktrees/e10-parent-4hlly9_h`. E10A encerrada; E10B inicia a partir de `.worktrees/e10a-approved/`, com arquivos ausentes referidos ao HEAD `4deb17d`.
+
+## E10B — importação e packs
+
+Implementação entregue para revisão: fila persistente com janela limitada, dedupe, cancelamento/retry, metadados humanos e coordenação E6; packs v2 com grafo compacto/editável e leitura v1. [Relatório técnico](2026-11-01-e10b-importacao-packs.md). O snapshot `.worktrees/e10a-approved/` foi obtido quando integrações de B já estavam presentes em alguns arquivos, inclusive `main.py`; a revisão de B usa o escopo documentado e o HEAD `4deb17d`, separando os ajustes aprovados de E10A. O snapshot não constitui uma fronteira exata entre os lotes.
+
+Gate completo inicial do coordenador: **688 Python passaram em 17,13 s**. Smokes independentes de API: fila `.worktrees/e10-parent-mgl2qbpq` e packs `.worktrees/e10-parent-f992ysbs`, ambos PASS com FFmpeg real, IA simulada e áudio físico bloqueado. A fila respeita pausa, mantém áudio disponível e histórico após reinício. Os packs preservam áudio renderizado, revisões fixadas, regras e roteamento; compacto exclui marcador textual e frequência do trecho removido.
+
+O smoke WebView2 em 768 px identificou controles de importação ocultos e popover de packs fora da viewport. Corrigidos com admissão dentro da fila e posição limitada à janela. Render incremental preserva edição e histórico de uma linha durante progresso de outra. Em seguida, exportação compacta falhou com referência de revisão inválida: WAV FLOAT inclui timestamp no cabeçalho, portanto reencodar PCM idêntico pode produzir outro hash. Origem compacta deduplicada por PCM não pode ser sobrescrita por uma segunda codificação deixando revisões anteriores com hash antigo. Reprodução independente confirmou diferença no byte 60 entre duas codificações separadas por um segundo.
+
+Sol apontou duas lacunas adicionais: transcrição temporal malformada era persistida e quebrava a leitura posterior; poda de histórico podia retirar clipe publicado com análise ainda ativa/pausada. Correções e revisão final em andamento; o gate inicial não representa aprovação desses deltas.
+
+Correções entregues em RED→GREEN, incluindo tipos de metadados, reuso de mídia compacta e timestamp PEAK determinístico. Sol re-review **SPEC_PASS**, 105 Python + 6 JS. Smoke nativo WebView2 final em 768 px **PASS**, `.worktrees/e10-parent-scznjmy_`: admissão, retry, janela de 1,2 s com 57.600 frames, metadados em lote, editor, exportações compacta/editável e importação com biblioteca atualizada; nenhum erro JS. Capturas `imports.png` e `pack-summary.png` inspecionadas. O título do resumo foi depois corrigido para “Resumo do pacote”, sem mudança funcional.
+
+Smokes API após os fixes: packs `.worktrees/e10-parent-qcda38w4`, fila `.worktrees/e10-parent-oay5rm7g`, ambos PASS. Gate completo pós-Sol: **718 Python em 18,66 s + 77 JavaScript**, sintaxe de todos os módulos UI aprovada, diffcheck limpo. Astra iniciou a revisão de qualidade; esses gates não dispensam corrigir achados posteriores.
+
+Astra reproduziu duas corridas em `.worktrees/astra-e10b/test_review_races.py`: cancelamento seguido de retry durante decode permitia publicar PCM da tentativa antiga; rollback de metadados durante decode substituía o estado e deixava o worker com uma referência local de job desconectada, publicando o clipe sem atualizar o histórico persistido. Solicitadas gerações por tentativa e revalidação do job atual após I/O. A propriedade `jobs` já resolve a lista no estado atual; isso não protege referências locais mantidas fora do lock. Não atribuir esse problema a uma lista permanentemente armazenada na fila.
+
+Primeiro ajuste de concorrência: tentativa/token e arquivo próprios por decode, geração de análise, busca do job atual após I/O e rollback preservando identidades. **114 focados passaram**, incluindo três reproduções de Astra; smokes API pai novamente aprovados em `.worktrees/e10-parent-9p42stqk` (packs) e `.worktrees/e10-parent-4h82i3f0` (fila). Na re-review, o coordenador levantou a janela antes do retorno do ID de análise. Sol a confirmou com API, fila E6, `prepare_analysis` e `apply_analysis` reais: cancelar enquanto `queue.submit` aguarda não impede que o trabalho aplique resultado antes de devolver o ID ao coordenador. O fix anterior rejeita retornos antigos, mas sozinho não protege o ponto de aplicação E6. Solicitado guard de geração também nesse ponto; sem modelo neural ou dispositivo pessoal na reprodução.
+
+Guard implementado como escopo interno em `analysis_jobs.py`, capturado na submissão; verifica geração/status na admissão e atomicamente com a aplicação sob o lock do store. Não altera a assinatura pública do bridge nem herda a intenção da importação para pedidos manuais posteriores. Sol re-review **SPEC_PASS**, 119 Python duráveis + 6 JS; reprodução independente antes da admissão retorna `request_cancelled`, depois da admissão retorna aplicação `obsolete`, sem alterar o rascunho em ambos os casos. O implementer também repetiu os três repros de Astra, totalizando 122 focados.
+
+Smokes pai após guard: `.worktrees/e10-parent-v2hht8e3` inclui pipeline E6 real com transcritor fake, publicação da edição, exportação editável, importação em segunda biblioteca e conservação de texto/palavras; `.worktrees/e10-parent-sv6iwfdr` confirma novamente toda a UI em 768 px, incluindo o título correto do resumo. Ambos PASS. Astra recebeu o delta final para re-review.
+
+Encerramento: Astra **QUALITY_PASS**, 27 testes de fila/reproduções e mais 9 de cleanup/E6; comprovada liberação de reservas e leases nas duas fronteiras de cancelamento. Gate final do coordenador **728 Python em 19,99 s + 77 JavaScript**, sintaxe UI e diffcheck aprovados. Nenhum código de produto mudou após o gate. `main` continua em `4218e47` e é ancestral do HEAD `4deb17d`; índice sem alterações staged. **E0–E10 concluídos**, E11 condicional. [Relatório de entrega](2026-11-01-entrega-evolucao.md), [guia atualizado](../guia-de-uso.md) e README revisados com os comportamentos efetivos e limites da evidência.

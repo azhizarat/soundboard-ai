@@ -314,6 +314,12 @@ async function initApp() {
   renderSidebar();
   renderGrid();
   bindEvents();
+  if (window.SoundImports) {
+    window.importController = window.SoundImports.create(document, api, {open: openEditModal,
+      updated: async () => {const next = await api().get_initial_state(); state.clips = next.clips; renderGrid();}});
+    await window.importController.initialize();
+    window.addEventListener('beforeunload', () => window.importController.close());
+  }
   if (window.SoundSequences) {
     window.sequenceEditor = window.SoundSequences.create(document, api);
     await window.sequenceEditor.initialize();
@@ -531,10 +537,27 @@ function updateRoutingSummary() {
   summaryEl.textContent = `Cable: ${cVol}% | Fone: ${mVol}%${warning}`;
 }
 
+function positionPackPopover() {
+  const menu = document.getElementById('packPopover'), button = document.getElementById('btnPackMenu');
+  if (!menu || !button) return;
+  const margin = 8, width = Math.min(380, Math.max(0, window.innerWidth - margin * 2));
+  menu.style.position = 'fixed'; menu.style.width = `${width}px`; menu.style.minWidth = '0'; menu.style.right = 'auto';
+  menu.style.maxHeight = `${Math.max(0, Math.min(window.innerHeight * .7, window.innerHeight - margin * 2))}px`;
+  const anchor = button.getBoundingClientRect(), height = menu.getBoundingClientRect().height;
+  menu.style.left = `${Math.max(margin, Math.min(anchor.right - width, window.innerWidth - width - margin))}px`;
+  menu.style.top = `${Math.max(margin, Math.min(anchor.bottom + margin, window.innerHeight - height - margin))}px`;
+}
+
 async function runImportOperation(operation) {
   try {
     const res = await operation();
     if (!res) return;
+    if (res.jobs) {
+      window.importController?.refresh();
+      document.getElementById('importQueue').open = true;
+      if (!res.ok && res.error) showToast(res.error, '#ef4444');
+      return res;
+    }
     state.clips = res.clips || state.clips;
     state.speakers = res.speakers || state.speakers;
     renderSidebar();
@@ -574,7 +597,7 @@ function renderQuickImportBar() {
     btn.textContent = `📥 Importar ${item.label}`;
     btn.onclick = async () => {
       const vinheta = document.getElementById("folderImportMode").value === "vinheta";
-      await runImportOperation(() => api().import_folder_or_separados(item.path, vinheta, vinheta ? "Vinhetas" : null));
+      await runImportOperation(() => api().enqueue_import([item.path], vinheta, vinheta ? "Vinhetas" : null, true, document.getElementById('importAutoAnalyze').checked));
     };
     wrap.appendChild(btn);
   });
@@ -1884,16 +1907,16 @@ function bindEvents() {
   };
 
   document.getElementById("btnImportFiles").onclick = async () => {
-    await runImportOperation(() => api().import_audio_files(null, false, null));
+    await runImportOperation(() => api().enqueue_import(null, false, null, false, document.getElementById('importAutoAnalyze').checked));
   };
 
   document.getElementById("btnImportVinheta").onclick = async () => {
-    await runImportOperation(() => api().import_audio_files(null, true, "Vinhetas"));
+    await runImportOperation(() => api().enqueue_import(null, true, "Vinhetas", false, document.getElementById('importAutoAnalyze').checked));
   };
 
   document.getElementById("btnImportFolder").onclick = async () => {
     const vinheta = document.getElementById("folderImportMode").value === "vinheta";
-    await runImportOperation(() => api().import_folder_or_separados(null, vinheta, vinheta ? "Vinhetas" : null));
+    await runImportOperation(() => api().enqueue_import ? api().enqueue_import(null, vinheta, vinheta ? "Vinhetas" : null, true, document.getElementById('importAutoAnalyze')?.checked !== false) : api().import_folder_or_separados(null, vinheta, vinheta ? "Vinhetas" : null));
   };
 
   // Pack menu (export/import .zip)
@@ -1903,10 +1926,22 @@ function bindEvents() {
     if (packMenu) packMenu.classList.add("hidden");
   }
   if (packButton && packMenu) {
-    packButton.onclick = (e) => {
+    packButton.onclick = async (e) => {
       e.stopPropagation();
       packMenu.classList.toggle("hidden");
+      if (!packMenu.classList.contains('hidden')) {
+        positionPackPopover();
+        try {
+          const collections = await api().get_collections(), sequences = await api().get_sequences();
+          for (const [id, values] of [['packCollection', collections.collections || []], ['packSequence', (sequences.sequences || []).map(item => item.document)]]) {
+            const select = document.getElementById(id); select.replaceChildren();
+            for (const value of values) {const option = document.createElement('option'); option.value = value.id; option.textContent = value.name; select.append(option);}
+          }
+          positionPackPopover();
+        } catch (error) {showToast(error.message || String(error), '#ef4444');}
+      }
     };
+    window.addEventListener('resize', () => {if (!packMenu.classList.contains('hidden')) positionPackPopover();});
     const btnClosePackMenu = document.getElementById("btnClosePackMenu");
     if (btnClosePackMenu) {
       btnClosePackMenu.onclick = (e) => {
@@ -1935,6 +1970,22 @@ function bindEvents() {
     });
     modal.classList.remove("hidden");
   }
+  function packSummary(result) {
+    if (!result.summary) return;
+    const s = result.summary;
+    showPackWarnings([`${s.mode === 'editable' ? 'Backup editável: origens incluídas' : 'Compacto: áudio renderizado'} — ${s.clips} clipes, ${s.revisions} revisões, ${s.sequences} sequências, ${s.collections} coleções.`, s.message, ...(result.warnings || [])]);
+  }
+  for (const [buttonId, selectId, kind] of [['btnExportPackCollection','packCollection','collection'],['btnExportPackSequence','packSequence','sequence']]) {
+    document.getElementById(buttonId).onclick = async () => {
+      const id = document.getElementById(selectId).value;
+      if (!id) {showToast('Selecione um item para exportar.'); return;}
+      try {
+        const res = await api().export_pack([], null, document.getElementById('packMode').value, kind === 'collection' ? [id] : null, kind === 'sequence' ? [id] : null);
+        if (!res?.ok) {showToast(res?.error || 'Falha ao exportar.', '#ef4444'); return;}
+        hidePackMenu(); packSummary(res);
+      } catch (error) {showToast(error.message || String(error), '#ef4444');}
+    };
+  }
 
   const closePackWarnings = document.getElementById("btnClosePackWarnings");
   if (closePackWarnings) {
@@ -1946,7 +1997,7 @@ function bindEvents() {
   if (btnExportPackAll) {
     btnExportPackAll.onclick = async () => {
       hidePackMenu();
-      const res = await api().export_pack(null, null);
+      const res = await api().export_pack(null, null, document.getElementById('packMode').value);
       if (!res || !res.ok) {
         if ((res && res.error) !== "Exportação cancelada.") {
           showToast((res && res.error) || "Falha ao exportar.", "#ef4444");
@@ -1955,6 +2006,7 @@ function bindEvents() {
       }
       const extra = res.skipped ? ` (${res.skipped} sem arquivo)` : "";
       showToast(`📦 ${res.count} áudio(s) exportados${extra}.`, "#10b981");
+      packSummary(res);
     };
   }
 
@@ -1967,7 +2019,7 @@ function bindEvents() {
         showToast("Nenhum áudio no filtro atual.", "#f59e0b");
         return;
       }
-      const res = await api().export_pack(ids, null);
+      const res = await api().export_pack(ids, null, document.getElementById('packMode').value);
       if (!res || !res.ok) {
         if ((res && res.error) !== "Exportação cancelada.") {
           showToast((res && res.error) || "Falha ao exportar.", "#ef4444");
@@ -1975,6 +2027,7 @@ function bindEvents() {
         return;
       }
       showToast(`📦 ${res.count} áudio(s) do filtro exportados.`, "#10b981");
+      packSummary(res);
     };
   }
 
@@ -1996,6 +2049,9 @@ function bindEvents() {
       const importedCount = Array.isArray(res.imported) ? res.imported.length : Number(res.imported) || 0;
       showToast(`📦 ${importedCount} importado(s), ${res.skipped || 0} ignorado(s).`, "#10b981");
       if (res.warnings && res.warnings.length) showPackWarnings(res.warnings);
+      if (res.summary) packSummary(res);
+      await window.collectionController?.refresh();
+      await window.sequenceEditor?.refreshLibrary();
     };
   }
 

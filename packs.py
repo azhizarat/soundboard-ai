@@ -144,7 +144,7 @@ def write_pack(path: str | Path, clips: list[dict], speakers: dict) -> dict:
             if clip.get('_revision'):
                 import soundfile as sf
                 from clip_renderer import render_revision
-                from clip_edits import project_segments
+                from audio_variants import revision_text
                 rendered = render_revision(clip['_source'], clip['_revision'], clip.get('_ffmpeg_path'))
                 # O volume atual também é baked; o manifesto não reaplica ganhos.
                 rendered *= float(clip.get('volume', 1))
@@ -153,9 +153,7 @@ def write_pack(path: str | Path, clips: list[dict], speakers: dict) -> dict:
                 entry.update({'trim_start': 0.0, 'trim_end': len(rendered) / 48000,
                               'duration': len(rendered) / 48000, 'volume': 1.0, 'rendered': True,
                               'montage_identity': montage_identity(clip)})
-                projected = project_segments(clip.get('segments'), clip['_revision']['spans'])
-                if clip.get('segments'):
-                    entry['transcript'] = ' '.join(str(s.get('text') or s.get('transcript') or '').strip() for s in projected).strip()
+                entry['transcript'] = revision_text(clip, clip['_revision'])
                 archive.writestr(entry['file'], buffer.getvalue())
             else:
                 archive.write(str(clip.get("file_path")), entry["file"])
@@ -210,6 +208,9 @@ def validate_pack(path: str | Path) -> dict:
     if not isinstance(manifest, dict) or manifest.get("format") != PACK_FORMAT:
         raise PackError("Pacote inválido: formato desconhecido.")
     version = manifest.get("version")
+    if version == 2 and type(version) is int:
+        from pack_graph import validate_graph_pack
+        return validate_graph_pack(path)
     if not isinstance(version, int) or isinstance(version, bool) or version > PACK_VERSION:
         raise PackError("Pacote criado por uma versão mais nova do Soundboard.")
     clips = manifest.get("clips")

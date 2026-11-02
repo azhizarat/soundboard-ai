@@ -28,6 +28,7 @@ from sequence_service import SequenceAPI
 from sequence_runner import SequenceRunner
 from operation_service import OperationAPI
 from audio_variants import VariantAPI
+from import_queue import ImportAPI
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -134,7 +135,7 @@ def _serialized_configuration(method):
     return wrapped
 
 
-class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI):
+class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI, ImportAPI):
     def __init__(self, data_dir: str = None, start_background_services: bool = True):
         # All internal state attributes MUST start with '_' so pywebview does not
         # recursively inspect/serialize them (especially self._window.native!).
@@ -1162,6 +1163,8 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI):
                 if context['_revision'].get('variant'):
                     from audio_variants import map_ranges
                     ranges = map_ranges(ranges, sum(b-a for a,b in context['_revision']['spans']), context['_revision']['variant'])
+                if not ranges:
+                    raise ValueError('A seleção não contém amostras após o efeito; amplie o intervalo')
                 context['_preview_ranges'] = ranges
                 handle = self._store.acquire_source(context['source_id'])
             def release(*_args):
@@ -1772,13 +1775,14 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI):
             self._store.update_speaker(spk_id, name=clean, color=color)
         return spk_id
 
-    def export_pack(self, clip_ids: list[str] = None, path: str = None) -> dict:
+    def export_pack(self, clip_ids: list[str] = None, path: str = None, mode=None,
+                    collection_ids=None, sequence_ids=None) -> dict:
         snap = self._store.snapshot()
         clips = self._public_clips(snap["clips"])
         if clip_ids is not None:
             wanted = {str(i) for i in clip_ids}
             clips = [c for c in clips if c["id"] in wanted]
-        if not clips:
+        if not clips and not (mode is not None and (collection_ids or sequence_ids)):
             return {"ok": False, "error": "Nenhum áudio para exportar.", "count": 0, "skipped": 0}
 
         if not path and self._window is not None:
@@ -1808,7 +1812,12 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI):
                 "skipped": 0,
             }
         try:
-            res = packs.write_pack(tmp, [self._store.render_context(c["id"]) for c in clips], snap["speakers"])
+            if mode is None:
+                # Compatibilidade da API v1; a UI sempre escolhe um modo v2 explícito.
+                res = packs.write_pack(tmp, [self._store.render_context(c["id"]) for c in clips], snap["speakers"])
+            else:
+                from pack_graph import write_graph_pack
+                res = write_graph_pack(tmp, self._store, clip_ids, collection_ids, sequence_ids, mode)
             os.replace(tmp, out)
         except packs.PackError as exc:
             _unlink_quiet(tmp)
@@ -1816,7 +1825,7 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI):
         except Exception as exc:
             _unlink_quiet(tmp)
             return {"ok": False, "error": f"Falha ao exportar: {exc}", "count": 0, "skipped": 0}
-        return {"ok": True, "path": str(out), "count": res["count"], "skipped": res["skipped"]}
+        return {"ok": True, "path": str(out), **res}
 
     def import_pack(self, path: str = None) -> dict:
         if not path and self._window is not None:
@@ -1859,6 +1868,16 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI):
         import soundfile as sf
 
         manifest = pack["manifest"]
+        if manifest.get('version') == 2:
+            try:
+                from pack_graph import import_graph_pack
+                result = import_graph_pack(self._store, path)
+                snap = self._store.snapshot()
+                self._hotkeys.refresh(self._public_clips(snap['clips']), snap['settings'])
+                self._notify_ui('clips_updated', {'clips': self._public_clips(snap['clips']), 'speakers': snap['speakers']})
+                return {**result, 'clips': self._public_clips(snap['clips']), 'speakers': snap['speakers']}
+            except Exception as exc:
+                return {'ok': False, 'error': str(exc), 'imported': [], 'skipped': 0, 'warnings': []}
         entries = manifest["clips"]
         speakers_meta = {
             str(s.get("name") or "").casefold(): s
@@ -2109,6 +2128,7 @@ def main(args=None):
         hidden=opts.minimized,
     )
     api._set_window(window)
+    window.events.loaded += api._bind_native_drop
 
     tray = None
     is_exiting = False

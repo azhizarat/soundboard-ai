@@ -88,6 +88,20 @@ def project(transcript, spans, options):
     return result
 
 
+def revision_text(context, revision):
+    """Texto deriva da montagem escolhida; correções humanas continuam na origem."""
+    temporal = context.get('transcript_analysis')
+    if temporal:
+        return project(temporal, revision['spans'], revision.get('variant', {}))['text']
+    if context.get('segments'):
+        from clip_edits import project_segments
+        segments = project_segments(context['segments'], revision['spans'])
+        return ' '.join(str(segment.get('text') or segment.get('transcript') or '').strip()
+                        for segment in segments).strip()
+    # Sem âncoras não há como atribuir palavras a intervalos menores.
+    return context.get('transcript') or ''
+
+
 def apply(samples, options, ffmpeg_path=None):
     effect = validate(options)
     if samples.ndim != 2 or samples.shape[1] not in (1, 2) or not 0 < len(samples) <= MAX_INPUT_SECONDS * SAMPLE_RATE:
@@ -165,6 +179,7 @@ class VariantAPI:
             child.update(id=uuid.uuid4().hex, revision_id=revision['id'], hotkey='', play_count=0,
                 title=(child.get('title') or 'Áudio') + ' — variante', effective_duration=revision['duration'],
                 lufs=measured['lufs'], lufs_estimated=measured['lufs_estimated'])
+            child['transcript'] = revision_text(context, revision)
             with self._store._lock:
                 self._store.state['revisions'][revision['id']] = revision
                 self._store.state['clips'].append(child)

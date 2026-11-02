@@ -2584,3 +2584,15 @@ body.mini-overlay .density-group {
 #localQualityPanel>.btn{margin:4px 8px 4px 0;white-space:normal}
 #qualityJobs>div{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 0;border-top:1px solid var(--border-subtle)}
 #qualityStatus{overflow-wrap:anywhere}
+.import-job{padding:10px;border-top:1px solid var(--border-subtle);font-size:12px}
+.import-job-heading,.import-job-actions,.import-batch{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.import-job-heading strong{flex:1;min-width:180px;overflow-wrap:anywhere}
+.import-job progress{width:100%;height:7px;margin:8px 0}
+.import-job p,.import-job small{display:block;margin:6px 0;color:var(--text-muted)}
+.import-job .import-job-error{color:#fca5a5}
+.import-job input[type=number]{width:90px}
+.import-job details{margin-top:8px}
+.import-batch{margin:12px 0}.import-batch label{display:flex;flex-direction:column;gap:4px}
+#importQueue input:not([type=checkbox]),#importQueue select,#packPopover select{background:var(--bg-card);color:var(--text-main);border:1px solid var(--border-subtle);border-radius:5px;padding:6px;max-width:100%}
+#importQueueItems{max-height:340px;overflow:auto}#importQueueCount{font-size:11px;color:var(--text-muted);margin-left:12px}
+#packPopover{max-height:70vh;overflow:auto;width:min(380px,90vw)}#packModeHint{font-size:11px;line-height:1.5;color:var(--text-muted)}

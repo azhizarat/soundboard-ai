@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.13 no ambiente atual, NumPy, soundfile, FFmpeg quando disponível, faster-whisper, sherpa-onnx, sounddevice/PyAudioWPatch, pywebview, JavaScript/CSS, pytest e testes JavaScript via Node.
 
-**Data:** 29/10/2026. **Estado:** implementação autorizada e iniciada; acompanhar [registro de execução](../../validation/2026-10-29-execution.md). Os caminhos abaixo são relativos à raiz `D:\repos\soundboard-ai`.
+**Data:** 29/10/2026; encerramento E0–E10 em 01/11/2026. **Estado:** implementação concluída e revisada no escopo funcional/sintético; E11 condicional. Ver [entrega](../../validation/2026-11-01-entrega-evolucao.md) e [registro de execução](../../validation/2026-10-29-execution.md). Os caminhos abaixo são relativos à raiz do projeto, atualmente `C:\Users\Hylex\.codex\worktrees\soundboard-evolution\soundboard-ai`. A integração de `main` está registrada em `4deb17d`; o checkout pessoal em D: permanece separado.
 
 ---
 
@@ -373,18 +373,18 @@ São lotes independentes após suas dependências. Não atrasam M1/M2.
 |---|---|---|---|
 | E10.1 Escolha aleatória sem repetição | E9 | Lógica em `sound_collections.py` e `ui/collections.js` | `tests/test_shuffle_groups.py` |
 | E10.2 Variantes de efeitos | E2, E4, E7 | `audio_variants.py` | `tests/test_audio_variants.py` |
-| E10.3 Importação ampliada | E1–E4, cache/limites de E6 | `import_jobs.py` | `tests/test_import_jobs.py` |
-| E10.4 Packs de coleções e fluxos | E2, E5, E8, E9 | Extensão versionada em `packs.py` | `tests/test_sequence_packs.py` |
+| E10.3 Importação ampliada | E1–E4, cache/limites de E6 | `import_queue.py`, `ui/imports.js` | `tests/test_import_queue.py`, `tests/test_imports_ui.test.cjs` |
+| E10.4 Packs de coleções e fluxos | E2, E5, E8, E9 | `pack_graph.py` e extensão versionada em `packs.py` | `tests/test_graph_packs.py` |
 
-- [ ] E10.1 Implementar grupo curado com saco embaralhado, sem repetição imediata quando há alternativas, indicação do escolhido e repetição explícita do último. Cooldown configurável; sem gatilhos automáticos por fala ambiente.
-- [ ] E10.2 Criar variantes de velocidade/tom/reverso com origem preservada, prévia, duração e loudness recalculados. Cadastro de voz usa fala original confirmada, não o efeito. Mapear o tempo quando houver alteração de velocidade.
-- [ ] E10.3 Unificar arquivos/pastas/drag-and-drop no editor; adicionar áudio de vídeo via capacidade explícita de decodificação. Para arquivos longos, permitir selecionar janela antes de análise integral. Fila com cancelamento, retry por item, dedupe por conteúdo, histórico e metadados em lote.
-- [ ] E10.4 Criar nova versão de pack com grafo de dependências, revisões fixadas, ordem/aparência de coleção e regras de disparo. Preservar leitura de packs antigos, hashes, limites de extração e política de caminhos. Rejeitar referências ausentes e ciclos antes de persistir.
-- [ ] E10.5 Importar packs sem substituir roteamento do destinatário nem tornar rótulos de pessoas recebidos em referências confirmadas locais. Resolver conflitos de atalhos e mostrar resumo de importação.
-- [ ] E10.6 Distinguir exportação compacta de resultado reproduzível de backup editável que leva origens e revisões. A opção compacta não promete recuperar cortes removidos; backup preserva montagem/referências com política explícita para amostras vocais locais.
+- [x] E10.1 Implementar grupo curado com saco embaralhado, sem repetição imediata quando há alternativas, indicação do escolhido e repetição explícita do último. Cooldown configurável; sem gatilhos automáticos por fala ambiente.
+- [x] E10.2 Criar variantes de velocidade/tom/reverso com origem preservada, prévia, duração e loudness recalculados. Cadastro de voz usa fala original confirmada, não o efeito. Mapear o tempo quando houver alteração de velocidade.
+- [x] E10.3 Unificar arquivos/pastas/drag-and-drop no editor; adicionar áudio de vídeo via capacidade explícita de decodificação. Para arquivos longos, permitir selecionar janela antes de análise integral. Fila com cancelamento, retry por item, dedupe por conteúdo, histórico e metadados em lote.
+- [x] E10.4 Criar nova versão de pack com grafo de dependências, revisões fixadas, ordem/aparência de coleção e regras de disparo. Preservar leitura de packs antigos, hashes, limites de extração e política de caminhos. Rejeitar referências ausentes e ciclos antes de persistir.
+- [x] E10.5 Importar packs sem substituir roteamento do destinatário nem tornar rótulos de pessoas recebidos em referências confirmadas locais. Resolver conflitos de atalhos e mostrar resumo de importação.
+- [x] E10.6 Distinguir exportação compacta de resultado reproduzível de backup editável que leva origens e revisões. A opção compacta não promete recuperar cortes removidos; backup preserva montagem/referências com política explícita para amostras vocais locais.
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_shuffle_groups.py tests/test_audio_variants.py tests/test_import_jobs.py tests/test_sequence_packs.py tests/test_f2_packs.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_shuffle_groups.py tests/test_audio_variants.py tests/test_import_queue.py tests/test_graph_packs.py tests/test_f2_packs.py -q
 ```
 
 **Aceite:** round-trip da coleção/fluxo com áudio final equivalente e referências válidas; importar pack não aprende pessoas automaticamente; erro em entrada não derruba lote; variante não muda a origem.
@@ -431,17 +431,17 @@ Para smoke manual com biblioteca isolada, após fechar normalmente outra instân
 
 Não encerrar automaticamente a instância em uso. O operador escolhe dispositivos de teste; começar pelo monitor e validar transmissão deliberadamente.
 
-Checklist de aceitação final:
+Checklist de aceitação funcional automatizada e WebView com biblioteca sintética. Os itens marcados não significam avaliação de modelos em corpus real nem operação em hardware físico; esses limites permanecem no relatório de entrega:
 
-- [ ] Captura existente continua utilizável e não exige uma nova caixa de entrada.
-- [ ] Corte por palavra e waveform, retirada do meio, junções, undo/redo, dois clipes da mesma origem e recuperação da edição.
-- [ ] Correção textual não altera áudio e resultado tardio de IA não sobrescreve trabalho manual.
-- [ ] Falha de ASR não vira “não houve fala” nem categoria inventada por indisponibilidade.
-- [ ] Voz aprende apenas com confirmação/trecho adequado; exclusão/desfazer remove influência; cobertura e erros são medidos juntos.
-- [ ] Sequência toca em ordem e em paralelo, espera operador e cancela completamente com Stop All.
-- [ ] Coleção estável, atalhos coerentes, prévia/ensaio no destino correto e recuperação de saída sem disparos inesperados.
-- [ ] Biblioteca antiga, packs e dados intermediários migram com rollback testado.
-- [ ] Relatório final distingue teste sintético, avaliação com corpus e execução em hardware real.
+- [x] Captura existente continua utilizável e não exige uma nova caixa de entrada.
+- [x] Corte por palavra e waveform, retirada do meio, junções, undo/redo, dois clipes da mesma origem e recuperação da edição.
+- [x] Correção textual não altera áudio e resultado tardio de IA não sobrescreve trabalho manual.
+- [x] Falha de ASR não vira “não houve fala” nem categoria inventada por indisponibilidade.
+- [x] Voz aprende apenas com confirmação/trecho adequado; exclusão/desfazer remove influência; cobertura e erros são medidos juntos.
+- [x] Sequência toca em ordem e em paralelo, espera operador e cancela completamente com Stop All.
+- [x] Coleção estável, atalhos coerentes, prévia/ensaio no destino correto e recuperação de saída sem disparos inesperados.
+- [x] Biblioteca antiga, packs e dados intermediários migram com rollback testado.
+- [x] Relatório final distingue teste sintético, avaliação com corpus e execução em hardware real.
 
 ## 8. Rastreabilidade das propostas anteriores
 
@@ -460,4 +460,4 @@ Os três contratos mais importantes são: origem/revisão imutável, correção 
 
 O plano não usa prazo de desenvolvimento humano nem promete duração sem baseline. A execução pode ser automatizada por etapas, com revisão humana dos resultados e validação auditiva/operacional nos marcos. A unidade de avanço é entrega demonstrável, não volume de código produzido.
 
-Estado de execução atual: **E0–E9 concluídos; E10 em implementação**, conforme o registro de execução. A biblioteca e as referências pessoais não são usadas nos testes dos lotes; alterações de schema são verificadas com dados isolados. E6 entrega ferramenta e contratos sintéticos; calibração de qualidade real permanece pendente de corpus.
+Estado de execução atual: **E0–E10 concluídos e revisados; E11 condicional**. Gate final: 728 Python + 77 JavaScript, API/FFmpeg e WebView2 com dados sintéticos. Os gates finais isolam biblioteca, modelos e hardware; os incidentes anteriores e seus efeitos estão registrados na [entrega](../../validation/2026-11-01-entrega-evolucao.md). E6 entrega ferramenta e contratos sintéticos; calibração de qualidade real permanece pendente de corpus. Validação auditiva e de roteamento físico não foi realizada.
