@@ -11,7 +11,8 @@
     function render(){
       const list=$('importQueueItems'),present=new Set(jobs.map(job=>job.id));
       for(const [id,previous] of rows){if(!present.has(id)){previous.row.remove();rows.delete(id);selected.delete(id);windows.delete(id);}}
-      $('importQueueCount').textContent=`${jobs.length} item(ns) — ${jobs.filter(job=>job.status==='success').length} importado(s)`;
+      const pending=jobs.filter(job=>['queued','probing','running','awaiting_window'].includes(job.status)).length;
+      $('importQueueCount').textContent=jobs.length?`${jobs.length} itens${pending?' · '+pending+' em andamento':''}`:'Nenhuma importação';
       for(const job of jobs){
         const signature=JSON.stringify(job),previous=rows.get(job.id);
         if(previous?.signature===signature)continue;
@@ -48,7 +49,15 @@
     }
     async function refresh(){
       if(busy||closed)return;busy=true;
-      try{const result=await bridge().list_import_jobs();if(result?.ok){jobs=result.jobs||[];render();}}
+      try{const result=await bridge().list_import_jobs();if(result?.ok){
+        const previous=new Map(jobs.map(job=>[job.id,job.status])),next=result.jobs||[];
+        const active=status=>['queued','probing','running','awaiting_window'].includes(status);
+        // Histórico não ocupa a biblioteca. Progresso contínuo respeita o recolhimento manual.
+        const attention=next.some(job=>(active(job.status)&&!active(previous.get(job.id)))||
+          (job.status==='awaiting_window'&&previous.get(job.id)!=='awaiting_window'));
+        if(attention)$('importQueue').open=true;
+        jobs=next;render();
+      }}
       catch(error){message(error.message||String(error));}finally{busy=false;}
     }
     function select(id,value){if(value)selected.add(id);else selected.delete(id);}

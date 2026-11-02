@@ -10,7 +10,13 @@ from audio_engine import AudioEngine
 @pytest.mark.parametrize('frequency,minimum,maximum', [(1000, .70, .72), (12000, 0, .005)])
 def test_native_downsample_filters_aliases(tmp_path, monkeypatch, frequency, minimum, maximum):
     import ai_analyzer
-    monkeypatch.setattr(ai_analyzer.subprocess, 'run', lambda *a, **k: pytest.fail('Native WAV must not use FFmpeg'))
+    original_run = ai_analyzer.subprocess.run
+    def without_ffmpeg(args, *positional, **options):
+        # O import tardio de SciPy pode consultar a versão do Windows. Isso não é decode.
+        if isinstance(args, (list, tuple)) and args[0] == ai_analyzer._RUNTIME['ffmpeg']:
+            pytest.fail('Native WAV must not use FFmpeg')
+        return original_run(args, *positional, **options)
+    monkeypatch.setattr(ai_analyzer.subprocess, 'run', without_ffmpeg)
     path = tmp_path / 'tone.wav'
     sf.write(path, np.sin(2*np.pi*frequency*np.arange(48000)/48000), 48000, subtype='FLOAT')
     data, duration = load_audio_mono_16k(str(path))

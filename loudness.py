@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import numpy as np
-from scipy.signal import lfilter
 from audio_processing import resample_audio
 
 TARGET_LUFS = -16.0
@@ -25,6 +24,7 @@ RLB_A = [1.0, -1.99004745483398, 0.99007225036621]
 
 def _apply_biquad(b: list[float], a: list[float], x: np.ndarray) -> np.ndarray:
     """Filtro compilado no eixo temporal; estados independentes por canal."""
+    from scipy.signal import lfilter
     return lfilter(b, a, x, axis=0)
 
 

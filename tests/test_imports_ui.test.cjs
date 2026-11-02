@@ -73,3 +73,37 @@ test('popover Pack permanece dentro da viewport com botão à esquerda e janela 
   assert.ok(left>=8&&left+w<=width-8);assert.ok(top>=8&&top+480<=692);
  }
 });
+test('histórico concluído não abre a fila; trabalho novo abre sem desfazer recolhimento durante progresso',async()=>{
+ const {create}=contract(),dom=document();
+ let jobs=[{id:'old',source:'old.wav',status:'success',progress:100,history:[]}];
+ const panel=dom.getElementById('importQueue');panel.open=false;
+ const ui=create(dom,()=>({list_import_jobs:async()=>({ok:true,jobs:structuredClone(jobs)})}));
+ await ui.refresh();assert.equal(panel.open,false,'Histórico não deve ocupar a biblioteca ao iniciar');
+ jobs.push({id:'new',source:'new.wav',status:'queued',progress:0,history:[]});
+ await ui.refresh();assert.equal(panel.open,true,'Trabalho novo mostra a fila');
+ panel.open=false;jobs[1].status='running';jobs[1].progress=20;
+ await ui.refresh();assert.equal(panel.open,false,'Poll não desfaz recolhimento explícito');
+ jobs[1].progress=80;await ui.refresh();assert.equal(panel.open,false);
+ jobs[1].status='awaiting_window';jobs[1].duration=500;
+ await ui.refresh();assert.equal(panel.open,true,'Pedido de janela exige atenção');
+ panel.open=false;await ui.refresh();assert.equal(panel.open,false,'Mesmo pedido não força abertura em cada poll');
+});
+test('janela pendente ao iniciar abre fila e retry volta a exibir o trabalho',async()=>{
+ const {create}=contract(),dom=document();
+ let job={id:'j',source:'long.wav',status:'awaiting_window',duration:500,history:[]};
+ const panel=dom.getElementById('importQueue');panel.open=false;
+ const ui=create(dom,()=>({list_import_jobs:async()=>({ok:true,jobs:[structuredClone(job)]})}));
+ await ui.refresh();assert.equal(panel.open,true);
+ panel.open=false;job.status='failed';await ui.refresh();assert.equal(panel.open,false);
+ job.status='queued';await ui.refresh();assert.equal(panel.open,true);
+});
+test('cancelar seletor de arquivos não abre fila vazia; admissão confirmada abre',async()=>{
+ const source=fs.readFileSync('ui/app.js','utf8'),definition=source.match(/async function runImportOperation\(operation\) \{[\s\S]*?\n}\n/);
+ assert.ok(definition);
+ const panel={open:false};let refreshes=0;
+ const context={window:{importController:{refresh(){refreshes++;}}},document:{getElementById:()=>panel},showToast(){}};
+ require('node:vm').runInNewContext(`${definition[0]}globalThis.run=runImportOperation;`,context);
+ await context.run(async()=>({ok:true,jobs:[]}));assert.equal(panel.open,false);
+ await context.run(async()=>({ok:true,jobs:[{id:'new'}]}));assert.equal(panel.open,true);
+ assert.equal(refreshes,2);
+});

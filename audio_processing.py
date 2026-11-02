@@ -3,7 +3,6 @@ from math import gcd
 from numbers import Integral
 
 import numpy as np
-from scipy.signal import resample_poly
 
 
 def resample_audio(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
@@ -18,5 +17,7 @@ def resample_audio(audio: np.ndarray, source_rate: int, target_rate: int) -> np.
         raise ValueError("Áudio contém amostras inválidas")
     if not len(data) or source_rate == target_rate:
         return data
+    # SciPy é necessário para converter áudio, não para abrir a interface.
+    from scipy.signal import resample_poly
     divisor = gcd(source_rate, target_rate)
     return resample_poly(data, target_rate // divisor, source_rate // divisor, axis=0).astype(np.float32)

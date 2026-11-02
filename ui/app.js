@@ -554,7 +554,7 @@ async function runImportOperation(operation) {
     if (!res) return;
     if (res.jobs) {
       window.importController?.refresh();
-      document.getElementById('importQueue').open = true;
+      if (res.jobs.length) document.getElementById('importQueue').open = true;
       if (!res.ok && res.error) showToast(res.error, '#ef4444');
       return res;
     }
