@@ -335,3 +335,105 @@ def test_real_engine_preview_preserves_broadcast_and_external_monitor(editor, mo
             assert mixer.routes[-1][0]['cable_device_id'] is None
     finally:
         api._audio.stop_all()
+
+
+@pytest.mark.parametrize('cursor,variant,expected', [
+    (60000, {}, 36000), (30000, {}, 24000), (96000, {}, 0),
+    (60000, {'speed': 2}, 18000),
+    (60000, {'reverse': True}, 35999),
+    (60000, {'speed': 2, 'reverse': True}, 18000),
+])
+def test_preview_cursor_maps_source_gaps_and_variant(editor, monkeypatch, cursor, variant, expected):
+    api, ident = editor
+    command(api, ident, 'remove', [24000, 48000])
+    api._store.state['edit_drafts'][ident]['revision']['variant'] = variant
+    calls = []
+    def play(**kwargs):
+        calls.append(kwargs)
+        kwargs['clip']['_release_source']()
+        return 'cursor-preview'
+    monkeypatch.setattr(api._audio, 'play_clip', play)
+    monkeypatch.setattr(api._audio, 'get_session', lambda _: None)
+    result = api.preview_clip_edit(ident, 'selection', [0, 96000], 0, True, cursor)
+    assert result['ok']
+    assert calls[0]['clip']['_preview_start_sample'] == expected
+    assert calls[0]['clip']['_preview_loop'] is True
+    assert result['status']['position_samples'] == expected
+    assert result['status']['duration_samples'] == (36000 if variant.get('speed') == 2 else 72000)
+    assert not api._store._active_sources
+
+
+@pytest.mark.parametrize('cursor', [-1, 96001, True, 1.5, '12', float('nan')])
+def test_preview_rejects_invalid_canonical_cursor_before_acquiring_source(editor, monkeypatch, cursor):
+    api, ident = editor
+    calls = []
+    monkeypatch.setattr(api._audio, 'play_clip', lambda **kwargs: calls.append(kwargs))
+    result = api.preview_clip_edit(ident, 'selection', [0, 48000], 0, False, cursor)
+    assert not result['ok']
+    assert calls == [] and not api._store._active_sources
+
+
+@pytest.mark.parametrize('cursor,expected', [(12000, 0), (24000, 12000), (48000, 0), (60000, 0)])
+def test_preview_cursor_outside_selection_resets_to_selection_start(editor, monkeypatch, cursor, expected):
+    api, ident = editor
+    contexts = []
+    def play(**kwargs):
+        contexts.append(kwargs['clip'])
+        kwargs['clip']['_release_source']()
+        return 'selection-preview'
+    monkeypatch.setattr(api._audio, 'play_clip', play)
+    monkeypatch.setattr(api._audio, 'get_session', lambda _: None)
+    result = api.preview_clip_edit(ident, 'selection', [12000, 48000], 0, False, cursor)
+    assert result['ok']
+    assert contexts[0]['_preview_start_sample'] == expected
+    assert result['ranges'] == [[12000, 48000]]
+
+
+def test_preview_first_pcm_starts_at_cursor_and_loop_wraps_whole_selection(editor, monkeypatch):
+    from mixer import AudioMixer, DeviceMixer
+    api, ident = editor
+    monkeypatch.setattr(DeviceMixer, 'ensure_stream', lambda self: True)
+    monkeypatch.setattr('mixer.is_cable_output_device', lambda _: False)
+    monkeypatch.setattr(api._audio, '_output_route_usable', lambda _: True)
+    mixer = AudioMixer()
+    monkeypatch.setattr(api._audio, '_mixer', mixer)
+    api._store.update_settings({'monitor_device_id': 2, 'cable_device_id': 1, 'monitor_volume': 1})
+    pcm = np.repeat((np.arange(1000, dtype=np.float32) / 10000)[:, None], 2, axis=1)
+    monkeypatch.setattr(api._audio, 'render_clip', lambda *_: pcm.copy())
+    original = mixer.start_group
+    first = []
+    def start(group, **kwargs):
+        original(group, **kwargs)
+        first.append(mixer.monitor_mixer.render_block(30, duck_gain=1))
+        return group
+    monkeypatch.setattr(mixer, 'start_group', start)
+    result = api.preview_clip_edit(ident, 'selection', [1000, 2000], 0, True, 1980)
+    try:
+        assert result['ok']
+        expected = np.concatenate([pcm[980:], pcm[:10]]) * .6
+        np.testing.assert_allclose(first[0], expected, rtol=1e-6)
+        assert api._audio.get_session(result['play_id']).loop
+    finally:
+        api._audio.stop_all(fade_ms=0)
+    assert not api._store._active_sources
+
+
+def test_preview_cancelled_before_publication_releases_source(editor, monkeypatch):
+    from mixer import AudioMixer, DeviceMixer
+    api, ident = editor
+    monkeypatch.setattr(DeviceMixer, 'ensure_stream', lambda self: True)
+    monkeypatch.setattr('mixer.is_cable_output_device', lambda _: False)
+    monkeypatch.setattr(api._audio, '_output_route_usable', lambda _: True)
+    mixer = AudioMixer()
+    monkeypatch.setattr(api._audio, '_mixer', mixer)
+    api._store.update_settings({'monitor_device_id': 2, 'cable_device_id': 1})
+    original = api._audio.start_group
+    def cancel(group):
+        api._audio.stop_all(fade_ms=0)
+        return original(group)
+    monkeypatch.setattr(api._audio, 'start_group', cancel)
+    result = api.preview_clip_edit(ident, 'selection', [0, 48000], 0, True, 24000)
+    assert not result['ok']
+    assert not api._store._active_sources
+    assert not api._audio._sessions
+    assert not np.any(mixer.monitor_mixer.render_block(10))

@@ -401,15 +401,13 @@
 
           <section id="integratedEditor" aria-label="Editor de áudio e transcrição">
             <div class="editor-transport">
-              <button type="button" id="editorHear" class="btn btn-primary" title="Tocar seleção · Espaço">▶ Seleção <kbd>Espaço</kbd></button>
-              <button type="button" id="editorHearResult" class="btn btn-secondary" title="Ouvir montagem completa">▶ Resultado</button>
-              <button type="button" id="editorHearCursor" class="btn btn-secondary" title="Ouvir a partir da agulha · Shift+Espaço">▶ Da agulha</button>
+              <button type="button" id="editorHear" class="btn btn-primary" title="Tocar a seleção a partir da agulha · Espaço" aria-label="Tocar a seleção a partir da agulha">▶ Play</button>
               <button type="button" id="editorStop" class="btn btn-secondary" title="Parar prévia" aria-label="Parar prévia">■</button>
               <label><input type="checkbox" id="editorLoop" /> Repetir</label>
               <span id="editorSelectionLength"></span><span id="editorMetrics"></span>
             </div>
             <section class="editor-audio" aria-label="Forma de onda da origem">
-              <canvas id="editorWaveform" tabindex="0" role="img" aria-label="Forma de onda. Arraste as alças para cortar. Clique ou arraste a agulha para navegar. Shift e arraste seleciona. Setas movem 10 milissegundos, I marca início, O marca fim, Espaço toca seleção." width="900" height="154"></canvas>
+              <canvas id="editorWaveform" tabindex="0" role="img" aria-label="Forma de onda. Arraste as alças para cortar. Arraste no áudio para selecionar. Arraste a alça branca para mover a agulha. Setas movem 10 milissegundos, I marca início, O marca fim, Espaço toca a seleção a partir da agulha." width="900" height="154"></canvas>
               <div class="editor-wave-tools">
                 <span id="editorCursor"></span><span id="editorViewport"></span>
                 <button type="button" id="editorZoomIn" class="btn btn-secondary" title="Aproximar (+)">+</button><button type="button" id="editorZoomOut" class="btn btn-secondary" title="Afastar (-)">−</button>
@@ -424,23 +422,31 @@
                 <button type="button" id="editorCreate" class="btn btn-secondary" title="Salvar a seleção em outro clipe, preservando este">Criar clipe da seleção</button>
                 <span class="editor-history"><button type="button" id="editorUndo" class="btn btn-secondary" title="Desfazer · Ctrl+Z" aria-label="Desfazer">↶</button><button type="button" id="editorRedo" class="btn btn-secondary" title="Refazer · Ctrl+Y" aria-label="Refazer">↷</button></span>
               </div>
-              <p class="editor-shortcuts">Arraste as alças <b>I / O</b> para ajustar · <b>Shift+arraste</b> seleciona · <b>Alt+arraste</b> move a seleção · <b>← →</b> agulha 10 ms · <b>Shift</b> 100 ms · clique na junção laranja para ouvir</p>
+              <p class="editor-shortcuts"><b>Arraste no áudio</b> para selecionar · <b>Alça branca</b> move a agulha · <b>I / O</b> ajustam limites · <b>Alt+arraste</b> move a seleção · <b>← →</b> agulha 10 ms · <b>Shift</b> 100 ms · clique na junção laranja para ouvir</p>
             </section>
             <div class="editor-dock">
               <nav class="editor-tabs" role="tablist" aria-label="Ferramentas do clipe">
                 <button type="button" id="editorTabtext" role="tab" aria-controls="editorTranscript" aria-selected="true">Transcrição</button>
                 <button type="button" id="editorTabmetadata" role="tab" aria-controls="editorMetadata">Título e aparência</button>
                 <button type="button" id="editorTabvoice" role="tab" aria-controls="editorVoice">Vozes</button>
-                <button type="button" id="editorTabvariants" role="tab" aria-controls="variantPanel">Velocidade e efeitos</button>
-                <button type="button" id="editorTabanalysis" role="tab" aria-controls="analysisPanel">Analisar com IA</button>
               </nav>
               <section id="editorTranscript" class="editor-inspector editor-transcript" role="tabpanel" aria-labelledby="editorTabtext">
-                <div class="editor-text-header"><span id="editorAlignment"></span><button type="button" id="editorEditText" class="btn btn-secondary" title="Corrigir o texto selecionado" aria-label="Corrigir texto">✎</button><button type="button" id="editorRetranscribe" class="btn btn-secondary" title="Transcrever a seleção novamente">↻ Transcrever seleção</button></div>
+                <div class="editor-text-header"><span id="editorAlignment"></span><button type="button" id="editorEditText" class="btn btn-secondary" title="Corrigir o texto selecionado" aria-label="Corrigir texto">✎</button><button type="button" id="analysisTranscribe" class="btn btn-secondary" title="Gerar a transcrição do clipe inteiro">↻ Transcrever tudo</button><button type="button" id="editorRetranscribe" class="btn btn-secondary" title="Transcrever a seleção novamente">Só seleção</button></div>
+                <div id="analysisTranscriptionFeedback" class="analysis-inline" hidden>
+                  <div class="analysis-inline-status"><progress id="transcriptionAnalysisProgress" aria-label="Andamento da análise" hidden></progress><span id="transcriptionAnalysisStatus" role="status" aria-live="polite"></span><button type="button" id="transcriptionAnalysisCancel" class="btn btn-secondary" hidden>Cancelar</button><small id="transcriptionAnalysisRuntime"></small></div>
+                  <pre id="transcriptionAnalysisProposal" hidden></pre><button type="button" id="transcriptionAnalysisAccept" class="btn btn-primary" hidden>Aplicar sugestão</button>
+                </div>
+                <p id="captureAnalysisWarning" role="status" hidden></p>
                 <div id="editorWords" aria-label="Selecione palavras para marcar o áudio"></div>
                 <p id="editorTextHint" class="help-text">Clique nas palavras para selecionar o áudio. Shift+clique amplia. Duplo clique corrige o texto.</p>
                 <div id="editorCorrectionRow" class="editor-correction-row"><textarea id="editorCorrection" title="Ctrl+Enter aplica a correção; Salvar também preserva o texto" rows="2" aria-label="Corrigir transcrição" placeholder="Digite ou corrija a transcrição…"></textarea><div><button type="button" id="editorApplyText" class="btn btn-secondary" title="Aplicar correção · Ctrl+Enter" aria-label="Aplicar correção">✓</button><button type="button" id="editorDiscardText" class="btn btn-secondary" title="Descartar texto ainda não aplicado" aria-label="Descartar correção">↶</button></div></div>
               </section>
           <details id="editorVoice" class="editor-inspector voice-learning" role="tabpanel" aria-labelledby="editorTabvoice" hidden><summary>Aprendizado de vozes</summary>
+            <div class="analysis-context-action"><button id="analysisSpeakers" type="button" class="btn btn-secondary">↻ Identificar vozes</button></div>
+            <div id="analysisSpeakersFeedback" class="analysis-inline" hidden>
+                  <div class="analysis-inline-status"><progress id="speakersAnalysisProgress" aria-label="Andamento da análise" hidden></progress><span id="speakersAnalysisStatus" role="status" aria-live="polite"></span><button type="button" id="speakersAnalysisCancel" class="btn btn-secondary" hidden>Cancelar</button><small id="speakersAnalysisRuntime"></small></div>
+                  <pre id="speakersAnalysisProposal" hidden></pre><button type="button" id="speakersAnalysisAccept" class="btn btn-primary" hidden>Aplicar sugestão</button>
+                </div>
             <div class="form-group flex-1">
               <label>Quem falou (Interlocutor)</label>
               <div class="speaker-select-row">
@@ -460,20 +466,12 @@
               ✂️ Separar Falas
             </button>
           </details>
-            <details id="variantPanel" class="editor-inspector" role="tabpanel" aria-labelledby="editorTabvariants" hidden><summary>Variantes de velocidade, tom e reverso</summary>
-              <p id="variantCapabilities"></p>
-              <div class="editor-transport">
-                <label>Velocidade (x)<input id="variantSpeed" type="number" min="0.5" max="2" step="0.05" value="1" /></label>
-                <label>Tom (semitons)<input id="variantPitch" type="number" min="-12" max="12" step="1" value="0" /></label>
-                <label><input id="variantReverse" type="checkbox" /> Reverso</label>
-                <button id="variantPreview" type="button" class="btn btn-secondary">Prévia no monitor</button>
-                <button id="variantStop" type="button" class="btn btn-secondary">Parar prévia</button>
-                <button id="variantCreate" type="button" class="btn btn-primary">Salvar como variante</button>
-              </div>
-              <p id="variantMessage" role="status"></p>
-              <p class="help-text">Salva uma cópia e preserva a origem. O editor e o cadastro vocal usam a gravação original.</p>
-            </details>
           <details id="editorMetadata" class="editor-inspector" role="tabpanel" aria-labelledby="editorTabmetadata" hidden><summary>Título, aparência, pessoas e atalhos</summary>
+            <div class="analysis-context-action"><button id="analysisMetadata" type="button" class="btn btn-secondary">✦ Sugerir título e categoria</button></div>
+            <div id="analysisMetadataFeedback" class="analysis-inline" hidden>
+                  <div class="analysis-inline-status"><progress id="metadataAnalysisProgress" aria-label="Andamento da análise" hidden></progress><span id="metadataAnalysisStatus" role="status" aria-live="polite"></span><button type="button" id="metadataAnalysisCancel" class="btn btn-secondary" hidden>Cancelar</button><small id="metadataAnalysisRuntime"></small></div>
+                  <pre id="metadataAnalysisProposal" hidden></pre><button type="button" id="metadataAnalysisAccept" class="btn btn-primary" hidden>Aplicar sugestão</button>
+                </div>
 
           <div class="form-row">
             <div class="form-group emoji-col">
@@ -518,23 +516,25 @@
             </div>
           </div>
 
+            <details id="variantPanel" class="editor-variants"><summary>Criar uma variante de áudio</summary>
+              <p id="variantCapabilities"></p>
+              <div class="editor-transport">
+                <label>Velocidade (x)<input id="variantSpeed" type="number" min="0.5" max="2" step="0.05" value="1" /></label>
+                <label>Tom (semitons)<input id="variantPitch" type="number" min="-12" max="12" step="1" value="0" /></label>
+                <label><input id="variantReverse" type="checkbox" /> Reverso</label>
+                <button id="variantPreview" type="button" class="btn btn-secondary">Prévia no monitor</button>
+                <button id="variantStop" type="button" class="btn btn-secondary">Parar prévia</button>
+                <button id="variantCreate" type="button" class="btn btn-primary">Salvar como variante</button>
+              </div>
+              <p id="variantMessage" role="status"></p>
+              <p class="help-text">Salva uma cópia e preserva a origem. O editor e o cadastro vocal usam a gravação original.</p>
+            </details>
           </details>
           <div class="form-group legacy-transcript">
             <label>Transcrição (Usada na busca e nomeação por IA)</label>
             <textarea id="editTranscript" rows="2" placeholder="Texto falado no áudio..."></textarea>
             <div id="analysisAlignment" class="help-text"></div>
           </div>
-          <details id="analysisPanel" class="editor-inspector" role="tabpanel" aria-labelledby="editorTabanalysis" hidden>
-            <summary>Analisar com IA</summary>
-            <div class="analysis-tasks"><button id="analysisTranscribe" type="button" class="btn btn-secondary">Transcrever áudio</button><button id="analysisSpeakers" type="button" class="btn btn-secondary">Identificar vozes</button><button id="analysisMetadata" type="button" class="btn btn-secondary">Sugerir título e categoria</button></div>
-            <label class="analysis-scope"><input type="checkbox" id="analysisSelection" /> Transcrever somente a seleção</label>
-            <select id="analysisStage" hidden><option value="transcription">Transcrever</option><option value="metadata">Metadados</option><option value="speakers">Pessoas</option><option value="acoustics">Acústica</option></select>
-            <input id="analysisStart" type="hidden" value="0" /><input id="analysisEnd" type="hidden" value="1" /><input id="analysisContext" type="hidden" value="0" />
-            <button id="btnStartAnalysis" type="button" hidden>Iniciar</button><button id="btnCancelAnalysis" type="button" class="btn btn-secondary" hidden>Cancelar</button>
-            <p id="captureAnalysisWarning" role="status" hidden></p><p id="analysisStatus" role="status" aria-live="polite"></p><small id="analysisRuntime"></small>
-            <pre id="analysisCurrent" hidden></pre><pre id="analysisProposal" style="white-space:pre-wrap"></pre>
-            <button id="btnAcceptAnalysis" type="button" class="btn btn-primary" hidden>Aplicar proposta</button><button id="btnLoadAnalysis" type="button" class="btn btn-secondary" hidden>Atualizar clipe</button>
-          </details>
             </div>
             <p id="editorStatus" role="status" aria-live="polite"></p>
           </section>

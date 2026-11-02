@@ -60,15 +60,15 @@ function fixture(options={}) {
 }
 
 function pointer(x,y=75,extra={}) {return {clientX:x,clientY:y,pointerId:1,button:0,preventDefault(){},...extra};}
-test('wave click and scrub position cursor without destroying selection; handles adjust only one edge',async()=>{
+test('agulha tem gesto próprio; arrastar alças ajusta só uma borda',async()=>{
  const f=fixture();await f.controller.open('one');f.controller.setSelection([24000,72000]);
  const c=f.elements.editorWaveform;
- c.onpointerdown(pointer(450));c.onpointerup(pointer(450));
+ c.onpointerdown(pointer(450,75,{ctrlKey:true}));c.onpointerup(pointer(450));
  assert.deepEqual(f.controller.selection,[24000,72000]);
  assert.equal(f.controller.cursor,48000);
  c.onpointerdown(pointer(225));c.onpointermove(pointer(270));c.onpointerup(pointer(270));
  assert.deepEqual(f.controller.selection,[28800,72000]);assert.equal(f.controller.cursor,48000);
- c.onpointerdown(pointer(450));c.onpointermove(pointer(540));c.onpointerup(pointer(540));
+ c.onpointerdown(pointer(450,75,{ctrlKey:true}));c.onpointermove(pointer(540));c.onpointerup(pointer(540));
  assert.equal(f.controller.cursor,57600);assert.deepEqual(f.controller.selection,[28800,72000]);f.controller.close();
 });
 test('shift drag selects and alt drag moves selection relatively without changing its length',async()=>{
@@ -182,17 +182,17 @@ test('preview that starts after closing is stopped by its own id',async()=>{
 
 
 test('agulha faz seek só na própria sessão, com offset relativo após corte e preserva seleção',async()=>{
- const f=fixture();await f.controller.open('one');const seeks=[],stops=[];
+ const f=fixture();await f.controller.open('one');const seeks=[],stops=[],starts=[];
  await f.controller.run('remove',{interval:[0,48000]});
- f.api.preview_clip_edit=async()=>({ok:true,play_id:'editor-only',ranges:[[0,48000]]});
+ f.api.preview_clip_edit=async(...args)=>{starts.push(args);return {ok:true,play_id:'editor-only',ranges:[[0,48000]],status:{playing:true,position:.5}};};
  f.api.stop_editor_preview=async id=>{stops.push(id);};
  f.api.seek_playback=async (position,id)=>{seeks.push([position,id]);return {ok:true};};
  f.api.get_editor_playback=async()=>({playing:false});
  f.controller.setSelection([48000,96000]);
- const c=f.elements.editorWaveform;c.onpointerdown(pointer(675));c.onpointerup(pointer(675));
+ const c=f.elements.editorWaveform;c.onpointerdown(pointer(675,75,{ctrlKey:true}));c.onpointerup(pointer(675));
  await f.controller.preview('result',true);await f.controller.settleSeek();
- assert.deepEqual(seeks,[[.5,'editor-only']]);assert.deepEqual(f.controller.selection,[48000,96000]);
- c.onpointerdown(pointer(810));c.onpointerup(pointer(810));await f.controller.settleSeek();
+ assert.deepEqual(seeks,[]);assert.equal(starts[0][5],72000);assert.deepEqual(f.controller.selection,[48000,96000]);
+ c.onpointerdown(pointer(810,75,{ctrlKey:true}));c.onpointerup(pointer(810));await f.controller.settleSeek();
  assert.deepEqual(seeks.at(-1),[.8,'editor-only']);f.controller.close();
  assert.deepEqual(stops,['editor-only']);
 });
@@ -204,9 +204,9 @@ test('seek pendente não vaza para outro clipe nem usa sessão global após fech
  f.api.get_editor_playback=async()=>({playing:false});
  f.api.seek_playback=(position,id)=>{seeks.push([position,id]);return new Promise(resolve=>finish=resolve);};
  await f.controller.preview();const c=f.elements.editorWaveform;
- c.onpointerdown(pointer(400));c.onpointerup(pointer(400));
+ c.onpointerdown(pointer(400,75,{ctrlKey:true}));c.onpointerup(pointer(400));
  await new Promise(resolve=>setImmediate(resolve));
- c.onpointerdown(pointer(600));c.onpointerup(pointer(600));
+ c.onpointerdown(pointer(600,75,{ctrlKey:true}));c.onpointerup(pointer(600));
  f.controller.close();await f.controller.open('two');finish({ok:true});await f.controller.settleSeek();
  assert.equal(seeks.length,1);assert.equal(seeks[0][1],'old');f.controller.close();
 });
@@ -237,7 +237,7 @@ test('poll iniciado durante seek não move agulha para status anterior recebido 
  f.api.stop_editor_preview=async()=>({ok:true});
  f.api.seek_playback=()=>new Promise(resolve=>finishSeek=resolve);
  f.api.get_editor_playback=()=>new Promise(resolve=>finishPoll=resolve);
- await f.controller.preview();f.elements.editorWaveform.onpointerdown(pointer(675));f.elements.editorWaveform.onpointerup(pointer(675));
+ await f.controller.preview();f.elements.editorWaveform.onpointerdown(pointer(675,75,{ctrlKey:true}));f.elements.editorWaveform.onpointerup(pointer(675));
  while(!finishPoll)await new Promise(resolve=>setTimeout(resolve,5));
  finishSeek({ok:true});await f.controller.settleSeek();finishPoll({playing:true,position:.1});
  await new Promise(resolve=>setImmediate(resolve));assert.equal(f.controller.cursor,72000);f.controller.close();
@@ -312,8 +312,44 @@ test('arraste para trás com seeks sobrepostos retoma animação na última inte
  f.api.seek_playback=position=>{positions.push(position);return new Promise(resolve=>pending.push(resolve));};
  f.api.stop_editor_preview=async()=>({ok:true});
  await f.controller.preview();const wave=f.elements.editorWaveform;
- wave.onpointerdown(pointer(112.5));wave.onpointerup(pointer(112.5));await new Promise(resolve=>setImmediate(resolve));
- wave.onpointerdown(pointer(225));wave.onpointerup(pointer(225));pending.shift()({ok:true});
+ wave.onpointerdown(pointer(112.5,75,{ctrlKey:true}));wave.onpointerup(pointer(112.5));await new Promise(resolve=>setImmediate(resolve));
+ wave.onpointerdown(pointer(225,75,{ctrlKey:true}));wave.onpointerup(pointer(225));pending.shift()({ok:true});
  await new Promise(resolve=>setImmediate(resolve));pending.shift()({ok:true});await f.controller.settleSeek();
  await f.poll();f.frame(16);assert.equal(f.controller.cursor,24768);assert.deepEqual(positions,[.25,.5]);f.controller.close();
+});
+
+
+test('arraste normal seleciona e alça branca navega sem substituir o intervalo',async()=>{
+ const f=fixture();await f.controller.open('one');const wave=f.elements.editorWaveform;
+ wave.onpointerdown(pointer(225));wave.onpointermove(pointer(450));wave.onpointerup(pointer(450));
+ assert.deepEqual(f.controller.selection,[24000,48000]);assert.equal(f.controller.cursor,0);
+ wave.onpointerdown(pointer(0,22));wave.onpointermove(pointer(675));wave.onpointerup(pointer(675));
+ assert.equal(f.controller.cursor,72000);assert.deepEqual(f.controller.selection,[24000,48000]);f.controller.close();
+});
+
+test('Play único envia seleção e agulha ao backend sem reproduzir outro trecho antes do seek',async()=>{
+ const f=fixture();await f.controller.open('one');const calls=[],seeks=[];
+ f.api.preview_clip_edit=async(...args)=>{calls.push(args);return {ok:true,play_id:'own',ranges:[[24000,48000]],status:{playing:true,position:.25}};};
+ f.api.seek_playback=async(...args)=>{seeks.push(args);return {ok:true};};f.api.stop_editor_preview=async()=>({ok:true});
+ f.controller.setSelection([24000,48000]);const wave=f.elements.editorWaveform;
+ wave.onpointerdown(pointer(337.5,75,{ctrlKey:true}));wave.onpointerup(pointer(337.5));
+ await f.elements.editorHear.onclick();
+ assert.deepEqual(calls[0],['one','selection',[24000,48000],0,false,36000]);assert.deepEqual(seeks,[]);
+ assert.equal(f.controller.cursor,36000);f.controller.close();
+});
+
+test('transcrever seleção chama análise contextual sem trocar a aba',async()=>{
+ let calls=0;const f=fixture({retranscribe:()=>{calls++;}});await f.controller.open('one');
+ f.elements.editorTabtext.setAttribute=(name,value)=>{f.elements.editorTabtext[name]=value;};
+ f.controller.showPanel('text');f.elements.editorRetranscribe.onclick();
+ assert.equal(calls,1);assert.equal(f.elements.editorTabtext['aria-selected'],'true');f.controller.close();
+});
+
+
+test('Ctrl na base de uma junção move a agulha sem iniciar audição',async()=>{
+ const f=fixture();const original=f.api.get_clip_editor;let previews=0;
+ f.api.get_clip_editor=async()=>{const result=await original();return {...result,editor:{...result.editor,spans:[[0,24000],[48000,96000]]}};};
+ f.api.preview_clip_edit=async()=>{previews++;return {ok:false,error:'unexpected'};};
+ await f.controller.open('one');f.elements.editorWaveform.onpointerdown(pointer(225,149,{ctrlKey:true}));
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(previews,0);assert.equal(f.controller.cursor,24000);f.controller.close();
 });

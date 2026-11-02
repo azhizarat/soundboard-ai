@@ -160,7 +160,7 @@
       }
     }
     function showPanel(name) {
-      const panels={text:'editorTranscript',metadata:'editorMetadata',voice:'editorVoice',variants:'variantPanel',analysis:'analysisPanel'};
+      const panels={text:'editorTranscript',metadata:'editorMetadata',voice:'editorVoice'};
       for(const [key,id] of Object.entries(panels)){
         const panel=el(id),active=key===name;panel.hidden=!active;if(panel.tagName==='DETAILS')panel.open=active;
         const button=el('editorTab'+key);button.setAttribute?.('aria-selected',String(active));button.tabIndex=active?0:-1;
@@ -277,12 +277,12 @@
       if(!(await flush())?.ok)return;
       const saved=await callbacks.persist?.();
       if(opened!==epoch||request!==previewEpoch||(callbacks.persist&&!saved?.ok))return;
-      const result=await bridge().preview_clip_edit(clipId,mode,[...chosen],junction,el('editorLoop').checked);
+      const result=await bridge().preview_clip_edit(clipId,mode,[...chosen],junction,el('editorLoop').checked,fromCursor?startCursor:null);
       if(opened!==epoch||request!==previewEpoch){if(result?.play_id)await bridge().stop_editor_preview(result.play_id);return;}
       if(!result.ok){status(result.error);return;}
       stopPolling();playId=result.play_id;playRanges=result.ranges;displayPosition=0;
       if(result.status?.playing===false){finishPlayback(result.status);return;}
-      if(fromCursor){setCursor(startCursor);await seekQueue;}else {syncClock(result.status||{playing:true,position:0,loop:el('editorLoop').checked});}
+      syncClock(result.status||{playing:true,position:0,loop:el('editorLoop').checked});
       if(opened!==epoch||request!==previewEpoch)return;
       status('Prévia no monitor. Arraste a agulha para navegar.');timer=schedule(poll,60);
     }
@@ -296,10 +296,9 @@
       el('editorCorrection').onkeydown=event=>{if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();event.stopPropagation?.();applyText();}};
       el('editorZoom').onclick=()=>{viewport=[...chosen];draw();};
       el('editorZoomIn').onclick=()=>zoom(.5);el('editorZoomOut').onclick=()=>zoom(2);
-      el('editorHearCursor').onclick=()=>preview('result',true);
       el('editorSeek').oninput=()=>setCursor(variantToSource(model.spans,Math.round(Number(el('editorSeek').value)*RATE),model.variant||{}));
       el('editorLoop').onchange=()=>{if(playId)Promise.resolve(bridge().set_playback_loop(el('editorLoop').checked,playId)).catch(error=>status(error.message));};
-      const panelNames=['text','metadata','voice','variants','analysis'];
+      const panelNames=['text','metadata','voice'];
       for(const [i,name] of panelNames.entries()){
         const tab=el('editorTab'+name);tab.onclick=()=>showPanel(name);
         tab.onkeydown=event=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){event.preventDefault();event.stopPropagation();const next=event.key==='Home'?0:event.key==='End'?panelNames.length-1:(i+(event.key==='ArrowRight'?1:-1)+panelNames.length)%panelNames.length;showPanel(panelNames[next]);el('editorTab'+panelNames[next]).focus();}};
@@ -308,33 +307,29 @@
       el('editorFit').onclick=()=>{viewport=[0,model.source_samples];draw();};
       for(const [id,direction] of [['editorPanLeft',-1],['editorPanRight',1]])el(id).onclick=()=>{
         const width=viewport[1]-viewport[0],start=Math.max(0,Math.min(model.source_samples-width,viewport[0]+direction*width*.5));viewport=[start,start+width];draw();};
-      el('editorHear').onclick=()=>preview();el('editorHearResult').onclick=()=>preview('result');
+      el('editorHear').onclick=()=>preview('selection',true);
       el('editorStop').onclick=invalidatePreview;
-      el('editorRetranscribe').onclick=()=>{
-        showPanel('analysis');el('analysisPanel').open=true;el('analysisStage').value='transcription';el('analysisSelection').checked=true;
-        el('analysisStart').value=chosen[0]/RATE;el('analysisEnd').value=chosen[1]/RATE;
-        el('analysisProposal').textContent='Texto atual: '+units.filter(u=>transcript.intersects(u,chosen)).map(u=>u.text).join(' ');
-        callbacks.retranscribe?.();
-      };
+      el('editorRetranscribe').onclick=()=>callbacks.retranscribe?.();
       const canvas=el('editorWaveform');let drag=null;
       const sample=event=>Math.max(0,Math.min(model.source_samples,Math.round(viewport[0]+(event.clientX-canvas.getBoundingClientRect().left)/canvas.getBoundingClientRect().width*(viewport[1]-viewport[0]))));
       canvas.onpointerdown=event=>{
         if(!model||event.button>0)return;event.preventDefault();canvas.focus();
         const at=sample(event),rect=canvas.getBoundingClientRect(),tolerance=10/rect.width*(viewport[1]-viewport[0]);
-        const onNeedle=event.clientY-rect.top<28||event.ctrlKey||event.metaKey;
-        if(event.clientY-rect.top>rect.height-14&&!event.shiftKey&&!event.altKey){
+        const onNeedle=(event.clientY-rect.top<32&&Math.abs(at-cursor)<=tolerance*1.2)||event.ctrlKey||event.metaKey;
+        if(event.clientY-rect.top>rect.height-14&&!event.shiftKey&&!event.altKey&&!onNeedle){
           const junction=model.spans.slice(1).findIndex((span,i)=>Math.abs(at-span[0])<tolerance||Math.abs(at-model.spans[i][1])<tolerance);
           if(junction>=0){preview('junction',false,junction);return;}
         }
         const edge=Math.abs(at-chosen[0])<=tolerance?0:Math.abs(at-chosen[1])<=tolerance?1:null;
-        const mode=onNeedle?'cursor':event.shiftKey?'select':event.altKey?'move':edge!==null?'edge':'cursor';
+        const mode=event.shiftKey?'select':onNeedle?'cursor':event.altKey?'move':edge!==null?'edge':'select';
         if(textDirty&&mode!=='cursor'){status('Aplique ou descarte a correção antes de mudar a seleção.');return;}
         drag={origin:at,edge,mode,selection:[...chosen]};canvas.setPointerCapture(event.pointerId);
         if(mode==='cursor')setCursor(at);
+        else if(mode==='select')setSelection([at,at+1]);
       };
       canvas.onpointermove=event=>{
         if(!model)return;const at=sample(event);
-        if(!drag){const tolerance=10/canvas.clientWidth*(viewport[1]-viewport[0]);canvas.style.cursor=chosen.some(v=>Math.abs(at-v)<=tolerance)?'ew-resize':event.shiftKey?'crosshair':'col-resize';return;}
+        if(!drag){const tolerance=10/canvas.clientWidth*(viewport[1]-viewport[0]);canvas.style.cursor=event.clientY-canvas.getBoundingClientRect().top<32&&Math.abs(at-cursor)<=tolerance*1.2?'grab':chosen.some(v=>Math.abs(at-v)<=tolerance)?'ew-resize':'crosshair';return;}
         if(drag.mode==='cursor')setCursor(at);
         else if(drag.mode==='edge')setSelection(drag.edge===0?[Math.min(at,chosen[1]-1),chosen[1]]:[chosen[0],Math.max(at,chosen[0]+1)]);
         else if(drag.mode==='move'){
@@ -358,7 +353,7 @@
           event.preventDefault();event.stopPropagation?.();const direction=key==='arrowright'?1:-1;
           setCursor(cursor+direction*(event.shiftKey?4800:480));
         }else if(key==='home'||key==='end'){event.preventDefault();setCursor(key==='home'?chosen[0]:chosen[1]);}
-        else if(key===' '&&event.target?.tagName!=='BUTTON'){event.preventDefault();event.stopPropagation?.();if(playId)invalidatePreview();else preview(event.shiftKey?'result':'selection',event.shiftKey);}
+        else if(key===' '&&event.target?.tagName!=='BUTTON'){event.preventDefault();event.stopPropagation?.();if(playId)invalidatePreview();else preview('selection',true);}
         else if((key==='i'||key==='o')&&!textDirty){event.preventDefault();setSelection(key==='i'?[Math.min(cursor,chosen[1]-1),chosen[1]]:[chosen[0],Math.max(cursor,chosen[0]+1)]);}
         else if(actions[key]){event.preventDefault();event.stopPropagation?.();if(!textDirty||['+','=','-','f'].includes(key))el(actions[key]).onclick();}
       };
@@ -375,7 +370,7 @@
       if(model.result.alignment==='unaligned')el('editorCorrection').value=model.result.text;
       const waveform=await bridge().get_edit_source_waveform(id,2048);
       if(opened===epoch&&waveform.ok){peaks=waveform.peaks||[];draw();}
-      status('Clique ou arraste para navegar. Alças I/O ajustam o corte; Shift+arraste cria uma seleção.');
+      status('Arraste no áudio para selecionar. Arraste a alça branca para mover a agulha.');
     }
     function close(){resizeObserver?.disconnect();resizeObserver=null;epoch++;invalidatePreview();variants?.close();clipId=null;model=null;peaks=[];textDirty=false;editingText=false;correctionIds=[];anchor=null;}
     return {open,close,flush,refresh,preview,run,setSelection,showPanel,settleSeek:()=>seekQueue,settle:()=>queue,get selection(){return [...chosen];},get cursor(){return cursor;}};

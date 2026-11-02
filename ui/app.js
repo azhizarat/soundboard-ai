@@ -1332,7 +1332,7 @@ async function openEditModal(clip) {
       },
       created: created => {state.clips.unshift(created); renderGrid(); refreshEditDrafts();
         window.collectionController?.refresh().catch(error => showToast(error.message, 'warning'));},
-      retranscribe: () => state.analysisPanel?.start(),
+      retranscribe: () => state.analysisPanel?.start('transcription', {selection:true}),
     });
     const volumeGroup = document.getElementById('editVolume').closest('.form-group');
     document.getElementById('editorVolumeMount').appendChild(volumeGroup);
@@ -2666,7 +2666,7 @@ function bindEvents() {
   }
 
   document.getElementById("btnReanalyzeAI").onclick = async () => {
-    state.integratedEditor?.showPanel('analysis');
+    state.integratedEditor?.showPanel('text');
   };
 
   document.getElementById("btnSplitSpeakers").onclick = async () => {

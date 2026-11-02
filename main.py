@@ -1244,7 +1244,7 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI, Imp
             return dict(status)
 
     def preview_clip_edit(self, clip_id: str, mode: str = 'selection', interval: list = None,
-                          junction: int = 0, loop: bool = False) -> dict:
+                          junction: int = 0, loop: bool = False, cursor_sample: int = None) -> dict:
         handle = None
         try:
             request_settings, _, request_epoch = self._operation_request(True)
@@ -1254,6 +1254,9 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI, Imp
                 context = self._store.render_context(clip_id, True)
                 if not context or not context.get('_revision'):
                     raise ValueError('Abra uma montagem antes de ouvir')
+                if cursor_sample is not None and (type(cursor_sample) is not int or
+                        not 0 <= cursor_sample <= context['_source']['total_samples']):
+                    raise ValueError('Posição da agulha inválida')
                 if interval is not None:
                     validate_spans([interval], context['_source']['total_samples'])
                 ranges = preview_ranges(context['_revision']['spans'], mode, interval, junction)
@@ -1262,15 +1265,40 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI, Imp
                     ranges = map_ranges(ranges, sum(b-a for a,b in context['_revision']['spans']), context['_revision']['variant'])
                 if not ranges:
                     raise ValueError('A seleção não contém amostras após o efeito; amplie o intervalo')
+                start_sample = 0
+                if cursor_sample is not None and (mode != 'selection' or interval[0] <= cursor_sample < interval[1]):
+                    def projected_position(spans, position):
+                        offset = 0
+                        for a, b in spans:
+                            if position < a:
+                                return offset
+                            if position < b:
+                                return offset + position - a
+                            offset += b-a
+                        return offset-1
+                    # Mesmo mapa da timeline: lacunas avançam ao próximo trecho;
+                    # ceil inverte o floor usado para projetar a agulha na origem.
+                    from audio_variants import output_samples, validate
+                    spans = context['_revision']['spans']
+                    effect = validate(context['_revision'].get('variant', {}))
+                    montage_total = sum(b-a for a,b in spans)
+                    position = projected_position(spans, cursor_sample)
+                    if effect['reverse']:
+                        position = montage_total-1-position
+                    position = min(output_samples(montage_total, effect)-1,
+                                   max(0, math.ceil(position/effect['speed'])))
+                    start_sample = projected_position(ranges, position)
                 context['_preview_ranges'] = ranges
+                context['_preview_start_sample'] = start_sample
+                context['_preview_loop'] = bool(loop)
                 handle = self._store.acquire_source(context['source_id'])
             def release(*_args):
                 self._store.release_source(handle)
             context['_release_source'] = release
             total = sum(b-a for a,b in ranges)
             metadata = {'play_id': None, 'clip_id': clip_id, 'playing': True, 'reason': None, 'error': None,
-                        'position': 0.0, 'duration': total/48000, 'current_s': 0.0, 'duration_s': total/48000,
-                        'position_samples': 0, 'duration_samples': total, 'sample_rate': 48000,
+                        'position': start_sample/48000, 'duration': total/48000, 'current_s': start_sample/48000, 'duration_s': total/48000,
+                        'position_samples': start_sample, 'duration_samples': total, 'sample_rate': 48000,
                         'position_known': False, 'paused': False, 'loop': bool(loop),
                         'monitor_only': True, 'seek_epoch': 0}
             session_ref = [None]
@@ -1302,7 +1330,6 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI, Imp
             if session:
                 with self._editor_preview_lock:
                     session_ref[0] = weakref.ref(session)
-                session.set_loop(bool(loop))
                 self._remember_editor_preview(play_id, self._editor_session_status(session))
             else:
                 self._remember_editor_preview(play_id, {**metadata, 'play_id': play_id})

@@ -294,3 +294,43 @@ def test_save_replay_wav_handles_silence_and_noise_floor(tmp_path):
     saved = engine.save_replay_wav(str(out_file), last_seconds=1.0)
     assert saved == str(out_file)
     assert out_file.exists()
+
+
+def test_legacy_preview_initial_state_is_frozen_before_stream_worker(tmp_path, monkeypatch):
+    engine = AudioEngine(start_loopback=False)
+    monkeypatch.setattr(engine, '_mixer', None)
+    monkeypatch.setattr(engine, '_output_route_usable', lambda _: True)
+    monkeypatch.setattr('mixer.is_cable_output_device', lambda _: False)
+    path = _write_wav(tmp_path / 'preview.wav', frames=1000)
+    pcm = np.repeat((np.arange(1000, dtype=np.float32) / 10000)[:, None], 2, axis=1)
+    monkeypatch.setattr(engine, 'render_clip', lambda *_: pcm)
+    observed, releases = [], []
+    done = threading.Event()
+    def stream(session, *_args):
+        observed.append((session.pos_idx, session.loop, session.data[session.pos_idx].copy()))
+    monkeypatch.setattr(engine, '_stream_session_to_device', stream)
+    play_id = engine.play_clip({'id': 'preview', 'file_path': str(path), '_preview_ranges': [[0, 1000]],
+        '_preview_start_sample': 731, '_preview_loop': True, '_release_source': lambda: releases.append(1)},
+        {'monitor_device_id': 2}, monitor_only=True, on_complete=lambda _: done.set())
+    assert play_id and done.wait(2)
+    assert observed[0][:2] == (731, True)
+    np.testing.assert_array_equal(observed[0][2], pcm[731])
+    assert releases == [1] and engine.get_session(play_id) is None
+
+
+def test_normal_playback_ignores_private_preview_cursor_and_loop(tmp_path, monkeypatch):
+    from mixer import AudioMixer, DeviceMixer
+    engine = AudioEngine(start_loopback=False)
+    mixer = AudioMixer()
+    monkeypatch.setattr(engine, '_mixer', mixer)
+    monkeypatch.setattr(DeviceMixer, 'ensure_stream', lambda self: True)
+    monkeypatch.setattr(engine, '_output_route_usable', lambda _: True)
+    path = _write_wav(tmp_path / 'normal.wav', frames=1000)
+    monkeypatch.setattr(engine, 'render_clip', lambda *_: np.zeros((1000, 2), dtype=np.float32))
+    play_id = engine.play_clip({'id': 'normal', 'file_path': str(path), '_preview_ranges': [[0, 1000]],
+        '_preview_start_sample': 731, '_preview_loop': True}, {'cable_device_id': 1})
+    try:
+        voice = engine.get_session(play_id)
+        assert voice.pos_idx == 0 and voice.loop is False
+    finally:
+        engine.stop_all(fade_ms=0)

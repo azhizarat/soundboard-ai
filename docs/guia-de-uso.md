@@ -7,16 +7,16 @@ Este guia descreve os recursos implementados. O estado de revisão e os limites 
 Abra o editor de um clipe capturado ou importado. A captura contínua existente permanece como entrada do fluxo.
 
 1. Se houver transcrição alinhada, selecione uma palavra. Use Shift ao selecionar outra para ampliar o intervalo. Blocos corrigidos manualmente ou sem alinhamento por palavra são selecionados como um bloco.
-2. Arraste as alças verde (início) e laranja (fim) na waveform. Clique ou arraste no áudio para mover a agulha sem apagar a seleção. Shift+arraste cria uma seleção; Alt+arraste move a seleção inteira. As setas movem a agulha em 10 ms; Shift+seta usa 100 ms. I e O marcam início e fim na agulha. A roda aproxima ou afasta o ponto sob o mouse. Dentro de campos de texto, as teclas continuam editando o texto normalmente.
+2. Arraste no áudio para selecionar; ajuste os limites pelas alças verde e laranja. Para mover apenas a agulha, arraste sua alça branca ou use Ctrl+arraste. Shift+arraste também cria uma seleção; Alt+arraste move a seleção inteira. As setas movem a agulha em 10 ms; Shift+seta usa 100 ms. I e O marcam início e fim na agulha. A roda aproxima ou afasta o ponto sob o mouse. Dentro de campos de texto, as teclas continuam editando o texto normalmente.
 3. Use **Recortar** para conservar apenas a parte selecionada da montagem atual. Use **Remover trecho** para retirar o meio e juntar o que restou. **Restaurar trecho** recupera áudio selecionado que havia sido removido.
-4. Confira com **Seleção** (Espaço), **Resultado**, **Da agulha** (Shift+Espaço) ou clicando num marcador laranja de junção no pé da waveform. Essas prévias usam o monitor. **Parar** encerra a prévia própria; não interrompe uma transmissão externa ao editor.
+4. Confira com **Play** ou Espaço: toca a seleção a partir da agulha. Se a agulha estiver fora da seleção ou no fim, começa pelo início. **Repetir** volta ao início da seleção inteira a cada volta. Clicar num marcador laranja de junção no pé da waveform permite conferir o corte. Essas prévias usam o monitor. **Parar** encerra a prévia própria; não interrompe uma transmissão externa ao editor.
 5. Use **Salvar** para atualizar o clipe ou **Criar clipe da seleção** para publicar outra montagem da mesma gravação. A origem é preservada.
 
 **Desfazer/Refazer** cobre os comandos de áudio e texto da sessão. Fechar o editor guarda o rascunho para retomada; isso é diferente de publicar as alterações com Salvar.
 
 Corrigir a transcrição não corta áudio. Dê duplo clique numa palavra ou use o lápis para corrigir. Ctrl+Enter ou ✓ aplica a correção; Salvar também preserva o texto. Sem alinhamento, a transcrição aparece diretamente numa caixa editável, sem painel vazio ou texto de resultado duplicado. Para retirar som, use o comando de áudio correspondente. Se uma retranscrição produzir uma proposta, compare os textos e aceite explicitamente a substituição. Resultados antigos não devem sobrescrever uma correção humana feita durante a análise.
 
-As abas organizam transcrição, título/aparência, vozes, efeitos e tarefas de IA, mantendo waveform e reprodução disponíveis. **Analisar com IA** oferece Transcrever áudio, Identificar vozes e Sugerir título/categoria. Resultados aplicados atualizam o editor; propostas protegidas exigem aceite.
+As três abas organizam **Transcrição**, **Título e aparência** e **Vozes**. Cada ação de IA fica junto do resultado: **Transcrever tudo** e **Só seleção** na transcrição, **Sugerir título e categoria** junto dos campos e **Identificar vozes** junto da pessoa. O andamento e o cancelamento aparecem ali, sem trocar de aba. A barra indica atividade, pois o modelo não fornece percentual de avanço. Resultados aplicados atualizam os campos; propostas protegidas exigem aceite no próprio local. Para substituir uma palavra ou bloco corrigido, a seleção precisa cobrir a unidade inteira.
 
 Modelo, dispositivo, beam size, vocabulário, contexto e política de recursos ficam na engrenagem **Configurações**, valem globalmente e não são propriedades do clipe.
 
@@ -95,7 +95,7 @@ Cada pad tem grupo **Fala**, **Trilha** ou **Efeito**. Uma fala nova substitui a
 
 Salve e ative a coleção, depois mude para **Tocar**. Atalhos da coleção ativa são verificados contra os comandos globais; coleções inativas podem reutilizar as mesmas teclas. Um clipe ou sequência ainda referenciado precisa ser removido da coleção antes de ser excluído.
 
-**Ensaio** envia os disparos ao monitor, incluindo atalhos e sequências. Escolha um monitor diferente da saída do cabo. Mudar o modo interrompe as execuções existentes; elas não são retomadas automaticamente. **Parar tudo** cancela também os sons que ainda estão em preparação. A parada de uma execução pode ser imediata ou usar a saída suave configurada.
+O botão de fone de cada item permite ouvi-lo no monitor. **Parar tudo** cancela também os sons que ainda estão em preparação. A parada de uma execução pode ser imediata ou usar a saída suave configurada.
 
 Se uma saída falhar, a operação bloqueia novos disparos e informa o problema. Reconectar o dispositivo não retoma áudio: selecione explicitamente a saída e faça um novo acionamento. Os testes automatizados verificam essa lógica com mixers e dispositivos simulados; confira o roteamento físico no seu ambiente antes de uma apresentação.
 
@@ -107,7 +107,7 @@ As escolhas continuam usando o grupo de fala/trilha/efeito e as regras de reprod
 
 ## Criar variantes de um clipe
 
-Salve o clipe e abra **Variantes de velocidade, tom e reverso** no editor. Ajuste velocidade de 0,5 a 2x, tom de -12 a +12 semitons e, se desejar, reverso. Velocidade e tom são independentes. **Prévia no monitor** permite conferir; **Parar prévia** também cancela uma preparação ainda em andamento.
+Salve o clipe e abra **Criar uma variante de áudio**, no final de **Título e aparência**. Ajuste velocidade de 0,5 a 2x, tom de -12 a +12 semitons e, se desejar, reverso. Velocidade e tom são independentes. **Prévia no monitor** permite conferir; **Parar prévia** também cancela uma preparação ainda em andamento.
 
 **Salvar como variante** cria outro clipe, mantendo a gravação e a revisão escolhida. A operação usa a revisão publicada ao abrir o editor: salve e reabra para incluir cortes novos. É possível processar até 120 segundos da montagem; velocidade e tom exigem os filtros FFmpeg indicados pelo aplicativo. Para outra combinação, volte ao original em vez de encadear variantes.
 

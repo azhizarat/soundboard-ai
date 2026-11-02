@@ -428,3 +428,23 @@ body.mini-overlay .preparation-toolbar, body.mini-overlay .operation-bar, body.m
   #editModal .editor-transport { flex-wrap: wrap; }
   #editModal .editor-tabs button { padding: 7px 6px; }
 }
+/* A análise pertence ao campo que ela atualiza. */
+#editModal .analysis-context-action { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+#editModal .analysis-inline { margin: 4px 0 8px; padding: 6px 8px; border-radius: 5px; background: #18222e; }
+#editModal .analysis-inline-status { display: flex; align-items: center; gap: 8px; min-height: 20px; font-size: 11px; }
+#editModal .analysis-inline-status progress { width: 84px; height: 6px; flex: 0 0 84px; accent-color: var(--accent); }
+#editModal .analysis-inline-status span { flex: 1; min-width: 0; }
+#editModal .analysis-inline-status small { max-width: 45%; color: var(--text-muted); font-size: 10px; }
+#editModal .analysis-inline-status small:empty { display: none; }
+#editModal .analysis-inline pre { white-space: pre-wrap; max-height: 96px; overflow: auto; margin: 6px 0; font: inherit; font-size: 12px; color: var(--text-main); user-select: text; }
+#editModal .analysis-inline .btn { min-height: 24px; padding: 3px 7px; }
+#editModal #variantPanel { margin-top: 8px; padding: 0 8px; border: 1px solid var(--border-subtle); border-radius: 5px; }
+#editModal #variantPanel > summary { padding: 7px 0; font-size: 11px; color: var(--text-muted); }
+#editModal #variantPanel .editor-transport { gap: 6px; }
+#editModal #variantPanel .editor-transport input[type=number] { width: 90px; }
+#editModal .editor-text-header { flex-wrap: wrap; }
+#editModal #editorAlignment { min-width: 160px; }
+@media(max-width:800px) {
+  #editModal .analysis-inline-status { flex-wrap: wrap; }
+  #editModal .analysis-inline-status small { max-width: 100%; }
+}

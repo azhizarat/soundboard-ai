@@ -802,6 +802,13 @@ class AudioEngine:
         if processed is None or len(processed) == 0:
             return ""
 
+        # Só a audição do editor aceita estado inicial privado. Prepará-lo antes
+        # de publicar impede que o callback emita o início errado da seleção.
+        editor_preview = monitor_only and '_preview_ranges' in clip
+        preview_start = clip.get('_preview_start_sample', 0) if editor_preview else 0
+        if type(preview_start) is not int or not 0 <= preview_start < len(processed):
+            return ''
+
         if self.playback_capabilities()['groups']:
             try:
                 route_settings = dict(settings, cable_device_id=cable_id if has_cable else None,
@@ -809,6 +816,9 @@ class AudioEngine:
                 group = self._prepare_rendered_group(None, [{'clip': clip, 'data': processed}],
                                                      route_settings, monitor_only, on_complete, on_finish,
                                                      require_all_routes=False, epoch=epoch)
+                if editor_preview:
+                    group.voices[0].seek(preview_start / self.TARGET_SR)
+                    group.voices[0].set_loop(bool(clip.get('_preview_loop', False)))
                 if not monitor_only and not settings.get('overlap_audio', False):
                     self._stop_standalone(exclude={v.play_id for v in group.voices})
                 self.start_group(group)
@@ -846,6 +856,9 @@ class AudioEngine:
             emoji=str(clip.get("emoji") or "🔊"),
         )
         session._source_release = clip.get('_release_source')
+        if editor_preview:
+            session.seek(preview_start / self.TARGET_SR)
+            session.set_loop(bool(clip.get('_preview_loop', False)))
         legacy_finish = legacy_finish_adapter(on_finish)
         with self._lock:
             if self._stopping_all or epoch != self._playback_epoch:
