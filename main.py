@@ -20,7 +20,7 @@ import loudness
 import packs
 from store import SoundboardStore
 from ai_analyzer import AIAnalyzer, DiarizationError
-from audio_engine import AudioEngine, compute_waveform_peaks
+from audio_engine import AudioEngine, compute_waveform_peaks, device_names_match
 from hotkeys import HotkeyManager
 from analysis_jobs import AnalysisQueue, AnalysisPausedError
 from voice_service import VoiceLearningAPI
@@ -88,6 +88,10 @@ def _device_name(entries: list[dict], dev_id) -> str:
     return ""
 
 
+def _dev_names_match(a: str, b: str) -> bool:
+    return device_names_match(a, b)
+
+
 def _resolve_device(
     entries: list[dict],
     stored_id,
@@ -100,7 +104,7 @@ def _resolve_device(
     the only trusted identity. A legacy/empty name means the stored index is
     untrusted: ignore it and fall back to the device detected for that role.
     """
-    wanted_name = (stored_name or "").strip().casefold()
+    wanted_name = (stored_name or "").strip()
     if not wanted_name:
         if role_fallback_id is None:
             return None
@@ -111,7 +115,8 @@ def _resolve_device(
 
     name_match = None
     for entry in entries or []:
-        if str(entry.get("name", "")).strip().casefold() != wanted_name:
+        entry_name = str(entry.get("name", ""))
+        if not _dev_names_match(entry_name, wanted_name):
             continue
         if entry.get("id") == stored_id:
             return entry
@@ -159,6 +164,7 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI):
             start_loopback=start_background_services,
             ffmpeg_path=self._config.ffmpeg_path,
             mixer_mode=self._config.mixer_mode,
+            loopback_source=str(self._store.state["settings"].get("replay_source_name") or ""),
         )
         if start_background_services:
             # Close PortAudio handles explicitly: leaving them to the interpreter
@@ -695,6 +701,14 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI):
         # Enumerar reconexões não altera a escolha nem retoma sons cancelados.
         return self._audio.list_devices()
 
+    def list_replay_sources(self) -> dict:
+        """Outputs the replay can record (WASAPI loopback endpoints)."""
+        return self._audio.list_loopback_sources()
+
+    def get_replay_status(self) -> dict:
+        """What the replay is recording right now, with a live peak level."""
+        return self._audio.loopback_status()
+
     def _apply_device_names(self, updates: dict):
         """Keeps the saved device names in sync when a device is selected by index."""
         keys = {
@@ -745,6 +759,8 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI):
             updates["replay_seconds"] = round(max(1.0, min(120.0, float(updates["replay_seconds"]))), 1)
         if any(k in updates for k in ("cable_device_id", "monitor_device_id", "mic_device_id")):
             self._apply_device_names(updates)
+        if "replay_source_name" in updates:
+            updates["replay_source_name"] = str(updates["replay_source_name"] or "").strip()
         try:
             s = self._voices().update_match_settings(updates) if any(k in updates for k in ('voice_match_threshold', 'voice_match_margin')) else self._store.update_settings(updates)
         except ValueError as exc:
@@ -755,6 +771,8 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI):
                 self._operation_route_fault = ''
                 self._operation_failure_seen = self._audio.output_failure()[0]
                 self._check_operation_routes()
+        if "replay_source_name" in updates:
+            self._audio.set_loopback_source(s.get("replay_source_name") or "")
         if "replay_seconds" in updates:
             self._audio.replay_buffer.set_max_seconds(max(60.0, float(s.get("replay_seconds", 15))))
         if any(k in updates for k in ("mic_passthrough", "mic_device_id", "cable_device_id", "mic_gain")):

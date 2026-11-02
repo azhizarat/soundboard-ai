@@ -15,7 +15,7 @@ test('edição remove só a posição escolhida e mantém referências compartil
 });
 function deferred(){let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};}
 function fakeDocument(){
- class E{constructor(){this.children=[];this.dataset={};this.value='';this.checked=false;this.style={};this.classList={add(){},remove(){},toggle(){}};}append(...x){this.children.push(...x);}replaceChildren(...x){this.children=x;}addEventListener(){}setAttribute(){} }
+ class E{constructor(){this.children=[];this.dataset={};this.value='';this.checked=false;this.style={};this.listeners={};this.classList={add(){},remove(){},toggle(){}};}append(...x){this.children.push(...x);}replaceChildren(...x){this.children=x;}addEventListener(name,handler){this.listeners[name]=handler;}setAttribute(){} }
  const es=new Map();return {body:new E(),getElementById(id){if(!es.has(id))es.set(id,new E());return es.get(id);},createElement(){return new E();},addEventListener(){},querySelectorAll(){return [];}};
 }
 test('save atrasado não troca coleção selecionada nem contamina novo documento',async()=>{
@@ -66,5 +66,28 @@ test('biblioteca atualizada oferece variante nova sem substituir o draft da cole
  const controller=create(dom,()=>api);await controller.initialize();controller.model().metadata({name:'Alteração ainda não salva'});
  clips=[...clips,{id:'variant',title:'Variante'}];await controller.refresh();
  assert.equal(controller.model().value().name,'Alteração ainda não salva');
+ assert.ok(dom.getElementById('collectionTarget').children.some(option=>option.value==='clip:variant'));
+});
+
+test('abrir coleção atualiza membros e preserva texto ainda em digitação e alvo selecionado',async()=>{
+ const {create}=contract(),dom=fakeDocument();let clips=[{id:'c',title:'Original'},{id:'second',title:'Outro'}];
+ const api={get_collections:async()=>({ok:true,collections:[doc()],clips,sequences:[],active_collection_id:'show',conflicts:[]}),get_operation_status:async()=>({ok:true,instances:[]})};
+ const controller=create(dom,()=>api);await controller.initialize();
+ const visit=node=>[node,...node.children.flatMap(visit)];
+ const label=visit(dom.getElementById('collectionPadEditor')).find(node=>node.dataset.field==='label');
+ label.value='Rótulo digitado sem blur';await label.listeners.input?.({target:label});
+ dom.getElementById('collectionTarget').value='clip:second';clips.push({id:'variant',title:'Variante'});
+ const panel=dom.getElementById('collectionEditor');panel.open=true;await panel.listeners.toggle?.();
+ assert.equal(controller.model().value().pads[0].label,'Rótulo digitado sem blur');
+ assert.equal(dom.getElementById('collectionTarget').value,'clip:second');
+ assert.ok(dom.getElementById('collectionTarget').children.some(option=>option.value==='clip:variant'));
+});
+
+test('resposta antiga da biblioteca não remove variante recebida pela atualização mais nova',async()=>{
+ const {create}=contract(),dom=fakeDocument(),old=deferred(),latest=deferred();let calls=0;
+ const snapshot=clips=>({ok:true,collections:[doc()],clips,sequences:[],active_collection_id:'show',conflicts:[]});
+ const api={get_collections:()=>++calls===1?Promise.resolve(snapshot([{id:'c'}])):calls===2?old.promise:latest.promise,get_operation_status:async()=>({ok:true,instances:[]})};
+ const controller=create(dom,()=>api);await controller.initialize();const first=controller.refresh(),second=controller.refresh();
+ latest.resolve(snapshot([{id:'c'},{id:'variant'}]));await second;old.resolve(snapshot([{id:'c'}]));await first;
  assert.ok(dom.getElementById('collectionTarget').children.some(option=>option.value==='clip:variant'));
 });

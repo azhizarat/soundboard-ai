@@ -1,7 +1,7 @@
 # Execução do plano consolidado
 
 Plano: [evolução consolidada](../superpowers/plans/2026-10-29-evolucao-consolidada.md).
-Workspace efetivo: `D:\repos\soundboard-ai`. Branch: `codex/soundboard-evolution`.
+Workspace atual: `C:\Users\Hylex\.codex\worktrees\soundboard-evolution\soundboard-ai`. Branch: `codex/soundboard-evolution`. Até 30/10, execução em `D:\repos\soundboard-ai`; em 01/11, trabalho salvo pelo usuário e mudanças de `main` integradas na worktree vinculada ao chat. [Registro da integração](2026-11-01-integracao-main.md).
 
 ## Estado
 

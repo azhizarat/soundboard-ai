@@ -17,7 +17,7 @@
   }
   function create(dom,bridge){
     const $=id=>dom.getElementById(id), held=new Map(), choiceLabels=new Map();
-    let snapshot={collections:[],clips:[],sequences:[],conflicts:[]}, model=createModel(fresh()), generation=0, timer=null, closed=false, pollBusy=false;
+    let snapshot={collections:[],clips:[],sequences:[],conflicts:[]}, model=createModel(fresh()), generation=0, refreshGeneration=0, timer=null, closed=false, pollBusy=false;
     const feedback=text=>{$('collectionMessage').textContent=text||'';};
     const check=result=>{if(result?.ok===false)throw Error(result.error||'Não foi possível concluir');return result;};
     const action=fn=>async event=>{try{await fn(event);}catch(error){feedback(error.message);}};
@@ -61,11 +61,13 @@
       const doc=model.value();$('collectionName').value=doc.name;$('collectionColumns').value=doc.columns;
       renderSelectors();const rows=$('collectionPadEditor');rows.replaceChildren();
       const targets=[...snapshot.clips.filter(c=>!c.pending).map(c=>[`clip:${c.id}`,`Clipe · ${c.title}`]),...snapshot.sequences.map(s=>[`sequence:${s.id}`,`Sequência · ${s.name}`])];
-      options($('collectionTarget'),targets,targets[0]?.[0]);
+      const selectedTarget=$('collectionTarget').value;
+      options($('collectionTarget'),targets,targets.some(([value])=>value===selectedTarget)?selectedTarget:targets[0]?.[0]);
       for(const pad of doc.pads){
         const row=element('div',undefined,'collection-edit-row');row.dataset.padId=pad.id;
         const input=(label,key,type='text')=>{const el=element('input');el.type=type;el.value=pad[key]??0;el.dataset.field=key;if(type==='number'){el.min=key==='position'?1:0;el.max=key==='position'?128:key==='cooldown_ms'?60000:10000;if(key==='position')el.value=pad[key]+1;}
-          el.addEventListener('change',()=>model.patch(pad.id,{[key]:type==='number'?Number(el.value)-(key==='position'?1:0):el.value}));return field(label,el);};
+          const update=()=>model.patch(pad.id,{[key]:type==='number'?Number(el.value)-(key==='position'?1:0):el.value});
+          el.addEventListener('input',update);el.addEventListener('change',update);return field(label,el);};
         const choice=(label,key,items,value=pad[key])=>{const el=element('select');options(el,items,value);el.addEventListener('change',()=>{if(key==='target'){const split=el.value.indexOf(':');model.patch(pad.id,{target:{type:el.value.slice(0,split),id:el.value.slice(split+1)}});}else model.patch(pad.id,{[key]:el.value});});return field(label,el);};
         row.append(input('Posição','position','number'),input('Rótulo','label'),input('Atalho','hotkey'),
           choice('Grupo','group',[['speech','Falas (substituem falas)'],['track','Trilhas contínuas'],['effect','Efeitos sobrepostos']]),
@@ -84,7 +86,8 @@
         row.append(button('Remover posição',()=>{model.remove(pad.id);renderEditor();}));rows.append(row);
       }
     }
-    async function refresh(){snapshot=check(await bridge().get_collections());renderSelectors();renderPads();
+    async function refresh(){const request=++refreshGeneration,next=check(await bridge().get_collections());if(closed||request!==refreshGeneration)return;
+      snapshot=next;renderEditor();renderPads();
       $('collectionConflicts').textContent=snapshot.conflicts.map(c=>`Conflito ${c.hotkey}: ${c.owners.join(', ')}`).join(' · ');}
     async function save(){
       const target=model, request=target.value(), stamp=generation;
@@ -126,7 +129,8 @@
     async function initialize(){
       await refresh();if(snapshot.collections.length)select(snapshot.active_collection_id||snapshot.collections[0].id);else renderEditor();
       $('btnPrepare').addEventListener('click',()=>area(false));$('btnPerform').addEventListener('click',()=>{area(true);renderPads();});
-      $('btnCollectionEdit').addEventListener('click',()=>{area(false);$('collectionEditor').open=true;});
+      $('btnCollectionEdit').addEventListener('click',action(async()=>{area(false);if($('collectionEditor').open)await refresh();else $('collectionEditor').open=true;}));
+      $('collectionEditor').addEventListener('toggle',action(async()=>{if($('collectionEditor').open)await refresh();}));
       $('collectionSelect').addEventListener('change',action(async event=>{const id=event.target.value;check(await bridge().activate_collection(id));snapshot.active_collection_id=id;renderPads();}));
       $('collectionEditSelect').addEventListener('change',event=>select(event.target.value));
       $('btnCollectionNew').addEventListener('click',()=>{generation++;model=createModel(fresh());$('collectionEditor').open=true;renderEditor();});
@@ -136,7 +140,7 @@
       $('btnCollectionShuffle').addEventListener('click',action(()=>{const value=$('collectionTarget').value,split=value.indexOf(':');if(split<0)throw Error('Selecione o primeiro membro');model.add({type:'shuffle',items:[{type:value.slice(0,split),id:value.slice(split+1)}]});const pad=model.value().pads.at(-1);model.patch(pad.id,{label:'Grupo aleatório',cooldown_ms:0});renderEditor();}));
       $('btnCollectionSave').addEventListener('click',action(save));
       $('btnCollectionDelete').addEventListener('click',action(async()=>{const target=model, id=target.value().id;check(await bridge().delete_collection(id));if(model===target){generation++;model=createModel(fresh());}await refresh();renderEditor();feedback('Coleção excluída; a mídia continua na biblioteca.');}));
-      $('btnCollectionRefresh').addEventListener('click',action(async()=>{await refresh();renderEditor();}));
+      $('btnCollectionRefresh').addEventListener('click',action(refresh));
       $('rehearsalToggle').addEventListener('change',action(async event=>{try{check(await bridge().set_rehearsal(event.target.checked));}finally{await poll();}}));
       $('btnOperationStop').addEventListener('click',action(async()=>{await bridge().stop_all();await poll();}));
       dom.addEventListener('keyup',action(event=>release('ui:'+event.code)));

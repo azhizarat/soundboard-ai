@@ -430,3 +430,55 @@ def test_play_clip_reports_failure_when_streams_cannot_open(tmp_path, monkeypatc
     assert engine._sessions == {}
     assert engine._latest_play_id is None
 
+
+def test_group_native_rate_stream_remains_valid_and_completes(monkeypatch):
+    """Abertura em taxa nativa preserva a geração usada pelo grupo preparado."""
+    import sys
+    import types
+    import mixer as mixer_module
+
+    streams = []
+
+    class FakeStream:
+        def __init__(self, **kwargs):
+            self.samplerate = kwargs['samplerate']
+            self.callback = kwargs['callback']
+            self.finished = kwargs['finished_callback']
+            self.active = False
+            streams.append(self)
+
+        def start(self):
+            self.active = True
+
+        def stop(self):
+            self.active = False
+            self.finished()
+
+        def close(self):
+            self.active = False
+
+    def check_output_settings(**kwargs):
+        if kwargs['samplerate'] != 44100:
+            raise ValueError('Taxa indisponível')
+
+    monkeypatch.setitem(sys.modules, 'sounddevice', types.SimpleNamespace(
+        OutputStream=FakeStream, check_output_settings=check_output_settings))
+    monkeypatch.setattr(mixer_module, 'device_info', lambda device: {'default_samplerate': 44100})
+    mixer = AudioMixer()
+    completed = []
+    try:
+        group = mixer.prepare_group('grupo', [
+            {'clip': {'id': 'clip'}, 'data': np.full((480, 2), .2, dtype=np.float32)},
+        ], {'cable_device_id': 5}, on_complete=completed.append)
+        mixer.start_group(group)
+        output = np.zeros((441, 2), dtype=np.float32)
+        streams[0].callback(output, 441, None, None)
+        assert streams[0].samplerate == 44100
+        np.testing.assert_allclose(output, .2, atol=1e-6)
+        assert len(completed) == 1
+        assert completed[0].group_id == 'grupo'
+        assert completed[0].reason == 'completed'
+        assert mixer._voices == {}
+    finally:
+        mixer.shutdown()
+

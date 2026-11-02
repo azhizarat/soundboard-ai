@@ -40,6 +40,8 @@ DEFAULT_SETTINGS = {
     "auto_split_speakers": False,
     "normalize_on_import": True,
     "replay_seconds": 15,
+    # "" = record whatever the Windows default output is playing.
+    "replay_source_name": "",
     "stop_all_hotkey": "ctrl+shift+s",
     "replay_hotkey": "alt+f10",
     "overlay_hotkey": "ctrl+shift+o",
@@ -262,7 +264,18 @@ class SoundboardStore(SequenceStore, CollectionStore):
                 json.dumps(self.state, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            os.replace(tmp_path, self.db_path)
+            # Bloqueios breves do Windows não exigem reserializar o estado nem
+            # remover o JSON anterior: somente a substituição atômica é repetida.
+            replace_delays = (0.02, 0.04)
+            for attempt in range(len(replace_delays) + 1):
+                try:
+                    os.replace(tmp_path, self.db_path)
+                    break
+                except PermissionError as exc:
+                    if (getattr(exc, 'winerror', None) not in (5, 32, 33)
+                            or attempt == len(replace_delays)):
+                        raise
+                    time.sleep(replace_delays[attempt])
             self._dirty = False
             self._save_deadline = 0.0
             self._last_save_duration_ms = (time.perf_counter() - t0) * 1000.0

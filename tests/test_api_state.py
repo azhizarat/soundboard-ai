@@ -358,10 +358,34 @@ def test_save_debounced_fires_on_its_own(tmp_path):
     store.save_debounced(delay=0.01)
 
     deadline = time.time() + 2.0
-    while time.time() < deadline and not store.db_path.exists():
+    while time.time() < deadline and not (store.db_path.exists() and not store._dirty):
         time.sleep(0.01)
 
     assert store.db_path.exists()
     assert store._dirty is False
     persisted = json.loads(store.db_path.read_text(encoding="utf-8"))
     assert persisted["clips"][0]["title"] == "Debounced"
+
+
+def test_resolve_device_matches_truncated_and_fuzzy_names():
+    from main import _resolve_device
+
+    entries = [
+        {"id": 5, "name": "CABLE Input (VB-Audio Virtual Cable)"},
+        {"id": 4, "name": "Fones de ouvido (EDIFIER W820NB Plus)"},
+        {"id": 10, "name": "Driver de som prim\ufffdrio"},
+    ]
+    # MME truncation
+    assert (
+        _resolve_device(
+            entries, stored_id=99, stored_name="CABLE Input (VB-Audio Virtual C"
+        )
+        == entries[0]
+    )
+    # Accent / replacement char
+    assert (
+        _resolve_device(
+            entries, stored_id=99, stored_name="Driver de som primário"
+        )
+        == entries[2]
+    )
