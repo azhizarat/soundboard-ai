@@ -8,6 +8,8 @@ Workspace: `C:\Users\Hylex\.codex\worktrees\soundboard-evolution\soundboard-ai`,
 
 Scripts, capturas e registros de teste ignorados pelo Git são preservados em `.worktrees/evolution-validation-20261101.zip` no checkout principal antes da limpeza. Áudio sintético e caches reproduzíveis não são necessários nesse arquivo. A worktree antiga criada pelo usuário, `D:\repos\soundboard-ai\.worktrees\chatgpt-soundboard-evolution`, permanece preservada, incluindo seus dados locais. Esta entrega não solicita push remoto nem reinício do aplicativo.
 
+Integração local concluída por fast-forward no commit `233811e`. A suíte executada novamente na `main` passou com **728 testes Python em 59,73 s e 77 JavaScript**. ZIP de evidências verificado: 3.800 arquivos, 7.959.058 bytes, SHA-256 `e228151d23b4636796d017ccb521e8f5768b9b38ef52ce2c9279d5306eb70f10`. Caches e fixtures temporários da worktree foram removidos. O arquivamento pelo Codex retornou `The task's primary checkout cannot be removed.`; portanto a pasta e seu registro permanecem vinculados ao chat, limpos, sem exclusão forçada que deixasse o aplicativo com um checkout inexistente. A remoção física depende de desvincular este chat da worktree no Codex.
+
 ## Capacidades implementadas
 
 | Frente | Comportamento entregue | Evidência principal |
