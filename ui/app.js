@@ -165,6 +165,7 @@ function renderEnvironment(env) {
   const badge = document.getElementById("envBadge");
   if (badge) {
     badge.textContent = `${pending} pendência(s)`;
+    badge.title = pending > 0 ? 'Abra a engrenagem para ver os detalhes do ambiente.' : '';
     badge.classList.toggle("hidden", pending === 0);
     badge.classList.toggle("status-warn", pending > 0);
     badge.classList.toggle("status-ok", pending === 0);
@@ -296,12 +297,33 @@ async function openEnvModal() {
   }
 }
 
+async function loadStartupDetails() {
+  const originalConfig=state.config, originalEnvironment=state.environment;
+  try {
+    const details=await api().get_startup_details();
+    // Uma escolha feita durante a sondagem tem precedência sobre o snapshot inicial.
+    if(state.config!==originalConfig)return;
+    state.discoveredSeparados=details.discovered_separados||[];
+    renderQuickImportBar();
+    if(state.environment!==originalEnvironment)return;
+    if(details.startup_details_error)throw Error(details.startup_details_error);
+    renderEnvironment(details.environment);
+  } catch(error) {
+    if(state.config!==originalConfig||state.environment!==originalEnvironment)return;
+    const badge=document.getElementById('envBadge');
+    badge.textContent='Diagnóstico indisponível';badge.title='A biblioteca está disponível. Abra a engrenagem para verificar o ambiente novamente.';
+    badge.classList.remove('hidden');
+  }
+}
+
 async function initApp() {
   if (!api()) {
     setTimeout(initApp, 80);
     return;
   }
-  const initial = await api().get_initial_state();
+  const bridge=api();
+  const initial = await (bridge.get_bootstrap_state ? bridge.get_bootstrap_state() : bridge.get_initial_state());
+  state.config = initial.config || {};
   state.settings = initial.settings || {};
   state.categories = initial.categories || [];
   state.speakers = initial.speakers || {};
@@ -314,6 +336,22 @@ async function initApp() {
   renderSidebar();
   renderGrid();
   bindEvents();
+  captureEnvOriginalTitles();
+  if(initial.startup_details_pending){
+    const badge=document.getElementById('envBadge');
+    badge.textContent='Verificando ambiente…';badge.title='A biblioteca já está disponível; modelos e pastas são verificados em segundo plano.';
+    badge.classList.remove('hidden');
+    // Dois frames permitem que a biblioteca seja pintada antes de iniciar cargas opcionais.
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      if(bridge.notify_ui_ready)Promise.resolve(bridge.notify_ui_ready()).catch(()=>{});
+      void loadStartupDetails();
+    }));
+  }else{
+    renderEnvironment(initial.environment);
+    if(initial.environment?.checks?.some(c=>c.status==='error')&&!state.envAutoOpened){
+      state.envAutoOpened=true;void openEnvModal();
+    }
+  }
   if (window.SoundImports) {
     window.importController = window.SoundImports.create(document, api, {open: openEditModal,
       updated: async () => {const next = await api().get_initial_state(); state.clips = next.clips; renderGrid();}});
@@ -329,17 +367,6 @@ async function initApp() {
     await window.collectionController.initialize();
   }
 
-  state.config = initial.config || {};
-  captureEnvOriginalTitles();
-  renderEnvironment(initial.environment);
-  const hasErrors =
-    initial.environment &&
-    Array.isArray(initial.environment.checks) &&
-    initial.environment.checks.some((c) => c.status === "error");
-  if (hasErrors && !state.envAutoOpened) {
-    state.envAutoOpened = true;
-    openEnvModal();
-  }
 }
 
 function renderDevices() {
@@ -400,7 +427,6 @@ function renderDevices() {
     if (lbl) lbl.textContent = `${db} dB`;
   }
   const repSecs = Number(state.settings.replay_seconds || 15);
-  document.getElementById("replaySecsLabel").textContent = repSecs;
   const repSelect = document.getElementById("replaySecondsInput");
   if (![...repSelect.options].some((o) => Number(o.value) === repSecs)) {
     const customOpt = document.createElement("option");
@@ -1881,13 +1907,8 @@ function bindEvents() {
   replaySecsInput.onchange = (e) => {
     const secs = Math.max(1, Math.min(60, Number(e.target.value) || 15));
     replaySecsInput.value = secs;
-    document.getElementById("replaySecsLabel").textContent = secs;
     state.settings.replay_seconds = secs;
     api().update_settings({ replay_seconds: secs });
-  };
-  replaySecsInput.oninput = (e) => {
-    const secs = Math.max(1, Math.min(60, Number(e.target.value) || 15));
-    document.getElementById("replaySecsLabel").textContent = secs;
   };
 
   document.getElementById("btnReplayClip").onclick = async () => {

@@ -136,11 +136,16 @@ def _serialized_configuration(method):
 
 
 class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI, ImportAPI):
-    def __init__(self, data_dir: str = None, start_background_services: bool = True):
+    def __init__(self, data_dir: str = None, start_background_services: bool = True,
+                 defer_ai_prewarm: bool = False):
+        self._startup_at = time.perf_counter()
+        self._ui_ready_reported = False
         # All internal state attributes MUST start with '_' so pywebview does not
         # recursively inspect/serialize them (especially self._window.native!).
         self._config = config.load_config(data_dir)
         self._config_lock = threading.RLock()
+        self._prewarm_enabled = start_background_services
+        self._prewarm_started = False
         self._store = SoundboardStore(data_dir=str(self._config.data_dir))
         self._store.ffmpeg_path = self._config.ffmpeg_path
         # Replay drafts live in data/tmp and are throwaway: never survive a restart.
@@ -195,11 +200,27 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI, Imp
             self._hotkeys.refresh(self._public_clips(self._store.state["clips"]), self._store.state["settings"])
             if self._store.state["settings"].get("mic_passthrough"):
                 self._apply_mic_passthrough()
-            # Pre-warm TitaNet and Faster-Whisper in background so first clip is instant
-            threading.Thread(target=self._prewarm_ai, daemon=True).start()
+            if not defer_ai_prewarm:
+                self._start_ai_prewarm()
 
     def _set_window(self, window):
         self._window = window
+
+    def notify_ui_ready(self) -> dict:
+        """A UI solicita aquecimento após pintar; replay e atalhos já estão ativos."""
+        with self._config_lock:
+            if not self._ui_ready_reported:
+                logging.info('Startup: UI interativa em %.3f s desde o início da API',
+                             time.perf_counter() - self._startup_at)
+                self._ui_ready_reported = True
+        self._start_ai_prewarm()
+        return {'ok': True}
+
+    def _start_ai_prewarm(self):
+        with self._config_lock:
+            if self._prewarm_enabled and not self._prewarm_started:
+                threading.Thread(target=self._prewarm_ai, daemon=True, name='AIPrewarm').start()
+                self._prewarm_started = True
 
     def _prewarm_ai(self):
         try:
@@ -240,6 +261,8 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI, Imp
 
     def _auto_bind_devices(self):
         dev_info = self._audio.list_devices()
+        # Snapshot da enumeração que resolveu as rotas iniciais, exclusivo do bootstrap.
+        self._startup_devices = copy.deepcopy(dev_info)
         settings = self._store.state["settings"]
         outputs = dev_info.get("outputs") or []
         inputs = dev_info.get("inputs") or []
@@ -356,40 +379,68 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI, Imp
             "detail": detail,
         })
 
-    def get_initial_state(self) -> dict:
-        devs = self._audio.list_devices()
+    def _discover_separados(self) -> list[dict]:
         discovered_separados = []
         videos_root = self._config.separados_root
-        if videos_root.exists():
-            try:
+        try:
+            if videos_root.exists():
                 for sub in sorted(videos_root.iterdir()):
                     if sub.is_dir() and (sub / "separados" / "mapa_de_falas.json").exists():
                         discovered_separados.append({
                             "label": f"Videos/{sub.name}/separados",
                             "path": str((sub / "separados").resolve()),
                         })
-            except Exception:
-                pass
+        except Exception:
+            pass
+        return discovered_separados
 
+    def _library_state(self, devices) -> dict:
         snap = self._store.snapshot()
-        env = doctor.snapshot(self._config)
         return {
             "settings": snap["settings"],
             "categories": snap["categories"],
             "speakers": snap["speakers"],
             "clips": self._public_clips(snap["clips"]),
-            "devices": devs,
-            "discovered_separados": discovered_separados,
+            "devices": copy.deepcopy(devices),
+            "discovered_separados": [],
             "models_dir": str(self._config.models_dir),
-            "has_titanet": self._ai.emb_model_path.exists(),
-            "has_ref_voices": self._ai.ref_voices_path.exists(),
+            "has_titanet": None,
+            "has_ref_voices": None,
             "is_mini_overlay": self._is_mini_overlay,
-            "environment": env,
+            "environment": None,
             "config": config.config_dict(self._config),
             "analysis_jobs": self._analysis_queue.list(),
             "transcription_runtime": copy.deepcopy(self._ai.transcription_runtime),
             "playback_capabilities": self.get_playback_capabilities(),
         }
+
+    def get_bootstrap_state(self) -> dict:
+        """Biblioteca pronta para interação sem probes, scans ou nova enumeração."""
+        return {**self._library_state(self._startup_devices), 'startup_details_pending': True}
+
+    def get_startup_details(self) -> dict:
+        """Enriquecimento independente; uma falha de diagnóstico não bloqueia a biblioteca."""
+        started_at = time.perf_counter()
+        details = {'startup_details_pending': False, 'environment': None,
+                   'discovered_separados': self._discover_separados(),
+                   'has_titanet': None, 'has_ref_voices': None}
+        try:
+            details['has_titanet'] = self._ai.emb_model_path.exists()
+            details['has_ref_voices'] = self._ai.ref_voices_path.exists()
+            details['environment'] = doctor.snapshot(self._config)
+        except Exception:
+            details['startup_details_error'] = 'Não foi possível concluir a verificação do ambiente.'
+        logging.info('Startup: detalhes concluídos em %.3f s; erro=%s',
+                     time.perf_counter() - started_at, bool(details.get('startup_details_error')))
+        return details
+
+    def get_initial_state(self) -> dict:
+        # Mantém o endpoint completo e a enumeração atual para refreshs existentes.
+        return {**self._library_state(self._audio.list_devices()),
+                'discovered_separados': self._discover_separados(),
+                'has_titanet': self._ai.emb_model_path.exists(),
+                'has_ref_voices': self._ai.ref_voices_path.exists(),
+                'environment': doctor.snapshot(self._config)}
 
     def get_environment_status(self, refresh=False) -> dict:
         return doctor.snapshot(self._config, refresh=bool(refresh))
@@ -2092,6 +2143,7 @@ def parse_args(args=None):
 
 
 def main(args=None):
+    started_at = time.perf_counter()
     import webview
     from single_instance import SingleInstance
     from app_logging import setup_logging
@@ -2102,6 +2154,8 @@ def main(args=None):
     app_cfg = config.load_config(opts.data_dir)
     log_file = setup_logging(app_cfg.data_dir, debug=opts.debug)
     logging.info(f"Soundboard AI iniciando. Log em: {log_file}")
+    logging.info('Startup: configuração e imports de desktop em %.3f s desde main',
+                 time.perf_counter() - started_at)
 
     single_inst = SingleInstance(data_dir=app_cfg.data_dir)
     if not single_inst.acquire():
@@ -2111,7 +2165,8 @@ def main(args=None):
 
     atexit.register(single_inst.release)
 
-    api = SoundboardAPI(data_dir=opts.data_dir, start_background_services=True)
+    api = SoundboardAPI(data_dir=opts.data_dir, start_background_services=True, defer_ai_prewarm=True)
+    logging.info('Startup: API construída em %.3f s desde main', time.perf_counter() - started_at)
     ui_path = Path(__file__).parent.resolve() / "ui" / "index.html"
     icon_path = Path(__file__).parent.resolve() / "ui" / "icon.png"
     ensure_icon_image(icon_path)
@@ -2128,6 +2183,7 @@ def main(args=None):
         hidden=opts.minimized,
     )
     api._set_window(window)
+    logging.info('Startup: janela criada em %.3f s desde main', time.perf_counter() - started_at)
     window.events.loaded += api._bind_native_drop
 
     tray = None

@@ -121,7 +121,7 @@
       <div class="deck-actions">
         <div class="replay-control-group" title="Escolha quantos segundos da call quer salvar e clique em Clipar Call (ou aperte Alt+F10)">
           <button id="btnReplayClip" class="btn btn-replay">
-            ⚡ Clipar<span class="replay-full-label"> Call</span> (<span id="replaySecsLabel">15</span>s)
+            ⚡ Clipar<span class="replay-full-label"> Call</span>
           </button>
           <div class="replay-duration-picker">
             <select id="replaySecondsInput" title="Selecione o intervalo do clip da call">
@@ -204,7 +204,17 @@
       </div>
       <select id="collectionSelect" aria-label="Coleção ativa"></select>
       <button id="btnCollectionEdit" class="btn">Editar coleções</button>
-      <label class="toggle-chip" title="Mudar o modo interrompe sons e preparações anteriores."><input id="rehearsalToggle" type="checkbox"> Ensaio · só monitor</label>
+      <div class="rehearsal-control">
+        <label class="toggle-chip" title="Testar os sons do soundboard apenas no fone. Ao alternar, os sons em reprodução param."><input id="rehearsalToggle" type="checkbox" aria-describedby="rehearsalDescription rehearsalMessage"> <span id="rehearsalLabel">Testar só no fone</span></label>
+        <details class="rehearsal-help" id="rehearsalHelp">
+          <summary aria-label="Como funciona o teste no fone" title="Como funciona">?</summary>
+          <div class="rehearsal-help-content" id="rehearsalDescription">
+            <strong>Teste privado dos sons</strong>
+            <p>Enquanto ativo, clipes, coleções, sequências e atalhos do soundboard tocam apenas no fone selecionado em Roteamento. Ao alternar, os sons em reprodução param.</p>
+            <p>Use um fone diferente da saída da call e com volume acima de zero. Este modo não altera o microfone nem a captura da call.</p>
+          </div>
+        </details>
+      </div>
       <button id="btnOperationStop" class="btn btn-danger" hidden>Parar tudo agora</button>
     <details id="importQueue" class="import-results">
       <summary id="importQueueToggle" title="Abrir fila e histórico de importação">Importações <span id="importQueueCount"></span><span aria-hidden="true">⌄</span></summary>
@@ -229,6 +239,7 @@
       </div>
     </details>
 
+      <div id="rehearsalFeedback" class="rehearsal-feedback" hidden><span id="rehearsalMessage" role="alert"></span><button id="btnRehearsalRouting" type="button" class="btn btn-xs">Configurar fone</button></div>
     </nav>
     <details id="collectionEditor" class="collection-editor">
       <summary>Organizar coleções <span class="disclosure-hint">Clique para recolher</span></summary>

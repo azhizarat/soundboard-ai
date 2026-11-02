@@ -18,6 +18,26 @@
   function create(dom,bridge){
     const $=id=>dom.getElementById(id), held=new Map(), choiceLabels=new Map();
     let snapshot={collections:[],clips:[],sequences:[],conflicts:[]}, model=createModel(fresh()), generation=0, refreshGeneration=0, timer=null, closed=false, pollBusy=false;
+    let rehearsal=false, rehearsalChanging=false, rehearsalVersion=0;
+    function renderRehearsal(){
+      $('rehearsalToggle').checked=rehearsal;$('rehearsalToggle').disabled=rehearsalChanging;
+      $('rehearsalLabel').textContent=rehearsalChanging?'Alterando saída…':rehearsal?'Teste no fone ativo':'Testar só no fone';
+    }
+    async function changeRehearsal(event){
+      if(rehearsalChanging)return;
+      const desired=event.target.checked;
+      rehearsalChanging=true;rehearsalVersion++;renderRehearsal();
+      $('rehearsalFeedback').hidden=true;$('rehearsalMessage').textContent='';
+      try{
+        const result=check(await bridge().set_rehearsal(desired));
+        rehearsal=typeof result.rehearsal==='boolean'?result.rehearsal:desired;
+      }catch(error){
+        $('rehearsalMessage').textContent=error.message;
+        $('rehearsalFeedback').hidden=false;
+      }finally{
+        rehearsalChanging=false;rehearsalVersion++;renderRehearsal();await poll();
+      }
+    }
     const feedback=text=>{$('collectionMessage').textContent=text||'';};
     const check=result=>{if(result?.ok===false)throw Error(result.error||'Não foi possível concluir');return result;};
     const action=fn=>async event=>{try{await fn(event);}catch(error){feedback(error.message);}};
@@ -110,8 +130,11 @@
     async function releaseAll(){await Promise.all([...held.keys()].map(release));}
     async function poll(){
       if(closed||pollBusy)return;pollBusy=true;
+      const version=rehearsalVersion;
       try{
-        const status=check(await bridge().get_operation_status());$('rehearsalToggle').checked=!!status.rehearsal;
+        const status=check(await bridge().get_operation_status());
+        if(version!==rehearsalVersion||rehearsalChanging)return;
+        rehearsal=!!status.rehearsal;renderRehearsal();
         const targetName=target=>target?.type==='clip'?snapshot.clips.find(c=>c.id===target.id)?.title:snapshot.sequences.find(s=>s.id===target?.id)?.name;
         for(const [key,label] of choiceLabels){const target=status.shuffle_choices?.[key];label.textContent=target?`Última escolha: ${targetName(target)||target.id}`:'Nenhuma escolha nesta sessão';}
         const route=status.rehearsal?`ENSAIO · Monitor: ${status.monitor_device_name||status.monitor_device_id||'não selecionado'}`:
@@ -142,7 +165,12 @@
       $('btnCollectionSave').addEventListener('click',action(save));
       $('btnCollectionDelete').addEventListener('click',action(async()=>{const target=model, id=target.value().id;check(await bridge().delete_collection(id));if(model===target){generation++;model=createModel(fresh());}await refresh();renderEditor();feedback('Coleção excluída; a mídia continua na biblioteca.');}));
       $('btnCollectionRefresh').addEventListener('click',action(refresh));
-      $('rehearsalToggle').addEventListener('change',action(async event=>{try{check(await bridge().set_rehearsal(event.target.checked));}finally{await poll();}}));
+      $('rehearsalToggle').addEventListener('change',changeRehearsal);
+      $('btnRehearsalRouting').addEventListener('click',event=>{
+        event.stopPropagation();$('rehearsalHelp').open=false;
+        if($('routingPopoverMenu').classList.contains('hidden'))$('btnRoutingPopover').click();
+        $('monitorVolumeSlider').focus();
+      });
       $('btnOperationStop').addEventListener('click',action(async()=>{await bridge().stop_all();await poll();}));
       dom.addEventListener('keyup',action(event=>release('ui:'+event.code)));
       root.addEventListener?.('pointerup',action(()=>releaseAll()));root.addEventListener?.('blur',action(releaseAll));
