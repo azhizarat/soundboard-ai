@@ -48,36 +48,20 @@ test('novo gesto recebe token diferente e resposta antiga não solta o novo som'
 });
 test('UI expõe áreas distintas, edição completa e saída persistente',()=>{
  contract();const html=fs.readFileSync(path.join(__dirname,'../ui/index.html'),'utf8');
- for(const id of ['btnPrepare','btnPerform','operationPanel','collectionPads','collectionSelect','collectionEditor','btnCollectionNew','btnCollectionSave','rehearsalToggle','operationStatus'])assert.match(html,new RegExp('id="'+id+'"'));
+ for(const id of ['btnPrepare','btnPerform','operationPanel','collectionPads','collectionSelect','collectionEditor','btnCollectionNew','btnCollectionSave','operationStatus'])assert.match(html,new RegExp('id="'+id+'"'));
 });
 
-test('teste no fone mostra recusa junto ao controle e mantém estado confirmado',async()=>{
- const {create}=contract(),dom=fakeDocument();
+test('recarga desativa ensaio legado uma vez e não interfere nas prévias individuais',async()=>{
+ const {create}=contract(),dom=fakeDocument(),changes=[];let rehearsal=true;
  const bridge={get_collections:async()=>({ok:true,collections:[],clips:[],sequences:[],conflicts:[]}),
- get_operation_status:async()=>({ok:true,instances:[],rehearsal:false}),
- set_rehearsal:async()=>({ok:false,error:'Monitor está mudo; ajuste o volume para ensaiar'})};
- const controller=create(dom,()=>bridge);await controller.initialize();
- const toggle=dom.getElementById('rehearsalToggle');toggle.checked=true;
- await toggle.listeners.change({target:toggle});
- assert.equal(toggle.checked,false);assert.equal(toggle.disabled,false);
- assert.equal(dom.getElementById('rehearsalFeedback').hidden,false);
- assert.match(dom.getElementById('rehearsalMessage').textContent,/Monitor está mudo/);
-});
-
-test('poll antigo não desfaz confirmação do teste no fone nem habilita troca concorrente',async()=>{
- const {create}=contract(),dom=fakeDocument(),old=deferred(),change=deferred();let statusCalls=0,changes=0;
- const bridge={get_collections:async()=>({ok:true,collections:[],clips:[],sequences:[],conflicts:[]}),
- get_operation_status:()=>++statusCalls===2?old.promise:Promise.resolve({ok:true,instances:[],rehearsal:changes>0}),
- set_rehearsal:()=>{changes++;return change.promise;}};
- const controller=create(dom,()=>bridge);await controller.initialize();
- const stale=controller.poll(),toggle=dom.getElementById('rehearsalToggle');toggle.checked=true;
- const switching=toggle.listeners.change({target:toggle});
- assert.equal(toggle.disabled,true);assert.equal(toggle.checked,false,'Não anuncia isolamento antes de confirmar');
- await toggle.listeners.change({target:toggle});assert.equal(changes,1);
- change.resolve({ok:true,rehearsal:true});await switching;
- old.resolve({ok:true,instances:[],rehearsal:false});await stale;
- assert.equal(toggle.checked,true);assert.equal(toggle.disabled,false);
- assert.equal(dom.getElementById('rehearsalFeedback').hidden,true);
+ get_operation_status:async()=>({ok:true,instances:[],rehearsal}),
+ set_rehearsal:async value=>{changes.push(value);rehearsal=value;return {ok:true};}};
+ const controller=create(dom,()=>bridge);await controller.initialize();await controller.poll();
+ assert.deepEqual(changes,[false]);assert.equal(rehearsal,false);
+ const html=fs.readFileSync('ui/index.html','utf8'),app=fs.readFileSync('ui/app.js','utf8');
+ assert.ok(!html.includes('id="rehearsalToggle"'));
+ assert.match(app,/class="card-icon-btn btn-preview"/);
+ assert.match(app,/play_clip\(clip.id, true\)/);
 });
 
 test('grupo curado preserva membros e repetição explícita usa dispatcher com gesto próprio',async()=>{

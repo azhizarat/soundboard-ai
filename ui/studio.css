@@ -279,15 +279,6 @@ body.mini-overlay .preparation-toolbar, body.mini-overlay .operation-bar, body.m
 .workspace-tabs { padding: 3px; gap: 6px; border: 0; background: var(--bg-panel); }
 .workspace-tabs .btn { padding: 5px 14px; }
 .operation-bar > .toggle-chip { margin-left: 10px; min-height: 30px; padding: 5px 8px; border: 0; background: transparent; color: var(--text-muted); }
-.rehearsal-control { display: flex; align-items: center; gap: 3px; }
-.rehearsal-control .toggle-chip { min-height: 30px; padding: 5px 8px; border: 0; background: transparent; color: var(--text-muted); font-size: 11px; }
-.rehearsal-control .toggle-chip:has(input:checked) { color: #a9d6ff; background: #23364d; }
-.rehearsal-help > summary { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; border: 1px solid var(--field-border); border-radius: 50%; font-size: 12px; color: var(--text-muted); cursor: pointer; list-style: none; }
-.rehearsal-help > summary::-webkit-details-marker { display: none; }
-.rehearsal-help-content { position: absolute; z-index: 160; top: calc(100% + 6px); left: min(440px, 30vw); width: min(360px, 65vw); padding: 16px; border: 1px solid var(--field-border); border-radius: 8px; background: var(--bg-panel); box-shadow: 0 12px 36px #0008; font-size: 12px; line-height: 1.6; }
-.rehearsal-help-content p { margin-top: 8px; color: var(--text-muted); }
-.rehearsal-feedback { width: 100%; display: flex; align-items: center; gap: 12px; padding: 8px 10px; border: 1px solid #786039; border-radius: 6px; background: #30291e; color: #ffcf90; font-size: 12px; }
-.rehearsal-feedback span { flex: 1; }
 .sequence-strip { padding: 4px 18px; }
 #importQueue { position: static; margin-left: auto; padding: 0; border: 0; overflow: visible; max-height: none; background: transparent; }
 #importQueue > summary { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--border-subtle); font-size: 12px; list-style: none; }

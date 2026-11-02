@@ -60,3 +60,17 @@ Regra confirmada: rejeições de mudança de saída precisam de feedback junto
 ao controle; estado de isolamento só pode ser anunciado após confirmação.
 Polling não pode sobrescrever a intenção mais recente. Para startup, medir
 separadamente pintura/interação e verificações opcionais posteriores.
+
+## Revisão posterior: remoção do ensaio global
+
+Por solicitação do usuário, o controle global, ajuda, mensagens e handlers de
+ensaio foram removidos. A prévia no fone em cada card continua sendo o caminho
+de teste. A primeira leitura de estado desativa um ensaio legado caso a janela
+seja recarregada sem reiniciar o processo; a transição existente para os sons
+antes de retornar ao roteamento normal. Não há chamada extra no início quando
+o modo já está desligado.
+
+Validação desta remoção: 84 testes JavaScript passaram; smoke nativo em
+1280 × 820 abriu as oito telas sem erros JS, com os 17 controles restantes
+visíveis. Backend e reprodução individual não foram alterados. Regra de UX:
+priorizar a prévia por item, sem reintroduzir um modo global redundante.
