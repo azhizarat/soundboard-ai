@@ -76,6 +76,144 @@ def test_preview_crops_same_render_and_uses_only_monitor(editor, monkeypatch):
     assert api._store.snapshot()['edit_drafts'][ident]['revision']['spans'] == [[0, 24000], [48000, 96000]]
 
 
+def test_short_preview_completion_before_return_keeps_exact_terminal_position(editor, monkeypatch):
+    from mixer import CompletionEvent
+    api, ident = editor
+    def play(**kwargs):
+        kwargs['clip']['_release_source']()
+        kwargs['on_complete'](CompletionEvent('short-preview', ident, None, 'completed'))
+        return 'short-preview'
+    monkeypatch.setattr(api._audio, 'play_clip', play)
+    monkeypatch.setattr(api._audio, 'get_session', lambda _: None)
+    result = api.preview_clip_edit(ident, 'selection', [0, 137])
+    assert result['ok']
+    status = api.get_editor_playback(result['play_id'])['status']
+    assert status['playing'] is False and status['reason'] == 'completed'
+    assert status['position_samples'] == status['duration_samples'] == 137
+    assert status['position'] == status['duration'] == 137 / 48000
+    assert result['status'] == status
+    assert not api._store._active_sources
+    assert api.get_editor_playback('unknown')['status']['reason'] == 'unknown'
+
+
+@pytest.mark.parametrize('reason', ['completed', 'cancelled', 'failed'])
+def test_preview_terminal_status_retains_reason_and_sample_precision(editor, monkeypatch, reason):
+    from audio_engine import PlaybackSession
+    from mixer import CompletionEvent
+    api, ident = editor
+    sessions, callbacks = {}, {}
+    def play(**kwargs):
+        callbacks.update(kwargs)
+        sessions['own-preview'] = PlaybackSession('own-preview', ident, np.zeros((137, 2)), monitor_only=True)
+        return 'own-preview'
+    monkeypatch.setattr(api._audio, 'play_clip', play)
+    monkeypatch.setattr(api._audio, 'get_session', lambda key: sessions.get(key))
+    result = api.preview_clip_edit(ident, 'selection', [0, 137])
+    assert result['ok']
+    session = sessions['own-preview']
+    with session._lock:
+        session.pos_idx = 73
+    active = api.get_editor_playback('own-preview')['status']
+    assert active['playing'] and active['reason'] is None
+    assert active['position'] == 73 / 48000 and active['duration'] == 137 / 48000
+    assert active['position_samples'] == 73 and active['sample_rate'] == 48000
+    sessions.clear()
+    event = CompletionEvent('own-preview', ident, None, reason, 'Falha sintética' if reason == 'failed' else None)
+    with session._lock:
+        session.completion = event
+        session.stop_event.set()
+    callbacks['clip']['_release_source']()
+    callbacks['on_complete'](event)
+    terminal = api.get_editor_playback('own-preview')['status']
+    assert terminal['playing'] is False and terminal['reason'] == reason
+    assert terminal['position_known'] is True
+    assert terminal['position_samples'] == (137 if reason == 'completed' else 73)
+    assert terminal['error'] == event.error
+    # Resposta é isolada: consumidores não alteram o cache de outro poll.
+    terminal['position'] = 999
+    assert api.get_editor_playback('own-preview')['status']['position'] != 999
+    assert not api._store._active_sources
+
+
+def test_preview_terminal_cache_is_bounded_and_contains_metadata_only(editor, monkeypatch):
+    import main
+    from mixer import CompletionEvent
+    api, ident = editor
+    counter = 0
+    def play(**kwargs):
+        nonlocal counter
+        counter += 1
+        key = f'preview-{counter}'
+        kwargs['clip']['_release_source']()
+        kwargs['on_complete'](CompletionEvent(key, ident, None, 'cancelled'))
+        return key
+    monkeypatch.setattr(api._audio, 'play_clip', play)
+    monkeypatch.setattr(api._audio, 'get_session', lambda _: None)
+    for _ in range(main.EDITOR_PREVIEW_STATUS_LIMIT + 3):
+        assert api.preview_clip_edit(ident, 'selection', [0, 137])['ok']
+    assert len(api._editor_preview_status) <= main.EDITOR_PREVIEW_STATUS_LIMIT
+    assert api.get_editor_playback('preview-1')['status']['reason'] == 'unknown'
+    newest = api.get_editor_playback(f'preview-{counter}')['status']
+    assert newest['reason'] == 'cancelled' and newest['position_known'] is False
+    assert newest['position_samples'] == 0
+    for status in api._editor_preview_status.values():
+        assert all(value is None or isinstance(value, (bool, int, float, str)) for value in status.values())
+
+
+def test_unowned_session_query_does_not_leave_stale_playing_cache(editor, monkeypatch):
+    from audio_engine import PlaybackSession
+    api, ident = editor
+    sessions = {'external': PlaybackSession('external', ident, np.zeros((23, 2)), monitor_only=True)}
+    monkeypatch.setattr(api._audio, 'get_session', lambda key: sessions.get(key))
+    assert api.get_editor_playback('external')['status']['playing']
+    sessions.clear()
+    status = api.get_editor_playback('external')['status']
+    assert status['playing'] is False and status['reason'] == 'unknown'
+    assert 'external' not in api._editor_preview_status
+
+
+def test_terminal_completion_wins_over_an_inflight_active_snapshot(editor, monkeypatch):
+    import threading
+    from audio_engine import PlaybackSession
+    from mixer import CompletionEvent
+    api, ident = editor
+    session = PlaybackSession('race-preview', ident, np.zeros((137, 2)), monitor_only=True)
+    callbacks, sessions = {}, {'race-preview': session}
+    def play(**kwargs):
+        callbacks.update(kwargs)
+        return 'race-preview'
+    monkeypatch.setattr(api._audio, 'play_clip', play)
+    monkeypatch.setattr(api._audio, 'get_session', lambda key: sessions.get(key))
+    assert api.preview_clip_edit(ident, 'selection', [0, 137])['ok']
+    captured, release_poll = threading.Event(), threading.Event()
+    original = api._editor_session_status
+    def delayed(current):
+        value = original(current)
+        if threading.current_thread().name == 'editor-poll':
+            captured.set()
+            assert release_poll.wait(2)
+        return value
+    monkeypatch.setattr(api, '_editor_session_status', delayed)
+    responses = []
+    poll = threading.Thread(target=lambda: responses.append(api.get_editor_playback('race-preview')), name='editor-poll')
+    poll.start()
+    try:
+        assert captured.wait(2)
+        sessions.clear()
+        event = CompletionEvent('race-preview', ident, None, 'completed')
+        with session._lock:
+            session.completion = event
+            session.stop_event.set()
+        callbacks['clip']['_release_source']()
+        callbacks['on_complete'](event)
+    finally:
+        release_poll.set()
+        poll.join(2)
+    assert not poll.is_alive()
+    assert responses[0]['status']['reason'] == 'completed'
+    assert responses[0]['status']['position_samples'] == 137
+
+
 def test_empty_edit_rejected_and_suggestions_do_not_mutate(editor):
     api, ident = editor
     assert not command(api, ident, 'remove', [0, 96000])['ok']

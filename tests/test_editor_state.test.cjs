@@ -26,7 +26,7 @@ test('cursor de variante inverte e escala saída antes de mapear lacunas da orig
  assert.equal(editor.variantToSource([[0,100],[200,400]],100,{speed:2}),300);
 });
 
-function fixture() {
+function fixture(options={}) {
   const elements={};
   function node() {
     return {value:'',textContent:'',children:[],dataset:{},clientWidth:900,checked:false,
@@ -55,7 +55,7 @@ function fixture() {
       if(action==='remove')model={...model,generation:model.generation+1,spans:[[48000,96000]],duration:1};
       return {ok:true,editor:model};
     },preview_clip_edit:async()=>{throw Error('Não deve tocar em clique de texto');}};
-  const controller=editor.create(document,()=>api,{persist:async()=>({ok:true}),transcriptChanged:text=>synced.push(text)});
+  const controller=editor.create(document,()=>api,{persist:async()=>({ok:true}),transcriptChanged:text=>synced.push(text),...options});
   return {elements,controller,calls,synced,api,setFail:value=>{fail=value;}};
 }
 
@@ -249,4 +249,71 @@ test('selecionar palavra preserva seu elemento para duplo clique e não reconstr
  word.onclick({shiftKey:false});assert.equal(f.elements.editorWords.children[0],word);
  word.ondblclick();assert.equal(f.elements.editorCorrectionRow.hidden,false);assert.equal(f.elements.editorCorrection.value,'um');
  f.controller.close();
+});
+
+
+function animatedFixture(){
+ let time=0,nextId=0;const frames=new Map(),timers=new Map();
+ const f=fixture({now:()=>time,requestFrame:fn=>{frames.set(++nextId,fn);return nextId;},cancelFrame:id=>frames.delete(id),
+   schedule:fn=>{timers.set(++nextId,fn);return nextId;},unschedule:id=>timers.delete(id)});
+ return {...f,frame(ms){time=ms;const pending=[...frames.values()];frames.clear();pending.forEach(fn=>fn(time));},
+   async poll(){const pending=[...timers.values()];timers.clear();await Promise.all(pending.map(fn=>fn()));},frames,timers};
+}
+test('agulha avança entre consultas e termina na borda mesmo quando trecho acaba antes do primeiro poll',async()=>{
+ const f=animatedFixture();await f.controller.open('one');f.controller.setSelection([12000,16800]);
+ f.api.preview_clip_edit=async()=>({ok:true,play_id:'short',ranges:[[12000,16800]],status:{playing:true,position:0,paused:false,loop:false}});
+ f.api.get_editor_playback=async()=>({status:{playing:false,reason:'completed',position:.1}});
+ f.api.stop_editor_preview=async()=>({ok:true});
+ await f.controller.preview();f.frame(16);assert.equal(f.controller.cursor,12768);
+ f.frame(32);assert.equal(f.controller.cursor,13536);
+ await f.poll();assert.equal(f.controller.cursor,16800);assert.equal(f.frames.size,0);f.controller.close();
+});
+test('parada externa não simula conclusão e frame pendente não altera agulha após fechar',async()=>{
+ const f=animatedFixture();await f.controller.open('one');
+ f.api.preview_clip_edit=async()=>({ok:true,play_id:'own',ranges:[[0,96000]],status:{playing:true,position:0}});
+ f.api.get_editor_playback=async()=>({status:{playing:false,reason:'cancelled',position:.06}});
+ f.api.stop_editor_preview=async()=>({ok:true});
+ await f.controller.preview();f.frame(16);await f.poll();assert.equal(f.controller.cursor,2880);assert.equal(f.frames.size,0);
+ await f.controller.preview();const last=f.controller.cursor;f.controller.close();f.frame(99);assert.equal(f.controller.cursor,last);
+});
+test('clock respeita pausa, loop e limite de extrapolação quando bridge demora',async()=>{
+ const f=animatedFixture();await f.controller.open('one');
+ f.api.preview_clip_edit=async()=>({ok:true,play_id:'loop',ranges:[[24000,28800]],status:{playing:true,position:.09,loop:true}});
+ let playback={playing:true,position:.02,paused:true,loop:true};
+ f.api.get_editor_playback=async()=>({status:playback});f.api.stop_editor_preview=async()=>({ok:true});
+ await f.controller.preview();f.frame(20);assert.equal(f.controller.cursor,24480);
+ await f.poll();f.frame(200);assert.equal(f.controller.cursor,24960);
+ playback={playing:true,position:.03,paused:false,loop:false};await f.poll();f.frame(2000);
+ assert.ok(f.controller.cursor<=28800);f.controller.close();
+});
+
+
+test('falha transitória no status preserva ownership e recupera atualizações na consulta seguinte',async()=>{
+ const f=animatedFixture();await f.controller.open('one');let calls=0;const stopped=[];
+ f.api.preview_clip_edit=async()=>({ok:true,play_id:'own',ranges:[[0,96000]],status:{playing:true,position:0}});
+ f.api.get_editor_playback=async()=>{if(++calls===1)throw Error('bridge ocupado');return {status:{playing:true,position:.3}};};
+ f.api.stop_editor_preview=async id=>{stopped.push(id);};
+ await f.controller.preview();await f.poll();await f.poll();f.frame(16);
+ assert.equal(f.controller.cursor,15168);await f.elements.editorStop.onclick();assert.deepEqual(stopped,['own']);f.controller.close();
+});
+
+
+test('conclusão no próprio retorno da prévia posiciona fim sem agendar frames ou polls',async()=>{
+ const f=animatedFixture();await f.controller.open('one');
+ f.api.preview_clip_edit=async()=>({ok:true,play_id:'short',ranges:[[12000,12137]],status:{playing:false,position:137/48000,reason:'completed'}});
+ await f.controller.preview();assert.equal(f.controller.cursor,12137);assert.equal(f.frames.size,0);assert.equal(f.timers.size,0);f.controller.close();
+});
+
+
+test('arraste para trás com seeks sobrepostos retoma animação na última intenção',async()=>{
+ const f=animatedFixture();await f.controller.open('one');const pending=[],positions=[];
+ f.api.preview_clip_edit=async()=>({ok:true,play_id:'own',ranges:[[0,96000]],status:{playing:true,position:1.5}});
+ f.api.get_editor_playback=async()=>({status:{playing:true,position:.5}});
+ f.api.seek_playback=position=>{positions.push(position);return new Promise(resolve=>pending.push(resolve));};
+ f.api.stop_editor_preview=async()=>({ok:true});
+ await f.controller.preview();const wave=f.elements.editorWaveform;
+ wave.onpointerdown(pointer(112.5));wave.onpointerup(pointer(112.5));await new Promise(resolve=>setImmediate(resolve));
+ wave.onpointerdown(pointer(225));wave.onpointerup(pointer(225));pending.shift()({ok:true});
+ await new Promise(resolve=>setImmediate(resolve));pending.shift()({ok:true});await f.controller.settleSeek();
+ await f.poll();f.frame(16);assert.equal(f.controller.cursor,24768);assert.deepEqual(positions,[.25,.5]);f.controller.close();
 });

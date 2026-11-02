@@ -28,6 +28,11 @@
     const variants=root.AudioVariants?.create(document,bridge,clip=>callbacks.created?.(clip));
     let clipId=null,model=null,units=[],chosen=[0,1],cursor=0,viewport=[0,1],epoch=0,queue=Promise.resolve({ok:true});
     let peaks=[],anchor=null,textDirty=false,correctionIds=[],playId=null,playRanges=[],timer=null,busy=0,previewEpoch=0,positionEpoch=0,seekQueue=Promise.resolve(),resizeObserver=null,editingText=false,pendingSeeks=0,renderedUnits=null;
+    const now=callbacks.now||(()=>root.performance?.now?.()??Date.now());
+    const schedule=callbacks.schedule||setTimeout,unschedule=callbacks.unschedule||clearTimeout;
+    const requestFrame=callbacks.requestFrame||(root.requestAnimationFrame?.bind(root));
+    const cancelFrame=callbacks.cancelFrame||(root.cancelAnimationFrame?.bind(root));
+    let frameId=null,playClock=null,displayPosition=0,cursorIntent=0;
     const status=text=>{el('editorStatus').textContent=text;};
     function receive(next) {
       if(model&&model.draft_id===next.draft_id&&model.generation>next.generation)return;
@@ -140,14 +145,15 @@
     }
     function setCursor(sample,seek=true) {
       if(!model)return;
-      cursor=Math.max(0,Math.min(model.source_samples,Math.round(sample)));positionEpoch++;draw();
+      cursor=Math.max(0,Math.min(model.source_samples,Math.round(sample)));positionEpoch++;cursorIntent++;playClock=null;draw();
       if(seek&&playId){
         const id=playId,request=previewEpoch,opened=epoch;
         const position=timeline.sourceToPreview(model.spans,cursor,model.variant||{},playRanges)/RATE;
-        pendingSeeks++;
+        const intent=cursorIntent;pendingSeeks++;
         seekQueue=seekQueue.catch(()=>{}).then(async()=>{
           if(id!==playId||request!==previewEpoch||opened!==epoch){pendingSeeks--;return;}
-          try {const result=await bridge().seek_playback(position,id);if(result?.ok===false&&id===playId)status('Não foi possível mover a prévia.');}
+          try {const result=await bridge().seek_playback(position,id);if(result?.ok===false&&id===playId)status('Não foi possível mover a prévia.');
+            else if(id===playId&&request===previewEpoch&&opened===epoch&&intent===cursorIntent){displayPosition=position;syncClock({...result?.status,position,playing:true});}}
           catch(error){if(id===playId)status(error.message||String(error));}
           finally {pendingSeeks--;if(id===playId&&request===previewEpoch&&opened===epoch)positionEpoch++;}
         });
@@ -199,27 +205,68 @@
       if(opened===epoch&&result.ok)receive(result.editor);
       return result;
     }
-    function stopPolling(){if(timer!==null)clearTimeout(timer);timer=null;}
+    function stopPolling(){
+      if(timer!==null)unschedule(timer);timer=null;
+      if(frameId!==null)cancelFrame?.(frameId);frameId=null;playClock=null;
+    }
+    function paintPlayback(position,completed=false){
+      if(!model||!playRanges.length)return;
+      const count=timeline.previewSamples(playRanges),at=Math.max(0,Math.min(count-1,Math.round(position*RATE)));
+      cursor=variantToSource(model.spans,outputToSource(playRanges,at),model.variant||{});
+      // O limite final é exclusivo; use a última amostra tocada, não o início
+      // do próximo trecho depois de uma lacuna removida.
+      if(completed&&!model.variant?.reverse)cursor=Math.min(model.source_samples,cursor+1);
+      draw();
+    }
+    function animate(){
+      frameId=null;
+      if(!playId||!model)return;
+      if(playClock&&!pendingSeeks){
+        const elapsed=playClock.paused?0:Math.min(.25,Math.max(0,now()-playClock.time)/1000);
+        const length=timeline.previewSamples(playRanges)/RATE;
+        let position=playClock.position+elapsed;
+        if(playClock.loop&&length>0)position%=length;
+        else position=Math.min(length,playClock.paused?position:Math.max(displayPosition,position));
+        displayPosition=position;paintPlayback(position);
+      }
+      if(requestFrame)frameId=requestFrame(animate);
+    }
+    function syncClock(playback,stamp=now()){
+      if(!Number.isFinite(Number(playback.position)))return;
+      playClock={position:Number(playback.position),time:stamp,paused:Boolean(playback.paused),loop:Boolean(playback.loop)};
+      if(playClock.paused||playClock.loop)displayPosition=playClock.position;
+      else displayPosition=Math.max(displayPosition,playClock.position);
+      paintPlayback(displayPosition);
+      if(requestFrame&&frameId===null)frameId=requestFrame(animate);
+    }
     function invalidatePreview() {
       previewEpoch++;stopPolling();const id=playId;playId=null;
       // Invalida imediatamente: uma resposta de poll em trânsito não usa a nova montagem.
       return id?Promise.resolve(bridge().stop_editor_preview(id)).catch(error=>{status(error.message||String(error));}):Promise.resolve();
     }
+    function finishPlayback(playback){
+      if(playback.reason==='completed')paintPlayback(timeline.previewSamples(playRanges)/RATE,true);
+      else if(playback.position_known!==false&&Number.isFinite(playback.position))paintPlayback(playback.position);
+      playId=null;stopPolling();
+    }
     async function poll() {
-      const opened=epoch,id=playId,request=previewEpoch,positionRequest=positionEpoch;if(!id)return;
+      const opened=epoch,id=playId,request=previewEpoch,positionRequest=positionEpoch,started=now();if(!id)return;
       try {
         const response=await bridge().get_editor_playback(id);
         if(opened!==epoch||id!==playId||request!==previewEpoch)return;
         const playback=response.status||response;
-        if(!playback.playing){playId=null;return;}
-        const output=outputToSource(playRanges,Math.round(Number(playback.position||0)*RATE));
-        if(positionRequest===positionEpoch&&!pendingSeeks){cursor=variantToSource(model.spans,output,model.variant||{});draw();}
+        if(positionRequest===positionEpoch&&!pendingSeeks){
+          if(!playback.playing){
+            finishPlayback(playback);return;
+          }
+          syncClock(playback,now()-Math.min(40,(now()-started)/2));
+        }
         for(const button of el('editorWords').children) {
           const unit=units.find(u=>u.id===button.dataset.unitId);
           button.classList.toggle('playing',Boolean(unit&&transcript.intersects(unit,[cursor,cursor+1])));
         }
-        timer=setTimeout(poll,80);
-      } catch(_error){if(opened===epoch&&id===playId&&request===previewEpoch)playId=null;}
+        timer=schedule(poll,60);
+      } catch(_error){if(opened===epoch&&id===playId&&request===previewEpoch){playClock=null;timer=schedule(poll,150);}}
     }
     async function preview(mode='selection',fromCursor=false,junction=0) {
       const startCursor=cursor;
@@ -233,10 +280,11 @@
       const result=await bridge().preview_clip_edit(clipId,mode,[...chosen],junction,el('editorLoop').checked);
       if(opened!==epoch||request!==previewEpoch){if(result?.play_id)await bridge().stop_editor_preview(result.play_id);return;}
       if(!result.ok){status(result.error);return;}
-      stopPolling();playId=result.play_id;playRanges=result.ranges;
-      if(fromCursor){setCursor(startCursor);await seekQueue;}else {cursor=variantToSource(model.spans,outputToSource(playRanges,0),model.variant||{});draw();}
+      stopPolling();playId=result.play_id;playRanges=result.ranges;displayPosition=0;
+      if(result.status?.playing===false){finishPlayback(result.status);return;}
+      if(fromCursor){setCursor(startCursor);await seekQueue;}else {syncClock(result.status||{playing:true,position:0,loop:el('editorLoop').checked});}
       if(opened!==epoch||request!==previewEpoch)return;
-      status('Prévia no monitor. Arraste a agulha para navegar.');timer=setTimeout(poll,80);
+      status('Prévia no monitor. Arraste a agulha para navegar.');timer=schedule(poll,60);
     }
     function bind() {
       for(const [id,action] of [['editorKeep','keep'],['editorRemove','remove'],['editorRestore','restore'],['editorCreate','create'],['editorUndo','undo'],['editorRedo','redo']])

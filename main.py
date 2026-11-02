@@ -9,6 +9,7 @@ import logging
 import shutil
 import threading
 import uuid
+import weakref
 import webbrowser
 import zipfile
 from pathlib import Path
@@ -40,6 +41,7 @@ if hasattr(sys.stdout, "reconfigure"):
 SUPPORTED_AUDIO_EXTS = packs.AUDIO_EXTS
 # Formats that only work when FFmpeg can convert them to PCM.
 CONVERT_ONLY_EXTS = {".m4a", ".webm", ".aac", ".wma", ".opus"}
+EDITOR_PREVIEW_STATUS_LIMIT = 256
 # Fields a normal editor may change. Identity, audio location and analysis
 # artifacts are server-owned: a client must not be able to publish a draft or
 # repoint a clip at an arbitrary file.
@@ -144,6 +146,8 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI, Imp
         # recursively inspect/serialize them (especially self._window.native!).
         self._config = config.load_config(data_dir)
         self._config_lock = threading.RLock()
+        self._editor_preview_lock = threading.RLock()
+        self._editor_preview_status = {}
         self._prewarm_enabled = start_background_services
         self._prewarm_started = False
         self._store = SoundboardStore(data_dir=str(self._config.data_dir))
@@ -1208,6 +1212,37 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI, Imp
         except (OSError, ValueError, RuntimeError, TypeError, KeyError) as exc:
             return {'ok': False, 'error': str(exc)}
 
+    @staticmethod
+    def _editor_session_status(session):
+        # status() arredonda centésimos. O editor precisa da precisão PCM e de
+        # um snapshot coerente de seek/loop/posição, inclusive em clipes curtos.
+        with session._lock:
+            rate = max(1, int(session.sr))
+            total = int(session.total_samples)
+            playing = not session.stop_event.is_set()
+            completion = session.completion
+            reason = completion.reason if completion else (None if playing else session._finish_reason)
+            position = total if reason == 'completed' else max(0, min(total, int(session.pos_idx)))
+            return {'play_id': session.play_id, 'clip_id': session.clip_id,
+                    'playing': playing, 'reason': reason,
+                    'error': completion.error if completion else getattr(session, '_finish_error', None),
+                    'position': position / rate, 'duration': total / rate,
+                    'current_s': position / rate, 'duration_s': total / rate,
+                    'position_samples': position, 'duration_samples': total, 'sample_rate': rate,
+                    'position_known': True, 'paused': bool(session.paused), 'loop': bool(session.loop),
+                    'monitor_only': bool(session.monitor_only), 'seek_epoch': session.seek_epoch}
+
+    def _remember_editor_preview(self, play_id, status):
+        with self._editor_preview_lock:
+            previous = self._editor_preview_status.get(play_id)
+            # Um poll iniciado antes da finalização não reabre o status terminal.
+            if previous and previous.get('reason') and not status.get('reason'):
+                return dict(previous)
+            self._editor_preview_status[play_id] = dict(status)
+            while len(self._editor_preview_status) > EDITOR_PREVIEW_STATUS_LIMIT:
+                self._editor_preview_status.pop(next(iter(self._editor_preview_status)))
+            return dict(status)
+
     def preview_clip_edit(self, clip_id: str, mode: str = 'selection', interval: list = None,
                           junction: int = 0, loop: bool = False) -> dict:
         handle = None
@@ -1232,27 +1267,69 @@ class SoundboardAPI(VoiceLearningAPI, SequenceAPI, OperationAPI, VariantAPI, Imp
             def release(*_args):
                 self._store.release_source(handle)
             context['_release_source'] = release
+            total = sum(b-a for a,b in ranges)
+            metadata = {'play_id': None, 'clip_id': clip_id, 'playing': True, 'reason': None, 'error': None,
+                        'position': 0.0, 'duration': total/48000, 'current_s': 0.0, 'duration_s': total/48000,
+                        'position_samples': 0, 'duration_samples': total, 'sample_rate': 48000,
+                        'position_known': False, 'paused': False, 'loop': bool(loop),
+                        'monitor_only': True, 'seek_epoch': 0}
+            session_ref = [None]
+            def completed(event):
+                # O engine remove a sessão antes de notificar. Uma referência
+                # fraca permite ler o ponto de cancelamento sem reter áudio no cache.
+                with self._editor_preview_lock:
+                    reference = session_ref[0]
+                    latest = dict(self._editor_preview_status.get(event.play_id, metadata))
+                current = reference() if reference else None
+                if current is not None:
+                    latest = self._editor_session_status(current)
+                latest.update(play_id=event.play_id, clip_id=event.clip_id, playing=False,
+                              reason=event.reason, error=event.error, paused=False)
+                if event.reason == 'completed':
+                    latest.update(position=latest['duration'], current_s=latest['duration'],
+                                  position_samples=latest['duration_samples'], position_known=True)
+                self._remember_editor_preview(event.play_id, latest)
             # Audição do editor é independente da política pública de sobreposição.
             # Uma prévia (mesmo falha) não deve interromper transmissão ou monitor externo.
             preview_settings = {**request_settings, 'overlap_audio': True}
             play_id = self._audio.play_clip(clip=context, settings=preview_settings,
-                                            monitor_only=True, on_finish=release, on_tick=None, expected_epoch=request_epoch)
+                                            monitor_only=True, on_finish=release, on_complete=completed,
+                                            on_tick=None, expected_epoch=request_epoch)
             if not play_id:
                 release()
                 raise ValueError('Nenhum monitor disponível para ouvir a seleção')
             session = self._audio.get_session(play_id)
             if session:
+                with self._editor_preview_lock:
+                    session_ref[0] = weakref.ref(session)
                 session.set_loop(bool(loop))
-            return {'ok': True, 'play_id': play_id, 'duration': sum(b-a for a,b in ranges)/48000,
-                    'ranges': ranges, 'status': session.status() if session else None}
+                self._remember_editor_preview(play_id, self._editor_session_status(session))
+            else:
+                self._remember_editor_preview(play_id, {**metadata, 'play_id': play_id})
+            return {'ok': True, 'play_id': play_id, 'duration': total/48000,
+                    'ranges': ranges, 'status': self.get_editor_playback(play_id)['status']}
         except (OSError, ValueError, RuntimeError, TypeError, KeyError) as exc:
             if handle:
                 self._store.release_source(handle)
             return {'ok': False, 'error': str(exc)}
 
     def get_editor_playback(self, play_id: str) -> dict:
-        session = self._audio.get_session(play_id)
-        return {'ok': True, 'status': session.status() if session else {'playing': False}}
+        with self._editor_preview_lock:
+            cached = dict(self._editor_preview_status.get(play_id, {}))
+        if cached.get('reason'):
+            return {'ok': True, 'status': cached}
+        session = self._audio.get_session(play_id) if play_id else None
+        if session:
+            status = self._editor_session_status(session)
+            if cached:
+                status = self._remember_editor_preview(play_id, status)
+        else:
+            # Reconsulta após get_session: a finalização pode ter ocorrido entre os reads.
+            with self._editor_preview_lock:
+                status = dict(self._editor_preview_status.get(play_id, {}))
+            if not status:
+                status = {'playing': False, 'play_id': play_id, 'reason': 'unknown', 'position_known': False}
+        return {'ok': True, 'status': status}
 
     def stop_editor_preview(self, play_id: str) -> dict:
         session = self._audio.get_session(play_id)
